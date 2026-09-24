@@ -1,0 +1,35 @@
+# Runtime inputs/outputs and credentials
+data/
+runs/
+logs/
+logs-*/
+.logs/
+.env
+.env.*
+!.env.example
+
+# Local environments and caches
+.venv/
+venv/
+env/
+.uv-cache/
+.uv-python/
+.mpl-cache/
+.cache-tiktoken/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build and test output
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+*.log
+
+# Editor/OS files
+.DS_Store
+.ipynb_checkpoints/

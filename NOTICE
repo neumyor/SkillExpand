@@ -1,0 +1,10 @@
+SkillExpand
+
+This project includes and modifies agent, prompt, environment, and utility code
+from ExpeL (https://github.com/LeapLabTHU/ExpeL), distributed under Apache License 2.0.
+The original LICENSE is retained. The inherited executor is isolated under
+src/skillexpand/runtime/; benchmark adapters are under src/skillexpand/benchmarks/.
+
+SkillExpand adds experience-card collection, skill discovery, serial candidate
+editing, independent evidence-based review, and held-out evaluation. Upstream
+images and benchmark datasets are not distributed in this source repository.

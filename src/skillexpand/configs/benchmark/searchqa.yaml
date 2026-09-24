@@ -1,0 +1,31 @@
+name: searchqa
+task_prefix: "Question: "
+task_file: data/searchqa/searchqa.json
+max_steps: 7
+num_fewshots: 0
+ai_name: QA system
+env:
+  # SearchQA uses a deterministic local context explorer; this flag is accepted
+  # by the shared config loader for parity with the other environments.
+  show_admissible_commands: false
+
+# Execution adapter shared by L1 and single-attempt held-out evaluation.
+l1:
+  adapter: skillexpand.l1.adapters:SearchQAAdapter
+  card_target_tokens: 400
+  card_limit_tokens: 800
+  action_format_attempts: 4
+  action_only_attempts: 2
+  # Optional overrides: supply inline text OR a repo-relative/absolute UTF-8 file.
+  execution_instructions: null
+  execution_instructions_file: null
+  reflection_instructions: null
+  reflection_instructions_file: null
+  guidance_instructions: null
+  guidance_instructions_file: null
+  selector_instructions: null
+  selector_instructions_file: null
+  action_recovery_instructions: null
+  action_recovery_instructions_file: null
+  extraction_instructions: null
+  extraction_instructions_file: null
