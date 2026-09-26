@@ -56,13 +56,13 @@ def task_batches(items, workers):
 
 
 class ColdStart:
-    def __init__(self,cfg,plan,root,workers=8,k=4,supervised=True,discovery_workers=8,
-                 ask=None,run_units=None,card_batch_size=12):
+    def __init__(self,cfg,plan,root,cold_start_workers=8,k=4,supervised=True,
+                 family_discovery_workers=8, ask=None,run_units=None,card_batch_size=12):
         self.cfg,self.plan,self.root=cfg,plan,Path(root)
-        self.workers,self.k,self.supervised=workers,k,supervised
-        self.discovery_workers=discovery_workers
+        self.cold_start_workers,self.k,self.supervised=cold_start_workers,k,supervised
+        self.family_discovery_workers=family_discovery_workers
         self.card_batch_size=card_batch_size
-        if min(workers,discovery_workers,k,card_batch_size)<1:
+        if min(cold_start_workers,family_discovery_workers,k,card_batch_size)<1:
             raise ValueError('cold-start budgets must be positive')
         self._ask=ask
         self._run_units=run_units or PL.run_generic
@@ -111,7 +111,7 @@ class ColdStart:
             raise ValueError('A cold start requires source tasks')
         results=self.directory/'results';results.mkdir(exist_ok=True)
         pending=[t for t in source if not (results/f'{t}.json').exists()]
-        for batch,width in task_batches(pending,self.workers):
+        for batch,width in task_batches(pending,self.cold_start_workers):
             specs=[PL.ExperienceSpec(unit_id=f'discovery:{t}',benchmark=self.plan.benchmark,
                 task_id=t,family_id='unassigned',split=S.SPLIT_SOURCE,skill_aware=False,
                 selection_source=S.SELECTION_UNSKILLED,max_trials=self.k,
@@ -163,7 +163,7 @@ class ColdStart:
                 tags.extend(FD.parse_tags({'tags':[json.loads(path.read_text())]},[t]))
         done={t.task_id for t in tags}
         pending=[t for t in sorted(cards) if t not in done]
-        for batch,width in task_batches(pending,self.discovery_workers):
+        for batch,width in task_batches(pending,self.family_discovery_workers):
             tags.extend(FD.tag_tasks({t:json.dumps(cards[t],ensure_ascii=False) for t in batch},self.ask,
                 on_tag=lambda tag:save(tags_dir/f'{tag.task_id}.json',tag.to_dict()),max_workers=width))
         tags=tuple(sorted(tags,key=lambda t:t.task_id))
@@ -181,7 +181,7 @@ class ColdStart:
             if path.exists():
                 assignments.extend(FD.parse_assignments({'assignments':[json.loads(path.read_text())]},[t],proposals))
         pending=[t for t in tags if t.task_id not in {a.task_id for a in assignments}]
-        for batch,width in task_batches(pending,self.discovery_workers):
+        for batch,width in task_batches(pending,self.family_discovery_workers):
             assignments.extend(FD.assign_families(batch,proposals,self.ask,batch_size=width,task_cards=cards,
                 on_batch=lambda items:[save(assignment_dir/f'{a.task_id}.json',a.to_dict()) for a in items]))
         clusters=FD.make_family_plan(self.plan.benchmark,tags,proposals,assignments)

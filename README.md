@@ -70,7 +70,7 @@ SearchQA 从 `--task-file` 指定的 JSON/JSONL 读取 question、answer(s) 和 
   --benchmark searchqa --task-file /absolute/path/tasks.json \
   --split-file /absolute/path/splits.json \
   --run-dir runs/searchqa-example --phase cold-start \
-  --workers 8 --discovery-workers 8
+  --cold-start-workers 8 --family-discovery-workers 8
 
 # 2. 以同一目录续跑两轮 Skill-aware L1 → L2。
 .venv/bin/python -m skillexpand \

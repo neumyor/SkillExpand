@@ -1,4 +1,4 @@
-"""Complete L1 cold start, then serial L2, with independently invoked final evaluation."""
+"""Complete L1 cold start, then batch-local L2 card review, with independent final evaluation."""
 
 import argparse
 import json
@@ -37,9 +37,13 @@ def build_parser():
     p.add_argument("--split-file")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
-        "--workers", type=int, default=8, help="Concurrent L1 units within cold start"
+        "--cold-start-workers", type=int, default=8,
+        help="Concurrent source-task L1 units during cold start"
     )
-    p.add_argument("--discovery-workers", type=int, default=8)
+    p.add_argument(
+        "--family-discovery-workers", type=int, default=8,
+        help="Concurrent capability-tag and family-assignment requests"
+    )
     p.add_argument("--autonomous-attempts", type=int, default=4)
     p.add_argument("--no-supervised-repair", action="store_true")
     p.add_argument(
@@ -56,11 +60,13 @@ def build_parser():
         help="Number of Skill-aware L1 -> L2 evolution rounds")
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent source tasks during each Skill-aware L1 round")
+    p.add_argument("--l2-review-workers", type=int, default=8,
+        help="Concurrent per-card LLM reviews within each L2 batch")
     p.add_argument(
-        "--panel-workers",
+        "--final-workers",
         type=int,
         default=4,
-        help="Concurrent final routing/evaluation tasks; L2 review is serial",
+        help="Concurrent final routing and evaluation tasks",
     )
     p.add_argument("--resume", action="store_true")
     p.add_argument("--show-plan", action="store_true")
@@ -115,12 +121,12 @@ def load_clustered_plan(root, plan):
     )
 
 
-def final_evaluate(cfg, plan, root, workers):
+def final_evaluate(cfg, plan, root, final_workers):
     with L.RunLock(root / 'run.pid'):
-        return _final_evaluate(cfg, plan, root, workers)
+        return _final_evaluate(cfg, plan, root, final_workers)
 
 
-def _final_evaluate(cfg, plan, root, workers):
+def _final_evaluate(cfg, plan, root, final_workers):
     if any((root / 'evolution').glob('round-*/input.json')):
         from skillexpand.l2.audit import audit_round
         status = json.loads((root / 'summary.json').read_text())
@@ -148,10 +154,10 @@ def _final_evaluate(cfg, plan, root, workers):
     # Final questions/results are first accessed here. The initial descriptions are
     # the immutable routing reference; L2 never executes admission or final.
     routes = FrozenRoutes(
-        cfg, plan, initial, root / "routes", S.SPLIT_FINAL, workers
+        cfg, plan, initial, root / "routes", S.SPLIT_FINAL, final_workers
     ).run()
     scorer = VA.FixedSkillScorer(
-        cfg, VA.ScoreCache(target / "scores.jsonl"), routes, workers
+        cfg, VA.ScoreCache(target / "scores.jsonl"), routes, final_workers
     )
     C.freeze(target / 'score_protocol.json', {'hash': scorer.protocol_hash})
     per_skill = {}
@@ -190,7 +196,8 @@ def main(argv=None):
     root = Path(args.run_dir).resolve()
     if any(
         not 1 <= n <= 256
-        for n in (args.workers, args.discovery_workers, args.panel_workers, args.evolve_l1_workers)
+        for n in (args.cold_start_workers, args.family_discovery_workers,
+                  args.evolve_l1_workers, args.l2_review_workers, args.final_workers)
     ):
         raise ValueError("Worker counts must be between 1 and 256")
     if args.cold_start_dir and args.phase == "cold-start":
@@ -252,17 +259,18 @@ def main(argv=None):
                 cfg,
                 plan,
                 root,
-                workers=args.workers,
+                cold_start_workers=args.cold_start_workers,
                 k=args.autonomous_attempts,
                 supervised=not args.no_supervised_repair,
-                discovery_workers=args.discovery_workers,
+                family_discovery_workers=args.family_discovery_workers,
             ).run()
         if args.phase in ("l2", "evolve", "all"):
             config = L.EvolutionConfig(
                 batch_size=args.batch_size,
                 candidate_count=args.candidate_count,
                 evolve_rounds=args.evolve_rounds,
-                l1_workers=args.evolve_l1_workers,
+                evolve_l1_workers=args.evolve_l1_workers,
+                l2_review_workers=args.l2_review_workers,
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config)
             # All evolution entry points execute Skill-aware L1 before L2.
@@ -271,7 +279,7 @@ def main(argv=None):
         elif args.phase == "final":
             print(
                 json.dumps(
-                    final_evaluate(cfg, plan, root, args.panel_workers), indent=2
+                    final_evaluate(cfg, plan, root, args.final_workers), indent=2
                 )
             )
     finally:

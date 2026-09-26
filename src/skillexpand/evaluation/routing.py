@@ -48,11 +48,11 @@ def route_task(spec):
 
 
 class FrozenRoutes:
-    def __init__(self, cfg, plan, library, root, split, workers=4):
+    def __init__(self, cfg, plan, library, root, split, final_workers=4):
         if split not in (S.SPLIT_ADMISSION, S.SPLIT_FINAL):
             raise ValueError("Only held-out tasks are routed")
         self.cfg, self.plan, self.split = cfg, plan, split
-        self.root, self.workers = Path(root) / split, workers
+        self.root, self.final_workers = Path(root) / split, final_workers
         self.ids = tuple(sorted(plan.tasks_in(split)))
         self.descriptions = tuple(
             {"skill_id": s.skill_id, "description": s.description}
@@ -103,7 +103,7 @@ class FrozenRoutes:
             self._add(record)
             save(self.root / "tasks" / f"{task_id}.json", record)
 
-        PL.run_generic(pending, route_task, workers=self.workers, on_result=sink)
+        PL.run_generic(pending, route_task, workers=self.final_workers, on_result=sink)
         if errors or set(self.records) != set(self.ids):
             raise RuntimeError(
                 "Routing incomplete; resume retries only provider failures or missing tasks"

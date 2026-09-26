@@ -24,11 +24,13 @@ from skillexpand.runtime import parallel as PL
 class EvolutionConfig:
     batch_size: int = 50
     candidate_count: int = 3
-    l1_workers: int = 8
+    evolve_l1_workers: int = 8
+    l2_review_workers: int = 8
     evolve_rounds: int = 1
 
     def __post_init__(self):
-        if min(self.batch_size, self.candidate_count, self.l1_workers, self.evolve_rounds) < 1:
+        if min(self.batch_size, self.candidate_count, self.evolve_l1_workers,
+               self.l2_review_workers, self.evolve_rounds) < 1:
             raise ValueError("Evolution budgets must be positive")
 
     def to_dict(self):
@@ -244,13 +246,19 @@ class SerialEvolutionLoop:
         host = F.build_reasoning_host(
             self.cfg, self.paths.root / "usage" / f"editor-{skill.skill_id}.json"
         )
-        reviewer_host = F.build_reasoning_host(
-            self.cfg, self.paths.root / "usage" / f"reviewer-{skill.skill_id}.json"
-        )
+        def reviewer_factory(card):
+            card_key = S.content_hash(card)
+            host = F.build_reasoning_host(
+                self.cfg,
+                self.paths.root / "usage" / f"reviewer-{skill.skill_id}-{card_key}.json",
+            )
+            return CardReviewer(host)
+
         runner = UP.SkillPatchRunner(
             ED.SkillEditor(host, self.meta.head(), self.cfg.agent.max_num_rules),
-            CardReviewer(reviewer_host),
+            None,
             self.paths.root / "l2_proposals",
+            reviewer_factory=reviewer_factory,
         )
         pattern_path = self.paths.root / 'l2_patterns' / (batch['batch_id'] + '.json')
         if pattern_path.exists():
@@ -261,7 +269,8 @@ class SerialEvolutionLoop:
                 'raw': None, 'patterns': [], 'status': 'insufficient_cards'}
             save(pattern_path, patterns)
         result = runner.run(skill, evidence, self.config.candidate_count,
-                            batch_patterns=patterns['patterns'])
+                            batch_patterns=patterns['patterns'],
+                            l2_review_workers=self.config.l2_review_workers)
         value = dict(
             batch,
             **result.record,
@@ -367,7 +376,7 @@ class SerialEvolutionLoop:
             self._check_card(exp, task_id, round_index, skills)
             save(results_dir / f"{exp.task_id}.json", record['experience'])
         if specs:
-            PL.run_generic(specs, PL.execute_experience, workers=self.config.l1_workers,
+            PL.run_generic(specs, PL.execute_experience, workers=self.config.evolve_l1_workers,
                            on_result=sink)
         if errors:
             raise RuntimeError(f"Evolution L1 interrupted on {len(errors)} tasks")

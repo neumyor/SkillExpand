@@ -84,7 +84,7 @@ $ALFWORLD_PYTHON -m skillexpand \
 .venv/bin/python -m skillexpand \
   --benchmark searchqa --task-file /absolute/path/tasks.json \
   --split-file /absolute/path/splits.json --run-dir runs/new-searchqa \
-  --phase cold-start --workers 8 --discovery-workers 8
+  --phase cold-start --cold-start-workers 8 --family-discovery-workers 8
 ```
 
 未提供划分时，使用 seed=42 的全局 50/25/25。官方数据来源划分须显式提供。
@@ -95,10 +95,13 @@ $ALFWORLD_PYTHON -m skillexpand \
 
 - `--batch-size`：每批 L2 的 source 卡数，默认 50；小组和尾批也执行。
 - `--candidate-count`：每批独立候选数量，默认 3；先生成不同修改假设，当前批次卡上独立评审，证据不足或无法分出优劣则保留原版。
-- `--panel-workers`：仅 final 路由/执行的并发数，默认 4；L2 编辑和评审串行。
-- `--evolve-l1-workers`：每轮 source L1 的并发数，默认 8。
-- `--workers`、`--discovery-workers`、`--autonomous-attempts`、`--no-supervised-repair`
-  只影响新冷启动。导入已完成冷启动不会改变原来的 L1 预算。
+- `--cold-start-workers`：冷启动 source 任务 L1 的并发数，默认 8。
+- `--family-discovery-workers`：能力标签提取与 family 指派请求的并发数，默认 8。
+- `--evolve-l1-workers`：每轮 Skill-aware source L1 的并发数，默认 8。
+- `--l2-review-workers`：单个 L2 batch 内逐卡 reviewer 请求的并发数，默认 8；
+  batch 与 round 仍按顺序处理。
+- `--final-workers`：final 路由与执行的并发数，默认 4。
+- 以上并发参数只影响新启动的相应阶段；导入已完成冷启动不会改变其冻结的 L1 预算。
 
 移除了在线阈值/新增经验重试/池容量、`--l2-jobs`、`--wave-size`、`--max-waves`、
 `--panel-size`。L2 不使用 admission；只评审当前批次经验卡。
@@ -108,7 +111,7 @@ $ALFWORLD_PYTHON -m skillexpand \
 ```bash
 .venv/bin/python -m skillexpand \
   --benchmark searchqa --run-dir runs/searchqa-evolve --phase final --resume \
-  --panel-workers 4
+  --final-workers 4
 ```
 
 使用初始 description 冻结 final 路由，使用最终 body 执行。

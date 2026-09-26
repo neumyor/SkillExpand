@@ -140,8 +140,8 @@ class ExperienceFirstTests(unittest.TestCase):
             self.plan,
             self.root,
             k=1,
-            workers=2,
-            discovery_workers=2,
+            cold_start_workers=2,
+            family_discovery_workers=2,
             ask=self.ask,
             run_units=self.units,
             card_batch_size=1,
@@ -182,7 +182,7 @@ class ExperienceFirstTests(unittest.TestCase):
         self.assertEqual(evolve.load_clustered_plan(self.root, self.plan), plan)
 
     def test_initial_pattern_cache_is_reused_and_checked(self):
-        cold=C.ColdStart(self.cfg,self.plan,self.root,workers=1,discovery_workers=1,
+        cold=C.ColdStart(self.cfg,self.plan,self.root,cold_start_workers=1,family_discovery_workers=1,
                          k=1,supervised=False,ask=self.ask,run_units=self.units,card_batch_size=2)
         cold.run()
         path=self.root/'discovery/initial_skills/family-p001-0-patterns.json'
@@ -220,7 +220,7 @@ class ExperienceFirstTests(unittest.TestCase):
                           Model(['Action 1: Search[Prius]','Action 2: Finish[Toyota]']))):
                     on_result(worker(spec))
 
-        cold=C.ColdStart(self.cfg,self.plan,self.root,workers=1,discovery_workers=1,
+        cold=C.ColdStart(self.cfg,self.plan,self.root,cold_start_workers=1,family_discovery_workers=1,
                          k=1,supervised=False,ask=ask,run_units=units,card_batch_size=2)
         cold.run()
         patterns=json.loads((self.root/'discovery/initial_skills/family-p001-0-patterns.json').read_text())

@@ -1,6 +1,8 @@
 """Offline integration checks of serial L2, real local SearchQA execution and resume."""
 
 import json
+import threading
+import time
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -158,6 +160,39 @@ class SerialL2Tests(unittest.TestCase):
             F, "build_reasoning_host", side_effect=AssertionError("resume model")
         ):
             self.assertEqual(restored.run(), summary)
+
+    def test_card_reviews_use_bounded_pool_and_keep_card_order(self):
+        driver = self.prepared(batch_size=50, l2_review_workers=2)
+        editor, reviewer = self.hosts(driver)
+        lock = threading.Lock()
+        active = 0
+        peak = 0
+        original = reviewer.llm
+
+        def overlapping(messages, **kwargs):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                time.sleep(0.03)
+                return original(messages, **kwargs)
+            finally:
+                with lock:
+                    active -= 1
+
+        reviewer.llm = overlapping
+        def factory(cfg, path):
+            return reviewer if "reviewer-" in str(path) else editor
+
+        with patch.object(F, "build_reasoning_host", side_effect=factory), patch.object(
+            PL, "run_generic", side_effect=self.units
+        ):
+            driver.run()
+        self.assertGreaterEqual(peak, 2)
+        batch = json.loads(next((self.root / "l2_batches").glob("*.json")).read_text())
+        card_ids = [item["card_id"] for item in batch["reviews"][0]["judgments"]]
+        self.assertEqual([card_id.rsplit(":", 1)[-1] for card_id in card_ids], ["0", "1"])
 
     def test_review_failure_resumes_saved_generation(self):
         driver = self.prepared(batch_size=50)

@@ -14,7 +14,7 @@ spec.loader.exec_module(C)
 
 @pytest.fixture
 def campaign(tmp_path, monkeypatch):
-    manifest = {'repo': str(tmp_path), 'python': 'python', 'workers': C.WORKERS,
+    manifest = {'repo': str(tmp_path), 'python': 'python', 'concurrency': C.CONCURRENCY,
                 'autonomous_attempts': 4, 'batch_size': 50, 'candidate_count': 3}
     C.save(tmp_path / 'manifest.json', manifest)
     monkeypatch.setattr(C, 'verify', lambda root: manifest)
@@ -58,12 +58,18 @@ def test_failure_stops_following_stages_and_bounds_retries(campaign, monkeypatch
 
 
 def test_explicit_stage_arguments_and_concurrency(campaign):
-    for benchmark, expected in C.WORKERS.items():
+    for benchmark, expected in C.CONCURRENCY.items():
         for stage in C.STAGES:
             args = C.stage_args(campaign, 'full', benchmark, stage)
             assert '--resume' in args
-            for flag in ('--workers', '--discovery-workers', '--evolve-l1-workers', '--panel-workers'):
-                assert args[args.index(flag) + 1] == str(expected)
+            for flag, key in (
+                ('--cold-start-workers', 'cold_start_workers'),
+                ('--family-discovery-workers', 'family_discovery_workers'),
+                ('--evolve-l1-workers', 'evolve_l1_workers'),
+                ('--l2-review-workers', 'l2_review_workers'),
+                ('--final-workers', 'final_workers'),
+            ):
+                assert args[args.index(flag) + 1] == str(expected[key])
             if stage.startswith('evolve-'):
                 assert args[args.index('--evolve-rounds') + 1] == stage[-1]
             assert args[args.index('--task-file') + 1].endswith(f'{benchmark}-tasks.json')

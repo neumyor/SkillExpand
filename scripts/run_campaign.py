@@ -17,7 +17,22 @@ import urllib.request
 
 BENCHMARKS = ('searchqa', 'alfworld')
 STAGES = ('cold-start', 'evolve-1', 'evolve-2')
-WORKERS = {'searchqa': 128, 'alfworld': 32}
+CONCURRENCY = {
+    'searchqa': {
+        'cold_start_workers': 128,
+        'family_discovery_workers': 128,
+        'evolve_l1_workers': 128,
+        'l2_review_workers': 8,
+        'final_workers': 128,
+    },
+    'alfworld': {
+        'cold_start_workers': 32,
+        'family_discovery_workers': 32,
+        'evolve_l1_workers': 32,
+        'l2_review_workers': 8,
+        'final_workers': 32,
+    },
+}
 REQUEST_INTERVAL_SECONDS = 0.5
 RETRY_DELAYS = (15, 60, 180)
 
@@ -116,7 +131,7 @@ def prepare(root, inputs):
              for p in sorted((root / folder).rglob('*')) if p.is_file()}
     manifest = {
         'schema': 1, 'repo': str(repo), **runtime,
-        'workers': WORKERS, 'evolve_rounds': 2, 'autonomous_attempts': 4,
+        'concurrency': CONCURRENCY, 'evolve_rounds': 2, 'autonomous_attempts': 4,
         'batch_size': 50, 'candidate_count': 3, 'benchmarks': details,
         'request_interval_seconds': REQUEST_INTERVAL_SECONDS,
         'files': files, 'created': time.time(),
@@ -133,7 +148,7 @@ def verify(root):
     for relative, expected in manifest['files'].items():
         if digest(root / relative) != expected:
             raise ValueError(f'Frozen campaign file changed: {relative}')
-    if (not manifest['model'] or manifest['workers'] != WORKERS or
+    if (not manifest['model'] or manifest['concurrency'] != CONCURRENCY or
             manifest['evolve_rounds'] != 2 or
             manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
         raise ValueError('Unexpected campaign protocol')
@@ -196,13 +211,16 @@ def health(root):
 
 def stage_args(root, mode, benchmark, stage):
     manifest = read(root / 'manifest.json')
-    workers = manifest['workers'][benchmark]
+    concurrency = manifest['concurrency'][benchmark]
     suffix = '-preflight' if mode == 'preflight' else ''
     args = ['--benchmark', benchmark, '--run-dir', str(root / mode / benchmark / 'run'),
         '--task-file', str(root / 'inputs' / f'{benchmark}{suffix}-tasks.json'),
         '--split-file', str(root / 'inputs' / f'{benchmark}{suffix}-split.json'),
-        '--workers', str(workers), '--discovery-workers', str(workers),
-        '--evolve-l1-workers', str(workers), '--panel-workers', str(workers),
+        '--cold-start-workers', str(concurrency['cold_start_workers']),
+        '--family-discovery-workers', str(concurrency['family_discovery_workers']),
+        '--evolve-l1-workers', str(concurrency['evolve_l1_workers']),
+        '--l2-review-workers', str(concurrency['l2_review_workers']),
+        '--final-workers', str(concurrency['final_workers']),
         '--autonomous-attempts', str(manifest['autonomous_attempts']), '--batch-size', str(manifest['batch_size']),
         '--candidate-count', str(manifest['candidate_count']), '--resume']
     if stage.startswith('evolve-'):
@@ -453,7 +471,8 @@ def main():
         print(json.dumps({'root': str(root), 'benchmarks': result['benchmarks'], 'model': result['model']}))
     elif args.action == 'check':
         result = verify(root)
-        print(json.dumps({'verified': True, 'model': result['model'], 'workers': result['workers'],
+        print(json.dumps({'verified': True, 'model': result['model'],
+                          'concurrency': result['concurrency'],
                           'benchmarks': result['benchmarks']}))
     elif args.action == 'health':
         print(json.dumps(health(root)))

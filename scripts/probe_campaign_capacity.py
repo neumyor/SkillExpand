@@ -23,12 +23,17 @@ def main():
     parser.add_argument('--interval', type=float, default=0)
     parser.add_argument('--name', default='capacity')
     parser.add_argument('--rounds', type=int, default=1)
+    parser.add_argument('--stage', choices=(
+        'cold_start_workers', 'family_discovery_workers', 'evolve_l1_workers',
+        'l2_review_workers', 'final_workers'), default='cold_start_workers')
     args = parser.parse_args()
     if args.interval < 0 or args.rounds < 1 or not args.name.replace('-', '').isalnum():
         parser.error('interval must be nonnegative, rounds positive, and name alphanumeric or hyphenated')
     root = args.root.resolve()
     manifest = json.loads((root / 'manifest.json').read_text())
-    workers = manifest['workers']
+    concurrency = manifest['concurrency']
+    workers = {benchmark: settings[args.stage]
+               for benchmark, settings in concurrency.items()}
     output = root / 'preflight' / args.name
     units = [(round_id, benchmark, index) for round_id in range(args.rounds)
              for benchmark, count in workers.items() for index in range(count)]
@@ -73,7 +78,7 @@ def main():
             future.result()
     results = [json.loads((output / f'{round_id}-{benchmark}-{index}.json').read_text())
                for round_id, benchmark, index in units]
-    summary = {'workers': workers, 'interval': args.interval,
+    summary = {'stage': args.stage, 'workers': workers, 'interval': args.interval,
                'rounds': args.rounds, 'total': len(results),
                'ok': sum(row['status'] == 'ok' for row in results),
                'http_429': sum(row.get('http_status') == 429 for row in results),

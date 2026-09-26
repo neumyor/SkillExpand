@@ -24,11 +24,11 @@ def main():
     p.add_argument('--run-dir', type=Path, required=True)
     p.add_argument('--round', type=int, required=True)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--workers', type=int, default=256)
+    p.add_argument('--final-workers', type=int, default=256)
     p.add_argument('--smoke', action='store_true')
     args = p.parse_args()
-    if not 1 <= args.workers <= 256:
-        raise ValueError('workers must be between 1 and 256')
+    if not 1 <= args.final_workers <= 256:
+        raise ValueError('final-workers must be between 1 and 256')
     run = args.run_dir.resolve()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -49,23 +49,28 @@ def main():
     freeze(output / 'library.json', [S.to_dict(s) for s in skills])
     protocol_path = output / 'protocol.json'
     # Worker count is scheduling metadata, not part of the scorer cache key.
-    # Preserve the historical file and check all experimental fields unchanged.
-    original_workers = json.loads(protocol_path.read_text()).get('workers', args.workers) if protocol_path.exists() else args.workers
+    # Keep the first value written for resumable evaluation metadata.
+    original_final_workers = (json.loads(protocol_path.read_text()).get(
+        'final_workers', args.final_workers) if protocol_path.exists()
+        else args.final_workers)
     freeze(protocol_path, {
         'round': args.round, 'library_hash': library_fingerprint(skills),
         'code': code_signature(), 'provider': provider_signature(),
         'routing_reference': [S.to_dict(s) for s in initial],
-        'workers': original_workers, 'execution': 'fixed-skill-single-attempt-v1',
+        'final_workers': original_final_workers,
+        'execution': 'fixed-skill-single-attempt-v1',
     })
     save(output / 'executions' / f'{time.time_ns()}-{os.getpid()}.json',
-         {'pid': os.getpid(), 'workers': args.workers, 'started': time.time(),
-          'round': args.round, 'original_workers': original_workers})
-    routes = FrozenRoutes(cfg, plan, initial, run / 'routes', S.SPLIT_FINAL, args.workers)
+         {'pid': os.getpid(), 'final_workers': args.final_workers, 'started': time.time(),
+          'round': args.round, 'original_final_workers': original_final_workers})
+    routes = FrozenRoutes(cfg, plan, initial, run / 'routes', S.SPLIT_FINAL,
+                          args.final_workers)
     for task in routes.ids:
         routes._add(json.loads((run / 'routes/final/tasks' / f'{task}.json').read_text()))
     if set(routes.records) != set(routes.ids):
         raise ValueError('Missing frozen final routes')
-    scorer = FixedSkillScorer(cfg, ScoreCache(output / 'scores.jsonl'), routes, args.workers)
+    scorer = FixedSkillScorer(cfg, ScoreCache(output / 'scores.jsonl'), routes,
+                              args.final_workers)
     freeze(output / 'score_protocol.json', {'hash': scorer.protocol_hash})
     per_skill = {}
     failed_skills = []
@@ -100,7 +105,7 @@ def main():
               'routing_reference': 'initial_skills', 'tasks': total, 'successes': successes,
               'score': successes / total if total else None,
               'per_skill': per_skill, 'routing_failures': list(routes.failed_task_ids),
-              'workers': args.workers}
+              'final_workers': args.final_workers}
     save(output / 'summary.json', result)
     if args.smoke:
         save(output / 'smoke.json', {'status': 'passed', 'tasks': sum(x['tasks'] for x in per_skill.values())})

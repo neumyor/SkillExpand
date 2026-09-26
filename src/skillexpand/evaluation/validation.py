@@ -189,8 +189,8 @@ def library_fingerprint(skills):
 class FixedSkillScorer:
     """Paired execution on one Skill's immutable selector-assigned task group."""
 
-    def __init__(self, cfg, cache, routes, workers=4):
-        self.benchmark, self.cache, self.workers = cfg.benchmark.name, cache, workers
+    def __init__(self, cfg, cache, routes, final_workers=4):
+        self.benchmark, self.cache, self.final_workers = cfg.benchmark.name, cache, final_workers
         from omegaconf import OmegaConf
         from skillexpand.l1.adapters import resolve
         from skillexpand.l1.adapters import PROMPT_FIELDS
@@ -285,7 +285,7 @@ class FixedSkillScorer:
             self.cache.put(keys[t], stored)
             records[t] = stored
 
-        PL.run_generic(pending, PL.execute_fixed, workers=self.workers, on_result=sink)
+        PL.run_generic(pending, PL.execute_fixed, workers=self.final_workers, on_result=sink)
         if errors or set(records) != set(task_ids):
             raise RuntimeError(
                 "Incomplete Skill evaluation; resume retries failed units"

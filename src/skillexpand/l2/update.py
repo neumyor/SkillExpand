@@ -2,6 +2,7 @@
 
 import difflib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from skillexpand.l2 import editor as ED
@@ -62,11 +63,14 @@ def parse_plan(raw, experiences, limit):
 
 
 class SkillPatchRunner:
-    def __init__(self, editor, reviewer, audit_dir, read_only=False):
+    def __init__(self, editor, reviewer, audit_dir, read_only=False,
+                 reviewer_factory=None):
         self.editor, self.reviewer, self.audit_dir = editor, reviewer, Path(audit_dir)
         self.read_only = read_only
+        self.reviewer_factory = reviewer_factory
 
-    def run(self, base_skill, experiences, candidate_count=3, batch_patterns=()):
+    def run(self, base_skill, experiences, candidate_count=3, batch_patterns=(),
+            l2_review_workers=1):
         experiences = tuple(experiences)
         if (
             candidate_count < 1
@@ -77,6 +81,8 @@ class SkillPatchRunner:
             raise ValueError(
                 "Expected a nonempty source batch assigned to this Skill and positive K"
             )
+        if l2_review_workers < 1:
+            raise ValueError("l2_review_workers must be positive")
         identity = S.content_hash(
             {
                 "protocol": PROTOCOL,
@@ -198,23 +204,26 @@ class SkillPatchRunner:
             key: c.candidate_id for key, c in aliases.items()
         }
         cards = card_payload(experiences)
-        units, errors = {}, []
         record["review_protocol"] = PROTOCOL
-        for card in cards:
+        def review_one(card):
             unit_id = S.content_hash(card)
+            reviewer = (self.reviewer_factory(card) if self.reviewer_factory is not None
+                        else self.reviewer)
             raw = cached(
                 "review-" + unit_id,
-                lambda: {"raw": self.reviewer.review(base_skill, payload, card)},
+                lambda: {"raw": reviewer.review(base_skill, payload, card)},
             )
+            parsed = None
+            error = None
             for repair in range(2):
                 try:
-                    units[card["card_id"]] = parse_card_review(
+                    parsed = parse_card_review(
                         raw["raw"], base_skill, payload, card
                     )
                     break
                 except (ValueError, KeyError, TypeError) as exc:
                     if repair:
-                        errors.append({"card_id": card["card_id"], "error": str(exc)})
+                        error = {"card_id": card["card_id"], "error": str(exc)}
                         break
                     correction = {
                         "error": str(exc),
@@ -224,11 +233,26 @@ class SkillPatchRunner:
                     raw = cached(
                         "review-" + unit_id + "-repair",
                         lambda: {
-                            "raw": self.reviewer.review(
+                            "raw": reviewer.review(
                                 base_skill, payload, card, correction=correction
                             )
                         },
                     )
+            return card["card_id"], parsed if error is None else None, error
+
+        pool_workers = min(int(l2_review_workers), len(cards))
+        if pool_workers == 1:
+            reviewed = [review_one(card) for card in cards]
+        else:
+            with ThreadPoolExecutor(max_workers=pool_workers,
+                                    thread_name_prefix="l2-card-review") as pool:
+                # Collect in input order after all calls have been submitted. This
+                # keeps journals and aggregate counts reproducible while the LLM
+                # requests themselves overlap inside the bounded pool.
+                futures = [pool.submit(review_one, card) for card in cards]
+                reviewed = [future.result() for future in futures]
+        units = {card_id: parsed for card_id, parsed, error in reviewed if error is None}
+        errors = [error for _, _, error in reviewed if error is not None]
         record["review_errors"] = errors
         record["reviewed_card_count"] = len(units)
         if errors:
