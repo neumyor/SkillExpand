@@ -173,6 +173,36 @@ def parse_proposals(raw: Mapping[str, Any]) -> tuple[FamilyProposal, ...]:
     return tuple(proposals)
 
 
+def _repair_proposal_ids(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Canonicalize model-chosen opaque IDs when the model ignores the ID contract.
+
+    Family IDs have no semantic content: assignments only use them as references.
+    If one proposal uses a non-canonical ID, rewrite the whole proposal list by
+    row order so every reference remains unique and deterministic. Structural
+    fields and family meanings are untouched; malformed rows still go through the
+    strict parser and are rejected.
+    """
+    rows = raw.get('families') if isinstance(raw, Mapping) else None
+    if not isinstance(rows, list):
+        return raw
+    invalid = any(
+        isinstance(row, Mapping)
+        and not re.fullmatch(r'family-p\d+', str(row.get('family_id') or '').strip())
+        for row in rows
+    )
+    if not invalid:
+        return raw
+    repaired = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, Mapping):
+            repaired.append(row)
+            continue
+        value = dict(row)
+        value['family_id'] = f'family-p{index:03d}'
+        repaired.append(value)
+    return {**raw, 'families': repaired}
+
+
 def parse_assignments(raw: Mapping[str, Any], task_ids: Iterable[int],
                      proposals: Sequence[FamilyProposal]) -> tuple[FamilyAssignment, ...]:
     rows = raw.get('assignments') if isinstance(raw, Mapping) else None
@@ -333,6 +363,7 @@ def propose_families(tags: Sequence[TaskTag], llm: Callable[[str], str],
         'A family must share the same required operations, decision process, operation order, '
         'and completion contract. Do not group by topic or answer entity.\n' + target +
         'For each family return only family_id, name, definition, and trigger_conditions. '
+        'family_id must be an opaque sequential ID exactly matching family-p001, family-p002, and so on. '
         'Trigger conditions are positive task requirements used for routing. Do not return '
         'exclusion criteria or task IDs. Return JSON only with a families list.\n\n' +
         FAMILY_CONTRACT + '\n' + payload
@@ -342,7 +373,7 @@ def propose_families(tags: Sequence[TaskTag], llm: Callable[[str], str],
         try:
             value = _extract_json(llm(prompt if attempt == 0 else
                 prompt + '\nPrevious output was invalid. Return only the requested family taxonomy.'))
-            proposals = parse_proposals(value)
+            proposals = parse_proposals(_repair_proposal_ids(value))
             if target_family_count is not None and len(proposals) != target_family_count:
                 raise DiscoveryError(f'expected exactly {target_family_count} families, got {len(proposals)}')
             return proposals

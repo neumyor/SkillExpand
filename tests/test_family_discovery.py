@@ -79,6 +79,21 @@ def test_proposals_are_taxonomy_only_and_include_all_representative_context():
     assert "Choose the smallest defensible number of families" in prompts[0]
 
 
+def test_noncanonical_model_family_ids_are_repaired_deterministically():
+    tags, _, _ = _fixtures()
+
+    def ask(_prompt):
+        return json.dumps({"families": [
+            {"family_id": "alfworld_lamp_inspection", "name": "lookup",
+             "definition": "lookup and join", "trigger_conditions": ["lookup"]},
+            {"family_id": "put-away", "name": "comparison",
+             "definition": "compare facts", "trigger_conditions": ["compare"]},
+        ]})
+
+    proposals = D.propose_families(tags, ask)
+    assert [item.family_id for item in proposals] == ["family-p001", "family-p002"]
+
+
 def test_old_proposal_fields_are_rejected():
     raw = {"families": [{
         "family_id": "family-p001", "name": "lookup", "definition": "lookup",
