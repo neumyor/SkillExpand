@@ -83,34 +83,28 @@ class ExperienceFirstTests(unittest.TestCase):
                     "capability_summary": "Read maker evidence and return the entity",
                 }
             )
-        if "proposing reusable SOP" in prompt:
+        if "proposing a reusable task family taxonomy" in prompt:
             return json.dumps(
                 {
                     "families": [
                         {
                             "family_id": "family-p001",
-                            "label": "Maker lookup",
+                            "name": "Maker lookup",
                             "definition": "Find a maker in evidence",
-                            "inclusion_criteria": ["maker questions"],
-                            "exclusion_criteria": ["arithmetic"],
-                            "candidate_task_ids": [0],
+                            "trigger_conditions": ["maker questions"],
                         }
                     ]
                 }
             )
-        if "auditing SOP" in prompt:
-            payload = json.loads(prompt.split("auditing SOP", 1)[1].split("\n\n", 1)[1])
+        if "Choose exactly one family" in prompt:
+            payload = json.loads(prompt.rsplit("\n", 1)[-1])
             tid = payload["task"]["task_id"]
             return json.dumps(
                 {
-                    "audits": [
-                        {
-                            "task_id": tid,
-                            "candidate_family_ids": ["family-p001"],
-                            "family_id": "family-p001",
-                            "rationale": "Same evidence lookup operation",
-                        }
-                    ]
+                    "task_id": tid,
+                    "family_id": "family-p001",
+                    "match_type": "direct",
+                    "rationale": "Same evidence lookup operation",
                 }
             )
         if "initial reusable Skill" in prompt:

@@ -169,23 +169,22 @@ class ColdStart:
         tags=tuple(sorted(tags,key=lambda t:t.task_id))
         proposal_path=self.directory/'proposals.json'
         if proposal_path.exists():
-            proposals=FD.parse_proposals(json.loads(proposal_path.read_text()),cards)
+            proposals=FD.parse_proposals(json.loads(proposal_path.read_text()))
         else:
             representatives=FD.select_representatives(tags)
             proposals=FD.propose_families(representatives,self.ask)
-            proposals=FD.expand_proposals(proposals,representatives,tags)
             save(proposal_path,{'families':[p.to_dict() for p in proposals]})
-        audit_dir=self.directory/'audits';audit_dir.mkdir(exist_ok=True)
-        audits=[]
+        assignment_dir=self.directory/'assignments';assignment_dir.mkdir(exist_ok=True)
+        assignments=[]
         for t in sorted(cards):
-            path=audit_dir/f'{t}.json'
+            path=assignment_dir/f'{t}.json'
             if path.exists():
-                audits.extend(FD.parse_audits({'audits':[json.loads(path.read_text())]},[t],proposals))
-        pending=[t for t in tags if t.task_id not in {a.task_id for a in audits}]
+                assignments.extend(FD.parse_assignments({'assignments':[json.loads(path.read_text())]},[t],proposals))
+        pending=[t for t in tags if t.task_id not in {a.task_id for a in assignments}]
         for batch,width in task_batches(pending,self.discovery_workers):
-            audits.extend(FD.audit_families(batch,proposals,self.ask,batch_size=width,task_cards=cards,
-                on_batch=lambda items:[save(audit_dir/f'{a.task_id}.json',a.to_dict()) for a in items]))
-        clusters=FD.make_family_plan(self.plan.benchmark,tags,proposals,audits,mode='experience_cards')
+            assignments.extend(FD.assign_families(batch,proposals,self.ask,batch_size=width,task_cards=cards,
+                on_batch=lambda items:[save(assignment_dir/f'{a.task_id}.json',a.to_dict()) for a in items]))
+        clusters=FD.make_family_plan(self.plan.benchmark,tags,proposals,assignments)
         if set(clusters.task_to_family)!=set(self.plan.tasks_in(S.SPLIT_SOURCE)):
             raise ValueError('Cluster mapping must cover source exactly and exclude held-out tasks')
         freeze(self.root/'clusters.json',clusters.to_dict())
@@ -257,7 +256,7 @@ class ColdStart:
                 current=FD._ask_json(self.ask,prompt,'initial_skill')
                 current=normalize_initial_skill(current)
                 save(path,current)
-            skill=S.Skill(f'{self.plan.benchmark}.{family}',family,0,info['label'],
+            skill=S.Skill(f'{self.plan.benchmark}.{family}',family,0,info['name'],
                 current['description'],current['body'],S.Provenance(
                     rationale='Synthesized from all audited source cards in this cluster',
                     source_experience_ids=tuple(by_id[t].experience_id for t in ids),source_task_ids=tuple(ids)))

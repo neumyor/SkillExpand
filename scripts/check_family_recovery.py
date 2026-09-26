@@ -1,4 +1,4 @@
-"""Probe recovery of the two full-campaign family discovery failures."""
+"""Probe the fresh family taxonomy and forced-choice assignment artifacts."""
 import argparse
 import json
 from pathlib import Path
@@ -24,18 +24,20 @@ def main():
     root = args.root.resolve()
 
     search = root / 'full/searchqa/run/discovery'
-    tags = tuple(S.from_dict(FD.TaskTag, read(path))
-                 for path in sorted((search / 'tags').glob('*.json'),
-                                    key=lambda path: int(path.stem)))
-    representatives = FD.select_representatives(tags)
-    records = sorted((read(path) for path in (search / 'requests').glob('*.json')
-                      if 'proposing reusable SOP families' in read(path).get('input', '')),
-                     key=lambda row: len(row['input']))
-    replies = iter(row['output'] for row in records)
-    proposed = FD.propose_families(representatives, lambda _: next(replies))
-    expanded = FD.expand_proposals(proposed, representatives, tags)
-    if any(len(item.candidate_task_ids) != len(tags) for item in expanded):
-        raise ValueError('SearchQA candidate expansion omitted tasks')
+    tag_paths = sorted((search / 'tags').glob('*.json'), key=lambda path: int(path.stem))
+    tags = FD.parse_tags({'tags': [read(path) for path in tag_paths]},
+                         [int(path.stem) for path in tag_paths])
+    proposals = FD.parse_proposals(read(search / 'proposals.json'))
+    assignment_paths = sorted((search / 'assignments').glob('*.json'),
+                              key=lambda path: int(path.stem))
+    assignments = FD.parse_assignments(
+        {'assignments': [read(path) for path in assignment_paths]},
+        [tag.task_id for tag in tags], proposals)
+    if any('candidate_task_ids' in proposal.to_dict() or
+           'exclusion_criteria' in proposal.to_dict() for proposal in proposals):
+        raise ValueError('SearchQA proposal contains removed membership fields')
+    if {item.task_id for item in assignments} != {tag.task_id for tag in tags}:
+        raise ValueError('SearchQA assignments do not cover every task')
 
     alf = root / 'full/alfworld/run'
     cfg = OmegaConf.load(alf / 'config.json')
@@ -51,6 +53,7 @@ def main():
                             'intermediate action. Assisted traces do not establish autonomous ability.'),
     }
     host = F.build_reasoning_host(cfg, root / 'preflight/family-recovery-34.usage.json')
+
     def ask(prompt):
         value = host.llm([HumanMessage(content=(
             'BENCHMARK RUNTIME CONTEXT (use its actual tools and completion semantics):\n'
@@ -59,20 +62,23 @@ def main():
         return value
 
     directory = alf / 'discovery'
-    tag = FD.TaskTag(**read(directory / 'tags/34.json'))
-    proposals = FD.parse_proposals(read(directory / 'proposals.json'), range(39))
+    tag = FD.parse_tags({'tags': [read(directory / 'tags/34.json')]}, [34])[0]
+    proposals = FD.parse_proposals(read(directory / 'proposals.json'))
     experience = S.from_dict(S.TaskExperience, read(directory / 'results/34.json'))
-    card = projection(experience.experience_card)
-    focused = tuple(item for item in proposals if item.family_id == 'family-p005')
-    result = FD.audit_families((tag,), focused, ask, batch_size=1,
-                               task_cards={34: card})[0]
-    if result.family_id != 'family-p005':
-        raise ValueError(f'ALFWorld task 34 assigned unexpected family {result.family_id}')
-    output = {'searchqa_representatives': len(representatives),
-              'searchqa_families': len(expanded),
-              'searchqa_candidates_per_family': len(tags),
-              'alfworld_task_34_family': result.family_id,
-              'alfworld_task_34_rationale': result.rationale}
+    assignment = FD.assign_families(
+        (tag,), proposals, ask, batch_size=1,
+        task_cards={34: projection(experience.experience_card)},
+    )[0]
+    if assignment.family_id != 'family-p005':
+        raise ValueError(f'ALFWorld task 34 assigned unexpected family {assignment.family_id}')
+    output = {
+        'searchqa_tasks': len(tags),
+        'searchqa_families': len(proposals),
+        'searchqa_assignments': len(assignments),
+        'alfworld_task_34_family': assignment.family_id,
+        'alfworld_task_34_match_type': assignment.match_type,
+        'alfworld_task_34_rationale': assignment.rationale,
+    }
     print(json.dumps(output, ensure_ascii=False))
 
 
