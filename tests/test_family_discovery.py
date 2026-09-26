@@ -147,8 +147,8 @@ def test_incomplete_proposal_cannot_be_hidden_by_candidate_expansion():
     with pytest.raises(D.DiscoveryError, match=r'omit task ids: \[5\]'):
         D.parse_proposals(raw, [0, 5])
     proposals = D.parse_proposals(raw, [0])
-    with pytest.raises(D.DiscoveryError, match=r'omit representative task ids: \[5\]'):
-        D.expand_proposals(proposals, tags, tags)
+    expanded = D.expand_proposals(proposals, tags, tags)
+    assert expanded[0].candidate_task_ids == (0, 5)
 
 
 def test_membership_audit_stops_on_a_missing_family_instead_of_forcing_a_choice():
@@ -167,8 +167,31 @@ def test_membership_audit_stops_on_a_missing_family_instead_of_forcing_a_choice(
 
     with pytest.raises(D.UncoveredFamilyError, match='no proposed family fits task 5'):
         D.audit_families((tag,), proposals, ask, batch_size=1)
-    assert len(prompts) == 1
+    assert len(prompts) == 3
     assert 'Never force a task into an incompatible family' in prompts[0]
+    assert 'Single-object placement does not use a lamp' in prompts[1]
+
+
+def test_membership_audit_rechecks_initial_null_against_task_evidence():
+    tag = D.TaskTag(1, ('examine',), 'examine a CD with a lamp')
+    proposals = (D.FamilyProposal(
+        'family-p001', 'Examine', 'use a lamp to inspect an object',
+        ('examine an object with a lamp',), ('no lamp',), (1,)),)
+    replies = iter((
+        {'audits': [{'task_id': 1, 'candidate_family_ids': ['family-p001'],
+                     'family_id': None, 'rationale': 'the CD was not held in the first attempt'}]},
+        {'audits': [{'task_id': 1, 'candidate_family_ids': ['family-p001'],
+                     'family_id': 'family-p001', 'rationale': 'the goal requires lamp inspection'}]},
+    ))
+    prompts = []
+    def ask(prompt):
+        prompts.append(prompt)
+        return json.dumps(next(replies))
+    audits = D.audit_families((tag,), proposals, ask, batch_size=1,
+                              task_cards={1: {'goal': 'examine the cd with the desklamp'}})
+    assert audits[0].family_id == 'family-p001'
+    assert len(prompts) == 2
+    assert 'the CD was not held in the first attempt' in prompts[1]
 
 
 def test_audit_rejects_fallback_and_splits_failed_batches():

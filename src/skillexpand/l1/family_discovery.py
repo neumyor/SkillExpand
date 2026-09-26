@@ -177,7 +177,8 @@ def parse_tags(raw: Mapping[str, Any], task_ids: Iterable[int]) -> tuple[TaskTag
     return tuple(sorted(tags, key=lambda item: item.task_id))
 
 
-def parse_proposals(raw: Mapping[str, Any], task_ids: Iterable[int]) -> tuple[FamilyProposal, ...]:
+def parse_proposals(raw: Mapping[str, Any], task_ids: Iterable[int],
+                    require_coverage: bool = True) -> tuple[FamilyProposal, ...]:
     rows = raw.get('families') if isinstance(raw, Mapping) else None
     if not isinstance(rows, list) or not rows:
         raise DiscoveryError('proposal artifact must contain a non-empty families list')
@@ -208,7 +209,7 @@ def parse_proposals(raw: Mapping[str, Any], task_ids: Iterable[int]) -> tuple[Fa
         ))
         seen.add(family_id)
         covered.update(candidate_ids)
-    if covered != expected:
+    if require_coverage and covered != expected:
         raise DiscoveryError(
             f'family proposals omit task ids: {sorted(expected - covered)}')
     return tuple(proposals)
@@ -310,13 +311,8 @@ def expand_proposals(proposals: Sequence[FamilyProposal],
                      representatives: Sequence[TaskTag],
                      all_tags: Sequence[TaskTag]) -> tuple[FamilyProposal, ...]:
     """Expand representative proposals into candidate memberships for every task."""
-    representative_ids = {tag.task_id for tag in representatives}
-    covered = {task_id for proposal in proposals for task_id in proposal.candidate_task_ids}
-    if not representative_ids.issubset(covered):
-        raise DiscoveryError(
-            f'family proposals omit representative task ids: {sorted(representative_ids - covered)}')
-    # The tag heuristic must not exclude a semantically valid family. Audit
-    # every card against the complete proposed taxonomy.
+    # Candidate IDs from the proposer are hints only. Audit every card against
+    # the complete taxonomy, including representatives omitted from those hints.
     ids = tuple(sorted(tag.task_id for tag in all_tags))
     return tuple(FamilyProposal(p.family_id, p.label, p.definition,
         p.inclusion_criteria, p.exclusion_criteria, ids) for p in proposals)
@@ -424,11 +420,13 @@ def propose_families(tags: Sequence[TaskTag], llm: Callable[[str], str],
         'candidate_task_ids. Family IDs must be family-p001, family-p002, ...\n\n'
         + FAMILY_CONTRACT + '\n' + payload
     )
-    # The proposer sees only deterministic representatives.  Keep semantic
-    # validation inside the retry loop: a syntactically valid response that uses
-    # task IDs outside the representative set is still unusable for expansion.
+    # The proposer sees only deterministic representatives. Candidate IDs are
+    # hints; semantic membership is decided later for every task by the audit.
     expected_ids = [tag.task_id for tag in tags]
+    expected = set(expected_ids)
     last_error: Exception | None = None
+    best: tuple[FamilyProposal, ...] | None = None
+    best_coverage = -1
     for attempt in range(3):
         try:
             suffix = '' if attempt == 0 else (
@@ -437,19 +435,26 @@ def propose_families(tags: Sequence[TaskTag], llm: Callable[[str], str],
                 'Add a family when the existing definitions exclude a task; do not merely attach '
                 'its ID to an incompatible family. Use only the task IDs shown above.')
             value = _extract_json(llm(prompt + suffix))
-            proposals = parse_proposals(value, expected_ids)
+            proposals = parse_proposals(value, expected_ids, require_coverage=False)
             if target_family_count is not None and len(proposals) != target_family_count:
                 raise DiscoveryError(
                     f'expected exactly {target_family_count} family proposals, got {len(proposals)}')
-            break
+            covered = {task_id for proposal in proposals
+                       for task_id in proposal.candidate_task_ids}
+            if len(covered) > best_coverage:
+                best, best_coverage = proposals, len(covered)
+            if covered == expected:
+                return proposals
+            last_error = DiscoveryError(
+                f'family proposals omit task ids: {sorted(expected - covered)}')
         except Exception as exc:  # provider failures or invalid proposal structure
             last_error = exc
-            if attempt < 2:
-                time.sleep(1.0 * (attempt + 1))
-    else:
-        raise DiscoveryError(
-            f'family proposal failed after 3 attempts: {last_error}') from last_error
-    return proposals
+        if attempt < 2:
+            time.sleep(1.0 * (attempt + 1))
+    if best is not None:
+        return best
+    raise DiscoveryError(
+        f'family proposal failed after 3 attempts: {last_error}') from last_error
 
 
 def audit_families(tags: Sequence[TaskTag], proposals: Sequence[FamilyProposal],
@@ -472,34 +477,50 @@ def audit_families(tags: Sequence[TaskTag], proposals: Sequence[FamilyProposal],
                     proposal.family_id, proposal.label, proposal.definition,
                     proposal.inclusion_criteria, proposal.exclusion_criteria,
                     (task_id,)))
-        payload = json.dumps({
-            'task': tag.to_dict(),
-            'execution_evidence': task_cards.get(task_id) if task_cards is not None else None,
-            'families': [proposal.to_dict() for proposal in prompt_proposals],
-        }, ensure_ascii=False)
-        prompt = (
-            'You are auditing SOP family membership for exactly one task. Choose one '
-            'candidate family only if its inclusion and exclusion criteria fit the task. '
-            'If none fits, use family_id null and explain the missing capability in rationale. '
-            'Never force a task into an incompatible family. Return JSON only with an audits array containing '
-            'exactly one item with task_id, candidate_family_ids, family_id, and rationale. '
-            'Candidate_family_ids must exactly match the proposals. When execution_evidence is provided, '
-            'check the original task and observed actions against the tag summary; do not blindly '
-            'trust a summary that contradicts the actual execution.\n' + FAMILY_CONTRACT + '\n\n' + payload
-        )
+        def prompt_for(candidates):
+            payload = json.dumps({
+                'task': tag.to_dict(),
+                'execution_evidence': task_cards.get(task_id) if task_cards is not None else None,
+                'families': [proposal.to_dict() for proposal in candidates],
+            }, ensure_ascii=False)
+            return (
+                'You are auditing SOP family membership for exactly one task. Choose one '
+                'candidate family only if its inclusion and exclusion criteria fit the task. '
+                'If none fits, use family_id null and explain the missing capability in rationale. '
+                'Never force a task into an incompatible family. Return JSON only with an audits array containing '
+                'exactly one item with task_id, candidate_family_ids, family_id, and rationale. '
+                'Candidate_family_ids must exactly match the proposals. When execution_evidence is provided, '
+                'check the original task and observed actions against the tag summary; do not blindly '
+                'trust a summary that contradicts the actual execution. Membership concerns the '
+                'operations required by the task, even when this execution failed before completing '
+                'them. Do not exclude a multi-object task because the agent only moved one item.\n'
+                + FAMILY_CONTRACT + '\n\n' + payload
+            )
+        prompt = prompt_for(prompt_proposals)
         last_error: Exception | None = None
+        uncovered_rationale = ''
         for attempt in range(3):
             try:
-                suffix = '' if attempt == 0 else (
-                    '\nYour previous audit was structurally invalid. Return exactly one '
-                    'complete audit item with a candidate family_id or null when none fits, and rationale.')
+                if uncovered_rationale:
+                    suffix = ('\nThe previous audit found no matching family because: '
+                              + uncovered_rationale + '\nRecheck the original goal and the '
+                              'execution evidence. An observed action may be optional or an '
+                              'unsuccessful detour; do not turn it into a required family '
+                              'criterion. A failed or partial trace need not demonstrate all '
+                              'steps required by the task goal. Choose a family only when its stated criteria fit '
+                              'the task; otherwise return null again with a specific reason.')
+                elif attempt:
+                    suffix = ('\nYour previous audit was structurally invalid. Return exactly one '
+                              'complete audit item with a candidate family_id or null when none fits, and rationale.')
+                else:
+                    suffix = ''
                 value = _extract_json(llm(prompt + suffix))
                 rows = value.get('audits')
                 if (isinstance(rows, list) and len(rows) == 1 and
                         isinstance(rows[0], Mapping) and rows[0].get('task_id') == task_id and
                         rows[0].get('family_id') in (None, 'unassigned')):
-                    raise UncoveredFamilyError(
-                        f'no proposed family fits task {task_id}: {rows[0].get("rationale", "")}')
+                    uncovered_rationale = str(rows[0].get('rationale', ''))
+                    continue
                 parsed = parse_audits(value, [task_id], proposals)
                 if len(parsed) != 1:
                     raise DiscoveryError(
@@ -511,9 +532,43 @@ def audit_families(tags: Sequence[TaskTag], proposals: Sequence[FamilyProposal],
                 last_error = exc
                 if attempt < 2:
                     time.sleep(1.0 * (attempt + 1))
-        raise DiscoveryError(
-            f'membership audit task {task_id} failed after 3 attempts: {last_error}')\
-            from last_error
+        if not uncovered_rationale:
+            raise DiscoveryError(
+                f'membership audit task {task_id} failed after 3 attempts: {last_error}')\
+                from last_error
+
+        # A weak reviewer can mix criteria from different families. Re-audit
+        # each definition alone before declaring the taxonomy incomplete.
+        focused_matches = []
+        for proposal in prompt_proposals:
+            focused_prompt = prompt_for((proposal,))
+            for attempt in range(2):
+                try:
+                    value = _extract_json(llm(focused_prompt))
+                    rows = value.get('audits')
+                    if (isinstance(rows, list) and len(rows) == 1 and
+                            isinstance(rows[0], Mapping) and
+                            rows[0].get('task_id') == task_id and
+                            rows[0].get('family_id') in (None, 'unassigned')):
+                        break
+                    focused_matches.extend(parse_audits(value, [task_id], (proposal,)))
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt == 1:
+                        raise DiscoveryError(
+                            f'focused membership audit task {task_id} failed: {exc}') from exc
+        if len(focused_matches) == 1:
+            match = focused_matches[0]
+            return MembershipAudit(task_id,
+                tuple(proposal.family_id for proposal in prompt_proposals),
+                match.family_id, match.rationale)
+        if focused_matches:
+            raise DiscoveryError(
+                f'focused membership audit task {task_id} is ambiguous: '
+                f'{[item.family_id for item in focused_matches]}')
+        raise UncoveredFamilyError(
+            f'no proposed family fits task {task_id}: {uncovered_rationale}')
 
     pending_tags = tuple(tag for tag in tags if tag.task_id not in completed)
     for start in range(0, len(pending_tags), batch_size):

@@ -1,11 +1,12 @@
 import time
 import json
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import openai
-from skillexpand.runtime.models.llm import GPTWrapper, request_policy
+from skillexpand.runtime.models.llm import GPTWrapper, request_policy, wait_for_request_slot
 from skillexpand.runtime.deadline import environment_call
 
 
@@ -31,6 +32,18 @@ def test_model_success_not_retried_and_invalid_timeout_rejected():
     for value in ('0', '-1', 'nan', 'inf'):
         with patch.dict('os.environ', EXPE_LLM_TIMEOUT_SECONDS=value), pytest.raises(ValueError):
             request_policy()
+
+
+def test_shared_request_gate_spaces_parallel_calls(tmp_path):
+    gate = tmp_path / 'request-gate.state'
+    with patch.dict('os.environ', EXPE_LLM_GATE_FILE=str(gate),
+                    EXPE_LLM_REQUEST_INTERVAL_SECONDS='0.05'):
+        def call():
+            wait_for_request_slot()
+            return time.monotonic()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            moments = sorted(pool.map(lambda _: call(), range(4)))
+    assert all(b - a >= 0.04 for a, b in zip(moments, moments[1:]))
 
 
 def test_environment_deadline_cancels_timer_after_exception():

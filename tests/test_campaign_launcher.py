@@ -14,7 +14,7 @@ spec.loader.exec_module(C)
 
 @pytest.fixture
 def campaign(tmp_path, monkeypatch):
-    manifest = {'repo': str(tmp_path), 'python': 'python', 'workers': 256,
+    manifest = {'repo': str(tmp_path), 'python': 'python', 'workers': C.WORKERS,
                 'autonomous_attempts': 4, 'batch_size': 50, 'candidate_count': 3}
     C.save(tmp_path / 'manifest.json', manifest)
     monkeypatch.setattr(C, 'verify', lambda root: manifest)
@@ -58,14 +58,15 @@ def test_failure_stops_following_stages_and_bounds_retries(campaign, monkeypatch
 
 
 def test_explicit_stage_arguments_and_concurrency(campaign):
-    for stage in C.STAGES:
-        args = C.stage_args(campaign, 'full', 'alfworld', stage)
-        assert '--resume' in args
-        for flag in ('--workers', '--discovery-workers', '--evolve-l1-workers', '--panel-workers'):
-            assert args[args.index(flag) + 1] == '256'
-        if stage.startswith('evolve-'):
-            assert args[args.index('--evolve-rounds') + 1] == stage[-1]
-        assert args[args.index('--task-file') + 1].endswith('alfworld-tasks.json')
+    for benchmark, expected in C.WORKERS.items():
+        for stage in C.STAGES:
+            args = C.stage_args(campaign, 'full', benchmark, stage)
+            assert '--resume' in args
+            for flag in ('--workers', '--discovery-workers', '--evolve-l1-workers', '--panel-workers'):
+                assert args[args.index(flag) + 1] == str(expected)
+            if stage.startswith('evolve-'):
+                assert args[args.index('--evolve-rounds') + 1] == stage[-1]
+            assert args[args.index('--task-file') + 1].endswith(f'{benchmark}-tasks.json')
 
 
 def test_full_start_requires_matching_preflight(campaign):
@@ -131,6 +132,7 @@ def test_campaign_runtime_uses_local_configuration(tmp_path, monkeypatch):
     assert settings['alfworld_config'] == str(files['ALFWORLD_CONFIG'])
 
     C.save(tmp_path / 'manifest.json', dict(settings, repo=str(tmp_path),
+        request_interval_seconds=C.REQUEST_INTERVAL_SECONDS,
         timeouts={'request': 300, 'request_retries': 2,
                   'environment': 120, 'worker_progress': 3600}))
     monkeypatch.setenv('EXPE_LLM_BASE_URL', 'https://llm.example.invalid/v1')
@@ -138,6 +140,8 @@ def test_campaign_runtime_uses_local_configuration(tmp_path, monkeypatch):
     environment = C.environment(tmp_path)
     assert environment['OPENAI_API_KEY'] == 'test-only-secret'
     assert environment['ALFWORLD_DATA'] == str(directories['ALFWORLD_DATA'])
+    assert environment['EXPE_LLM_GATE_FILE'] == str(tmp_path / 'request-gate.state')
+    assert environment['EXPE_LLM_REQUEST_INTERVAL_SECONDS'] == str(C.REQUEST_INTERVAL_SECONDS)
     assert 'test-only-secret' not in (tmp_path / 'manifest.json').read_text()
 
 

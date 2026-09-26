@@ -48,33 +48,42 @@ def main():
                           json.loads((run / 'evolution/round-2/cards/0.json').read_text()))
         candidates = [
             {'id': 'C1', 'body': base.body + '\nCheck the observation before acting.'},
-            {'id': 'C2', 'body': base.body.splitlines()[0]},
-            {'id': 'C3', 'body': '1. Stop without taking task actions.'},
+            {'id': 'C2', 'body': base.body + '\nKeep the final response concise.'},
+            {'id': 'C3', 'body': base.body + '\nUse the observed feedback to check progress.'},
         ]
         card = CR.card_payload([exp])[0]
         host = F.build_reasoning_host(cfg, root / 'preflight/reviewer-probe' /
                                       f'{benchmark}.usage.json')
         reviewer = CR.CardReviewer(host)
-        probe = root / 'preflight/reviewer-probe' / f'{benchmark}-response.json'
+        probe = root / 'preflight/reviewer-probe' / f'{benchmark}-response-v2.json'
         if probe.exists():
             raw = json.loads(probe.read_text())['raw']
         else:
             raw = reviewer.review(base, candidates, card)
             campaign['save'](probe, {'raw': raw})
         corrected = False
-        try:
-            judgments = CR.parse_card_review(raw, base, candidates, card)
-        except (ValueError, KeyError, TypeError) as exc:
-            correction = {'error': str(exc), 'previous_output': raw,
-                          'instruction': 'Fix coverage and IDs only; cite supplied IDs.'}
-            repair = probe.with_name(probe.stem + '-repair.json')
-            if repair.exists():
-                raw = json.loads(repair.read_text())['raw']
-            else:
-                raw = reviewer.review(base, candidates, card, correction=correction)
-                campaign['save'](repair, {'raw': raw, 'correction': correction})
-            judgments = CR.parse_card_review(raw, base, candidates, card)
-            corrected = True
+        for attempt in range(3):
+            try:
+                judgments = CR.parse_card_review(raw, base, candidates, card)
+                break
+            except (ValueError, KeyError, TypeError) as exc:
+                if attempt == 2:
+                    raise
+                correction = {'error': str(exc),
+                    'instruction': ('Return exactly {"candidates":[{"id":"C1",'
+                        '"evidence_ids":[],"rule_ids":[],"reason":"...",'
+                        '"label":"unknown"}, ...]} with C1, C2, C3 once each. '
+                        'The top-level keys must NOT be C1/C2/C3. '
+                        'Use only supplied IDs; do not use placeholders such as etc. '
+                        'For improve/regress provide at least one card evidence ID and '
+                        'one changed rule ID; otherwise use unchanged or unknown.')}
+                repair = probe.with_name(probe.stem + f'-repair-{attempt + 1}.json')
+                if repair.exists():
+                    raw = json.loads(repair.read_text())['raw']
+                else:
+                    raw = reviewer.review(base, candidates, card, correction=correction)
+                    campaign['save'](repair, {'raw': raw, 'correction': correction})
+                corrected = True
         if len(judgments) != len(candidates):
             raise ValueError(f'{benchmark}: reviewer omitted a candidate')
 

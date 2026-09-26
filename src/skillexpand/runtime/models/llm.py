@@ -1,4 +1,5 @@
 from typing import Callable, List
+import fcntl
 import json
 import os
 import time
@@ -24,6 +25,25 @@ def request_policy():
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('EXPE_LLM_TIMEOUT_SECONDS must be finite and positive')
     return {'timeout': timeout, 'retries': _positive_int_env('EXPE_LLM_RETRIES', 2)}
+
+
+def wait_for_request_slot():
+    path = os.environ.get('EXPE_LLM_GATE_FILE')
+    if not path:
+        return
+    interval = float(os.environ.get('EXPE_LLM_REQUEST_INTERVAL_SECONDS', '0'))
+    if not math.isfinite(interval) or interval <= 0:
+        raise ValueError('EXPE_LLM_REQUEST_INTERVAL_SECONDS must be finite and positive')
+    with open(path, 'a+') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        stream.seek(0)
+        previous = stream.read().strip()
+        deadline = float(previous) if previous else 0.0
+        time.sleep(max(0, deadline - time.time()))
+        stream.seek(0)
+        stream.truncate()
+        stream.write(str(time.time() + interval))
+        stream.flush()
 
 
 #: Environment variable pointing at an OpenAI-compatible endpoint (e.g. a local
@@ -149,6 +169,7 @@ class GPTWrapper:
         retries = self.request_policy['retries']
         for i in range(retries + 1):
             try:
+                wait_for_request_slot()
                 output = self.llm(messages, **kwargs).content.strip('\n').strip()
                 break
             except retryable:

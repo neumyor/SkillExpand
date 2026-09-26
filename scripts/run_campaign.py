@@ -17,7 +17,8 @@ import urllib.request
 
 BENCHMARKS = ('searchqa', 'alfworld')
 STAGES = ('cold-start', 'evolve-1', 'evolve-2')
-WORKERS = 4
+WORKERS = {'searchqa': 128, 'alfworld': 32}
+REQUEST_INTERVAL_SECONDS = 0.5
 RETRY_DELAYS = (15, 60, 180)
 
 
@@ -117,6 +118,7 @@ def prepare(root, inputs):
         'schema': 1, 'repo': str(repo), **runtime,
         'workers': WORKERS, 'evolve_rounds': 2, 'autonomous_attempts': 4,
         'batch_size': 50, 'candidate_count': 3, 'benchmarks': details,
+        'request_interval_seconds': REQUEST_INTERVAL_SECONDS,
         'files': files, 'created': time.time(),
         'metric': 'Source-task first-autonomous-attempt success at cold start, evolve-1, and evolve-2; paired by task.',
         'comparison': 'Report each benchmark independently using the fixed three stages; no best-round selection or held-out execution.',
@@ -131,7 +133,9 @@ def verify(root):
     for relative, expected in manifest['files'].items():
         if digest(root / relative) != expected:
             raise ValueError(f'Frozen campaign file changed: {relative}')
-    if not manifest['model'] or manifest['workers'] != WORKERS or manifest['evolve_rounds'] != 2:
+    if (not manifest['model'] or manifest['workers'] != WORKERS or
+            manifest['evolve_rounds'] != 2 or
+            manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
         raise ValueError('Unexpected campaign protocol')
     for key, kind in (('python', 'file'), ('overlay', 'dir'), ('alfworld_data', 'dir'),
                       ('alfworld_config', 'file'), ('alfworld_bench_src', 'dir')):
@@ -164,6 +168,8 @@ def environment(root):
         MPLCONFIGDIR=str(Path(manifest['repo']) / '.mpl-cache'),
         OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', TOKENIZERS_PARALLELISM='false',
         EXPE_LLM_TIMEOUT_SECONDS=str(timeout['request']), EXPE_LLM_RETRIES=str(timeout['request_retries']),
+        EXPE_LLM_GATE_FILE=str(root / 'request-gate.state'),
+        EXPE_LLM_REQUEST_INTERVAL_SECONDS=str(manifest['request_interval_seconds']),
         EXPE_ENV_TIMEOUT_SECONDS=str(timeout['environment']), EXPE_WORKER_TIMEOUT_SECONDS=str(timeout['worker_progress']))
     return env
 
@@ -190,12 +196,13 @@ def health(root):
 
 def stage_args(root, mode, benchmark, stage):
     manifest = read(root / 'manifest.json')
+    workers = manifest['workers'][benchmark]
     suffix = '-preflight' if mode == 'preflight' else ''
     args = ['--benchmark', benchmark, '--run-dir', str(root / mode / benchmark / 'run'),
         '--task-file', str(root / 'inputs' / f'{benchmark}{suffix}-tasks.json'),
         '--split-file', str(root / 'inputs' / f'{benchmark}{suffix}-split.json'),
-        '--workers', str(manifest['workers']), '--discovery-workers', str(manifest['workers']),
-        '--evolve-l1-workers', str(manifest['workers']), '--panel-workers', str(manifest['workers']),
+        '--workers', str(workers), '--discovery-workers', str(workers),
+        '--evolve-l1-workers', str(workers), '--panel-workers', str(workers),
         '--autonomous-attempts', str(manifest['autonomous_attempts']), '--batch-size', str(manifest['batch_size']),
         '--candidate-count', str(manifest['candidate_count']), '--resume']
     if stage.startswith('evolve-'):
