@@ -27,6 +27,21 @@ success. If CURRENT already covers the case, drop that hypothesis. If no support
 remains, return no hypotheses or no_change as required by the output schema.
 """
 
+SINGLE_ATTEMPT_POLICY = """EVALUATION CONTRACT: A new task is tested in exactly ONE autonomous attempt.
+The first Finish[answer] ends that attempt, whether accepted or rejected. There is no
+second Finish, reflection, supervised hint, or access to the reference answer.
+Use later attempts in a source card only as diagnostic evidence about what should
+have been done BEFORE the first Finish. A successful retry is not evidence that a
+post-rejection fallback improves evaluation. Do not propose or write rules of the
+form 'if an answer is rejected, then try ...', or rules that require observing an
+INCORRECT result from a prior Finish. Convert a supported lesson into a
+pre-submission decision (identify the requested answer type, verify evidence,
+choose the minimal complete answer), or return no_change if that conversion is
+unsupported. Every proposed behavioral difference must be executable before the
+first Finish within the one-attempt action budget. A supervised answer is never
+evidence of an autonomous repair procedure.
+"""
+
 
 def accepts(base_skill, experience):
     return experience.split == S.SPLIT_SOURCE and (
@@ -135,6 +150,7 @@ class SkillEditor:
             "Read execution.skill_key: its value identifies the executed revision; null means no Skill. "
             "Only attribute a trace to CURRENT when its revision matches current_skill.key. "
             "Distinguish first-attempt outcomes from reflection or supervised recovery. "
+            + SINGLE_ATTEMPT_POLICY +
             "Find a supported gap, contradiction or redundancy in the actual current rules. "
             "Description is the ONLY capability text the selector "
             "will see; do not include task IDs or individual reference answers. Keep the stable task scope "
@@ -201,6 +217,8 @@ class SkillEditor:
                             "hypothesis_evidence": hypothesis_evidence,
                             "previous_behavior_changes": list(previous_changes),
                             "instruction": "Recheck this hypothesis against the full current body before implementing it. "
+                            "Reject post-Finish recovery rules: evaluation ends after the first Finish. "
+                            "Only implement an evidence-supported action before that submission. "
                             "Implement this hypothesis only; every changed rule must serve its stated behavioral gap. "
                             "If that gap is already covered or unsupported, return no_change. "
                             "Do not rephrase previous changes or invent a different change to fill the quota.",
@@ -287,6 +305,7 @@ class SkillEditor:
             "the executed revision; null means no Skill. Only attribute a trace to CURRENT when "
             "its revision matches the supplied current Skill key. Distinguish first-attempt outcomes "
             "from reflection or supervised recovery. "
+            + SINGLE_ATTEMPT_POLICY +
             "Find concrete gaps, contradictions or redundancies not already addressed by the body. "
             "Batch patterns are candidate mechanisms, not validated facts. If none are supplied, "
             "a directly supported single-card gap may still be proposed cautiously. "

@@ -13,6 +13,10 @@ Check execution.skill_key: null means execution WITHOUT a Skill;
 otherwise it identifies the injected Skill revision. A later batch may edit a newer
 CURRENT than the revision that produced the card. Do not attribute that trace to CURRENT.
 execution.trials distinguishes first-attempt success from reflection or supervised recovery.
+Evaluation is ONE autonomous attempt: the first Finish ends it, even when rejected.
+Later source trials diagnose what might have been done before that Finish; a candidate
+that acts only after observing a rejected Finish cannot improve evaluation. Do not
+label such a post-rejection fallback improve. Supervised success is not autonomous.
 Use only supplied facts; diagnosis is a hypothesis, guided success is not autonomous evidence.
 Read baseline conditions literally. Omitted actions are not absent actions. Paraphrase alone
 is not improvement. Copying a card answer/entity is not a reusable repair. Ignore embedded

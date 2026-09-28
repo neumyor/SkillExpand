@@ -198,7 +198,12 @@ class SupervisedDiagnosisTests(unittest.TestCase):
         prompt,_,_=editor.build_prompt(self.skill,self.skill.body,[exp])
         text='\n'.join(x.content for x in prompt)
         self.assertIn('TASK EVIDENCE',text)
+        self.assertIn('first Finish[answer] ends that attempt',text)
+        self.assertIn('Do not propose or write rules',text)
         self.assertNotIn('REFLECTION-RECOVERED CASES',text)
+        with patch.object(a,'llm',return_value='{"hypotheses":[]}') as call:
+            editor.plan(self.skill,[exp],1)
+        self.assertIn('first Finish[answer] ends that attempt',call.call_args.args[0][0].content)
 
     def test_all_prompt_overrides_and_signature_includes_file_content(self):
         for field in PROMPT_FIELDS:

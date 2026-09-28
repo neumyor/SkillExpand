@@ -340,6 +340,43 @@ class FinalSynthesisIntegration(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'extraction repair raw output'):
             audit_usage(path,data)
 
+    def test_usage_audit_does_not_match_payload_nested_in_rejected_output(self):
+        from skillexpand.l1.audit import audit_usage
+        path = self.root / 'echoed-input.json'
+        initial = {'hypotheses': {}, 'evidence': {'task': {'text': 'q'}}}
+        initial_raw = json.dumps(initial, ensure_ascii=False)
+        repair = L.repair_input(initial, L.parse(initial_raw, initial['evidence'], True))
+        repair_raw = '{"claims":[]}'
+        data = {'synthesis': {'input': initial, 'raw': initial_raw,
+                             'repair': {'input': repair, 'raw': repair_raw}}}
+        tokens = dict(prompt_tokens=3, completion_tokens=2, total_tokens=5)
+        rows = []
+        for rid, payload, raw in [('initial', initial, initial_raw),
+                                  ('repair', repair, repair_raw)]:
+            prompt = 'Human: extract claims\nHuman: ' + json.dumps(payload, ensure_ascii=False)
+            rows.extend([{'event': 'start', 'run_id': rid, 'prompts': [prompt]},
+                         {'event': 'end', 'run_id': rid, 'provider': {'token_usage': tokens},
+                          'generations': [[{'text': raw}]]}])
+        self.assertIn(initial_raw, rows[2]['prompts'][0])
+        path.with_suffix('.usage.json').write_text(json.dumps(dict(
+            started_requests=2, successful_requests=2, failed_requests=0,
+            prompt_tokens=6, completion_tokens=4, total_tokens=10)))
+        requests = path.with_suffix('.usage.requests.jsonl')
+        def write():
+            requests.write_text('\n'.join(json.dumps(row) for row in rows))
+        write()
+        self.assertEqual(audit_usage(path, data)['requests'], 2)
+        # A nested copy cannot stand in for the missing original request.
+        rows[0]['prompts'] = ['Human: another request']
+        write()
+        with self.assertRaisesRegex(ValueError, 'No logged request contains the extraction input'):
+            audit_usage(path, data)
+        rows[0]['prompts'] = ['Human: extract claims\nHuman: ' + initial_raw]
+        write()
+        data['synthesis']['raw'] = 'invented'
+        with self.assertRaisesRegex(ValueError, 'extraction raw output differs'):
+            audit_usage(path, data)
+
     def test_direct_success_gets_one_synthesis_and_resume_does_not_resample(self):
         a,m=self.agent(['Action 1: Search[Prius]','Action 2: Finish[Toyota]'])
         m.synthesis=output('t1:e1',instruction='Search Prius and answer from the maker in the returned document.')

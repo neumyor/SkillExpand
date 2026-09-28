@@ -132,8 +132,12 @@ def audit_usage(checkpoint, data=None):
         synthesis = data['synthesis']
         def verify_response(payload, raw, stage):
             serialized = json.dumps(payload, ensure_ascii=False)
+            # The payload is the final Human message. Rejected model output in
+            # a repair request can itself contain the entire original payload;
+            # a substring search would misidentify that nested copy as a request.
             matching = [r['run_id'] for r in rows if r['event'] == 'start' and
-                        any(serialized in prompt for prompt in r['prompts'])]
+                        any(prompt == serialized or prompt.endswith('\nHuman: ' + serialized)
+                            for prompt in r['prompts'])]
             require(matching, f'No logged request contains the {stage} input')
             responses = [r for r in rows if r['run_id'] in matching and r['event'] == 'end']
             require(len(responses) == 1 and any(
