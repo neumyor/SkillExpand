@@ -25,7 +25,12 @@ def audit_batch(root, batch, base, cards):
     records = ST.read_jsonl(root / 'meta_skills.jsonl', repair_tail=False)
     require(len(records) == 1 and records[0]['version'] == 0, 'L3 must stay frozen')
     meta = S.from_dict(S.MetaSkill, records[0])
-    runner = SkillPatchRunner(SkillEditor(None, meta), None, root / 'l2_proposals', read_only=True)
+    protocol = json.loads((root / 'l2_manifest.json').read_text())
+    mode = protocol['config'].get('skill_edit_mode', 'rewrite')
+    runtime = json.loads((root / 'config.json').read_text())
+    max_rules = runtime['agent']['max_num_rules']
+    runner = SkillPatchRunner(SkillEditor(None, meta, max_rules, mode), None,
+                              root / 'l2_proposals', read_only=True)
     pattern_path = root / 'l2_patterns' / (batch['batch_id'] + '.json')
     patterns = json.loads(pattern_path.read_text())
     require(batch['batch_patterns'] == patterns, 'batch pattern journal mismatch')

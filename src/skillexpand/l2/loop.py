@@ -27,11 +27,14 @@ class EvolutionConfig:
     evolve_l1_workers: int = 8
     l2_review_workers: int = 8
     evolve_rounds: int = 1
+    skill_edit_mode: str = "rewrite"
 
     def __post_init__(self):
         if min(self.batch_size, self.candidate_count, self.evolve_l1_workers,
                self.l2_review_workers, self.evolve_rounds) < 1:
             raise ValueError("Evolution budgets must be positive")
+        if self.skill_edit_mode not in ("rewrite", "structured"):
+            raise ValueError("Unknown Skill edit mode")
 
     def to_dict(self):
         return S.to_dict(self)
@@ -255,7 +258,8 @@ class SerialEvolutionLoop:
             return CardReviewer(host)
 
         runner = UP.SkillPatchRunner(
-            ED.SkillEditor(host, self.meta.head(), self.cfg.agent.max_num_rules),
+            ED.SkillEditor(host, self.meta.head(), self.cfg.agent.max_num_rules,
+                           self.config.skill_edit_mode),
             None,
             self.paths.root / "l2_proposals",
             reviewer_factory=reviewer_factory,

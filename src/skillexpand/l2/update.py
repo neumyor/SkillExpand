@@ -91,6 +91,7 @@ class SkillPatchRunner:
                 "K": candidate_count,
                 "meta": S.to_dict(self.editor.meta_skill),
                 "patterns": list(batch_patterns),
+                "skill_edit_mode": self.editor.skill_edit_mode,
             }
         )
         directory = self.audit_dir / identity
@@ -115,6 +116,7 @@ class SkillPatchRunner:
             "base_skill_key": base_skill.key,
             "selection_method": "batch_card_review",
             "requested_candidates": candidate_count,
+            "skill_edit_mode": self.editor.skill_edit_mode,
             "hypotheses": [],
             "proposals": [],
             "reviews": [],

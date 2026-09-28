@@ -460,6 +460,59 @@ class SerialL2Tests(unittest.TestCase):
         edit = editor.propose(driver.initial[0], list(driver.cards.values()))
         self.assertIsNone(edit.candidate)
 
+    def test_structured_mode_applies_single_edit_and_replays_audit(self):
+        from skillexpand.l2 import structured_skill as SS
+        from skillexpand.l2.audit import audit_round
+        driver = self.prepared(batch_size=50, skill_edit_mode='structured')
+        _, reviewer = self.hosts(driver)
+
+        def editor_llm(messages, **kw):
+            payload = json.loads(messages[-1].content)
+            if isinstance(payload, list):
+                return json.dumps({'patterns': []})
+            if 'K' in payload:
+                card = payload['cards'][0]
+                return json.dumps({'hypotheses': [{
+                    'mechanism': 'inspect evidence', 'change': 'Add a source check',
+                    'evidence': [{'card_id': card['card_id'],
+                                  'evidence_id': card['evidence'][0]['id']}],
+                }]})
+            current = json.loads(messages[-2].content)['current_skill']
+            self.assertEqual(len(SS.parse(current['body'])['procedure']), 2)
+            return json.dumps({'edit': {'op': 'add', 'section': 'completion_checks',
+                                        'target_id': None,
+                                        'text': 'inspect the supporting source before Finish.'}})
+
+        editor = SimpleNamespace(token_counter=len, llm=editor_llm)
+        def factory(cfg, path):
+            return reviewer if 'reviewer-' in str(path) else editor
+        with patch.object(PL, 'run_generic', side_effect=self.units), patch.object(
+            F, 'build_reasoning_host', side_effect=factory
+        ):
+            result = driver.run_evolutions(1)
+        self.assertEqual(result['review_approved_updates'], 1)
+        old = SS.from_legacy(driver.initial[0].body)
+        new = SS.parse(driver.skill_heads()[0].body)
+        self.assertEqual(new['procedure'], old['procedure'])
+        self.assertEqual(new['conditions'], old['conditions'])
+        self.assertEqual([r['id'] for r in new['completion_checks']], ['V1'])
+        self.assertEqual(audit_round(self.root, 1)['review_approved'], 1)
+        restored = L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root), driver.config)
+        with patch.object(F, 'build_reasoning_host', side_effect=AssertionError('resume model')):
+            self.assertEqual(restored.run_evolutions(1), result)
+        with self.assertRaisesRegex(ValueError, 'Frozen inputs changed'):
+            L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root),
+                                  L.EvolutionConfig(batch_size=50, skill_edit_mode='rewrite'))
+
+    def test_structured_editor_rejects_whole_body_response(self):
+        driver = self.prepared(skill_edit_mode='structured')
+        host = SimpleNamespace(token_counter=len,
+                               llm=lambda *a, **kw: json.dumps({'body': 'rewrite everything'}))
+        editor = ED.SkillEditor(host, driver.meta.head(), skill_edit_mode='structured')
+        outcome = editor.propose(driver.initial[0], list(driver.cards.values()))
+        self.assertIsNone(outcome.candidate)
+        self.assertEqual(outcome.reason, ED.REASON_NO_OPERATIONS)
+
     def test_cli_defaults_and_tail_batches(self):
         driver = self.prepared()
         self.assertEqual(L.EvolutionConfig().candidate_count, 3)

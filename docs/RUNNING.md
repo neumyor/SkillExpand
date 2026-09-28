@@ -95,6 +95,7 @@ $ALFWORLD_PYTHON -m skillexpand \
 
 - `--batch-size`：每批 L2 的 source 卡数，默认 50；小组和尾批也执行。
 - `--candidate-count`：每批独立候选数量，默认 3；先生成不同修改假设，当前批次卡上独立评审，证据不足或无法分出优劣则保留原版。
+- `--skill-edit-mode`：`rewrite`（默认）保留完整正文候选；`structured` 将 Skill 分为 Procedure、Conditions、Completion checks，候选只提交一条新增或替换操作。程序保存其他规则及其稳定 ID。可在冷启动时启用，也可在导入纯文本冷启动后启用；L2 开始后续跑须使用同一值。正式 campaign 在 `prepare` 时传入此参数并冻结到 manifest。
 - `--cold-start-workers`：冷启动 source 任务 L1 的并发数，默认 8。
 - `--family-discovery-workers`：能力标签提取与 family 指派请求的并发数，默认 8。
 - `--evolve-l1-workers`：每轮 Skill-aware source L1 的并发数，默认 8。

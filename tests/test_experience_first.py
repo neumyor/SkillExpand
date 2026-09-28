@@ -406,6 +406,31 @@ class ExperienceFirstTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 C.normalize_initial_skill({"description": "scope", "body": body})
 
+    def test_structured_cold_start_assigns_sections_and_stable_ids(self):
+        from skillexpand.l2 import structured_skill as SS
+        def ask(prompt):
+            if 'initial reusable Skill' in prompt:
+                return json.dumps({
+                    'description': 'Find manufacturers from supplied evidence.',
+                    'sections': {
+                        'procedure': ['Find the named product in evidence.'],
+                        'conditions': ['If products share a name, check the model.'],
+                        'completion_checks': ['Before Finish, verify the maker.'],
+                    },
+                })
+            return self.ask(prompt)
+        cold = C.ColdStart(self.cfg, self.plan, self.root, k=1,
+                           cold_start_workers=2, family_discovery_workers=2,
+                           ask=ask, run_units=self.units, card_batch_size=1,
+                           skill_edit_mode='structured')
+        plan = cold.run()
+        self.assertEqual(len(plan.families), 1)
+        initial = json.loads((self.root / 'initial_skills.json').read_text())[0]
+        sections = SS.parse(initial['body'])
+        self.assertEqual([x['id'] for x in sections['procedure']], ['P1'])
+        self.assertEqual([x['id'] for x in sections['conditions']], ['C1'])
+        self.assertEqual([x['id'] for x in sections['completion_checks']], ['V1'])
+
     def test_discovery_receives_benchmark_runtime_contract(self):
         cold = self.cold()
         cold.ask("TASK_ID: 0 capability_tags")

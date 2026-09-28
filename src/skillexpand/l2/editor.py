@@ -6,6 +6,7 @@ from langchain.schema import HumanMessage, SystemMessage
 from skillexpand import schema as S
 from skillexpand.l1.family_discovery import _extract_json
 from skillexpand.l1.protocol import projection
+from skillexpand.l2 import structured_skill as SS
 
 REASON_PROPOSED = "proposed"
 REASON_NO_OPERATIONS = "invalid_proposal"
@@ -120,10 +121,13 @@ class EditOutcome:
 
 
 class SkillEditor:
-    def __init__(self, host_agent, meta_skill, max_num_rules=20):
+    def __init__(self, host_agent, meta_skill, max_num_rules=20, skill_edit_mode="rewrite"):
+        if skill_edit_mode not in ("rewrite", "structured"):
+            raise ValueError("Unknown Skill edit mode")
         self.host = host_agent
         self.meta_skill = meta_skill
         self.max_num_rules = max_num_rules
+        self.skill_edit_mode = skill_edit_mode
 
     def build_prompt(self, base_skill, working_body, experiences, feedback=None):
         success, failure, stats, policy = build_histories(
@@ -164,11 +168,32 @@ class SkillEditor:
             "CURRENT or asks for behavior already present, return no_change instead of finding "
             "another edit. Do not delete a conditional safeguard merely because this batch does not trigger it."
         )
+        if self.skill_edit_mode == "structured":
+            contract = (
+                "Propose ONE evidence-supported change to the CURRENT Skill. "
+                'Return JSON only: {"edit":{"op":"add|replace",'
+                '"section":"procedure|conditions|completion_checks",'
+                '"target_id":"P1 or null","text":"one concise rule on one line"}}. '
+                'For add, target_id is an existing rule in that section to insert after, or null to append. '
+                'For replace, target_id must identify the rule to change in that section. '
+                'Or return {"no_change":true,"reason":"..."}. '
+                "Procedure gives ordinary steps; conditions give rules that activate only under a stated "
+                "condition; completion_checks give checks before the first final submission. "
+                "Do not return a whole Skill, description, other rules or multiple edits. "
+                "An initial Skill imported from the plain format may have all old rules under Procedure; "
+                "that placement does not make a conditional rule unconditional. Preserve its wording. "
+                "Read execution.skill_key to identify the actual executed revision; a null key means no Skill. "
+                + SINGLE_ATTEMPT_POLICY + policy + "\n" + EXISTING_RULE_CHECK +
+                "\nRecheck the selected hypothesis against all current rules. If it is covered, unsupported, "
+                "or only reflects an executor failing to follow an existing rule, return no_change. "
+                "Do not include task-specific answers, IDs, or examples in the new rule."
+            )
         payload = {
             "current_skill": {
                 "key": base_skill.key,
                 "description": base_skill.description,
-                "body": working_body,
+                "body": (SS.render(SS.from_legacy(working_body))
+                         if self.skill_edit_mode == "structured" else working_body),
             },
             "rejected_patches": rejected,
             "task_evidence": evidence,
@@ -247,14 +272,19 @@ class SkillEditor:
                     None, base_skill.body, REASON_NO_CHANGE, raw, prompt_chars=size
                 )
             description = value.get("description", base_skill.description)
-            body = value["body"]
-            if any(
-                not isinstance(x, str) or not x.strip() for x in (description, body)
-            ):
-                raise ValueError("Both description and body are required")
             if description != base_skill.description:
                 raise ValueError("Routing description is frozen")
-            body = body.strip()
+            if self.skill_edit_mode == "structured":
+                if set(value) != {"edit"}:
+                    raise ValueError("Structured mode accepts only one edit")
+                operation = value["edit"]
+                body = SS.render(SS.apply_edit(SS.from_legacy(base_skill.body), operation,
+                                               max_rules=self.max_num_rules))
+            else:
+                body = value["body"]
+                if not isinstance(body, str) or not body.strip():
+                    raise ValueError("Skill body is required")
+                body = body.strip()
         except (ValueError, KeyError, TypeError):
             return EditOutcome(
                 None, base_skill.body, REASON_NO_OPERATIONS, raw, prompt_chars=size
@@ -285,6 +315,9 @@ class SkillEditor:
             raw_llm_output=raw,
             meta_skill_version=self.meta_skill.version,
             proposed_from_experience_id=experiences[0].experience_id,
+            edits=((S.SkillEdit(op="ADD" if operation["op"] == "add" else "EDIT",
+                                text=operation["text"]),)
+                   if self.skill_edit_mode == "structured" else ()),
         )
         return EditOutcome(
             candidate,
@@ -293,6 +326,7 @@ class SkillEditor:
             raw,
             prompt_chars=size,
             buffer_chars=stats["buffer_chars"],
+            operations=(operation,) if self.skill_edit_mode == "structured" else (),
         )
 
     def plan(self, base_skill, experiences, candidate_count, correction=None,
@@ -322,6 +356,14 @@ class SkillEditor:
             '"change":"target rule and behavioral change","evidence":[{"card_id":"...",'
             '"evidence_id":"t1:e1"}]}]}. Each hypothesis needs evidence. Use the supplied evidence IDs for the referenced card; do not copy evidence passages or invent IDs.'
         )
+        if self.skill_edit_mode == "structured":
+            system = system.replace(
+                "Deletion, clarification, or a new procedure are possibilities, not required quotas.",
+                "A one-rule addition or replacement is possible, but never required.",
+            )
+            system += (" Each implementable hypothesis must fit ONE added or replaced rule "
+                       "in Procedure, Conditions, or Completion checks. Do not propose deletion "
+                       "or a change requiring simultaneous edits to multiple rules.")
         return self.host.llm(
             [
                 SystemMessage(content=system),
@@ -330,7 +372,8 @@ class SkillEditor:
                         {
                             "K": candidate_count,
                             "current_skill_key": base_skill.key,
-                            "current_body": base_skill.body,
+                            "current_body": (SS.render(SS.from_legacy(base_skill.body))
+                                             if self.skill_edit_mode == "structured" else base_skill.body),
                             "description": base_skill.description,
                             "cards": card_payload(experiences),
                             "batch_patterns": list(batch_patterns),

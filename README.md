@@ -85,6 +85,8 @@ SearchQA 从 `--task-file` 指定的 JSON/JSONL 读取 question、answer(s) 和 
 
 `--evolve-rounds` 是累计目标轮数：完成一轮后用 `--resume --evolve-rounds 2` 可续跑第二轮。`--phase l2` 与 `evolve` 等价，都会先运行带 Skill 的 L1。`--cold-start-dir` 可以把**本协议**已完成的冷启动导入新 run 目录；不支持旧卡或旧运行日志。`--show-plan` 可只读检查任务划分。完整参数和恢复语义见 [运行指南](docs/RUNNING.md)。
 
+Skill 编辑默认使用 `--skill-edit-mode rewrite`（原有整份正文候选）。新运行可在冷启动和后续 Evolve 阶段都传入 `--skill-edit-mode structured`：初始 Skill 由程序赋予稳定规则 ID；L2 每个候选只能新增或替换一条规则，程序应用操作并保留其余规则。两种模式的逐卡 LLM 审核都只是效果预测，不是 admission 实测；L2 开始后续跑必须保持同一模式。若导入已有纯文本冷启动，结构化模式会把原规则原样归入 Procedure，再允许后续局部编辑。
+
 运行目录逐单元保存 L1 检查点、经验卡和模型原文；`evolution/round-*/` 隔离各轮数据，`l2_patterns/`、`l2_proposals/`、`l2_batches/` 保存候选与逐卡评审，`skills.jsonl` 保存版本链，`final/<library-hash>/` 保存实测结果。每轮和 final 都有完整性审计。恢复复用已落盘的有效响应；改变协议、代码或输入应使用新目录。
 
 ## 验证与研究边界

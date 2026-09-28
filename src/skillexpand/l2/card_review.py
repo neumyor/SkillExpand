@@ -83,15 +83,18 @@ def card_payload(experiences):
 
 
 def rule_table(body, prefix):
-    chunks = re.split(r"(?m)(?=^[ \t]*\d+[.)]\s+)", body)
-    return [
-        {"id": f"{prefix}{i+1}", "text": text.strip()}
-        for i, text in enumerate(c for c in chunks if c.strip())
-    ]
+    chunks = re.split(r"(?m)(?=^[ \t]*(?:\d+|[PCV]\d+)[.)]\s+)", body)
+    rows = []
+    for chunk in chunks:
+        lines = [line for line in chunk.splitlines() if line.strip() and
+                 not line.startswith('## ')]
+        if lines:
+            rows.append({"id": f"{prefix}{len(rows)+1}", "text": "\n".join(lines).strip()})
+    return rows
 
 
 def normalized_rule(text):
-    return " ".join(re.sub(r"^\d+[.)]\s+", "", text.strip()).split())
+    return " ".join(re.sub(r"^(?:\d+|[PCV]\d+)[.)]\s+", "", text.strip()).split())
 
 
 def review_payload(base, candidates, card):

@@ -98,7 +98,9 @@ def validate_inputs(tasks, split):
     return dict(counts)
 
 
-def prepare(root, inputs):
+def prepare(root, inputs, skill_edit_mode='rewrite'):
+    if skill_edit_mode not in ('rewrite', 'structured'):
+        raise ValueError('Unknown Skill edit mode')
     repo = Path(__file__).resolve().parents[1]
     runtime = configured_runtime()
     if root.exists() and any(root.iterdir()):
@@ -132,7 +134,8 @@ def prepare(root, inputs):
     manifest = {
         'schema': 1, 'repo': str(repo), **runtime,
         'concurrency': CONCURRENCY, 'evolve_rounds': 2, 'autonomous_attempts': 4,
-        'batch_size': 50, 'candidate_count': 3, 'benchmarks': details,
+        'batch_size': 50, 'candidate_count': 3,
+        'skill_edit_mode': skill_edit_mode, 'benchmarks': details,
         'request_interval_seconds': REQUEST_INTERVAL_SECONDS,
         'files': files, 'created': time.time(),
         'metric': 'Source-task first-autonomous-attempt success at cold start, evolve-1, and evolve-2; paired by task.',
@@ -150,6 +153,7 @@ def verify(root):
             raise ValueError(f'Frozen campaign file changed: {relative}')
     if (not manifest['model'] or manifest['concurrency'] != CONCURRENCY or
             manifest['evolve_rounds'] != 2 or
+            manifest.get('skill_edit_mode', 'rewrite') not in ('rewrite', 'structured') or
             manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
         raise ValueError('Unexpected campaign protocol')
     for key, kind in (('python', 'file'), ('overlay', 'dir'), ('alfworld_data', 'dir'),
@@ -223,6 +227,7 @@ def stage_args(root, mode, benchmark, stage):
         '--final-workers', str(concurrency['final_workers']),
         '--autonomous-attempts', str(manifest['autonomous_attempts']), '--batch-size', str(manifest['batch_size']),
         '--candidate-count', str(manifest['candidate_count']), '--resume']
+    args += ['--skill-edit-mode', manifest.get('skill_edit_mode', 'rewrite')]
     if stage.startswith('evolve-'):
         args += ['--phase', 'evolve', '--evolve-rounds', stage.split('-')[1]]
     else:
@@ -464,10 +469,12 @@ def main():
     parser.add_argument('--benchmark', choices=BENCHMARKS)
     parser.add_argument('--stage', choices=STAGES)
     parser.add_argument('--attempt', type=int)
+    parser.add_argument('--skill-edit-mode', choices=('rewrite', 'structured'), default='rewrite',
+                        help='Skill editing mode frozen when preparing a campaign')
     args = parser.parse_args()
     root = args.root.resolve()
     if args.action == 'prepare':
-        result = prepare(root, args.inputs.resolve())
+        result = prepare(root, args.inputs.resolve(), args.skill_edit_mode)
         print(json.dumps({'root': str(root), 'benchmarks': result['benchmarks'], 'model': result['model']}))
     elif args.action == 'check':
         result = verify(root)

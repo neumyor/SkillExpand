@@ -58,6 +58,8 @@ def build_parser():
     )
     p.add_argument("--evolve-rounds", type=int, default=1,
         help="Number of Skill-aware L1 -> L2 evolution rounds")
+    p.add_argument("--skill-edit-mode", choices=("rewrite", "structured"),
+        default="rewrite", help="Rewrite complete Skill bodies or apply one structured rule edit")
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent source tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,
@@ -263,6 +265,7 @@ def main(argv=None):
                 k=args.autonomous_attempts,
                 supervised=not args.no_supervised_repair,
                 family_discovery_workers=args.family_discovery_workers,
+                skill_edit_mode=args.skill_edit_mode,
             ).run()
         if args.phase in ("l2", "evolve", "all"):
             config = L.EvolutionConfig(
@@ -271,6 +274,7 @@ def main(argv=None):
                 evolve_rounds=args.evolve_rounds,
                 evolve_l1_workers=args.evolve_l1_workers,
                 l2_review_workers=args.l2_review_workers,
+                skill_edit_mode=args.skill_edit_mode,
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config)
             # All evolution entry points execute Skill-aware L1 before L2.
