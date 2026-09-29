@@ -466,30 +466,31 @@ class SerialL2Tests(unittest.TestCase):
         driver = self.prepared(batch_size=50, skill_edit_mode='structured')
         _, reviewer = self.hosts(driver)
 
-        def editor_llm(messages, **kw):
+        planner_calls = []
+        def planner_llm(messages, **kw):
             payload = json.loads(messages[-1].content)
             if isinstance(payload, list):
                 return json.dumps({'patterns': []})
             if 'K' in payload:
+                planner_calls.append(payload)
                 card = payload['cards'][0]
                 return json.dumps({'hypotheses': [{
                     'mechanism': 'inspect evidence', 'change': 'Add a source check',
                     'evidence': [{'card_id': card['card_id'],
                                   'evidence_id': card['evidence'][0]['id']}],
+                    'edit': {'op': 'add', 'section': 'completion_checks',
+                             'target_id': None,
+                             'text': 'inspect the supporting source before Finish.'},
                 }]})
-            current = json.loads(messages[-2].content)['current_skill']
-            self.assertEqual(len(SS.parse(current['body'])['procedure']), 2)
-            return json.dumps({'edit': {'op': 'add', 'section': 'completion_checks',
-                                        'target_id': None,
-                                        'text': 'inspect the supporting source before Finish.'}})
 
-        editor = SimpleNamespace(token_counter=len, llm=editor_llm)
+        editor = SimpleNamespace(token_counter=len, llm=planner_llm)
         def factory(cfg, path):
             return reviewer if 'reviewer-' in str(path) else editor
         with patch.object(PL, 'run_generic', side_effect=self.units), patch.object(
             F, 'build_reasoning_host', side_effect=factory
         ):
             result = driver.run_evolutions(1)
+        self.assertTrue(planner_calls)
         self.assertEqual(result['review_approved_updates'], 1)
         old = SS.from_legacy(driver.initial[0].body)
         new = SS.parse(driver.skill_heads()[0].body)
@@ -667,7 +668,7 @@ class SerialL2Tests(unittest.TestCase):
         self.assertEqual(final["tasks"], 1)
         self.assertEqual(final["successes"], 1)
         from skillexpand.evaluation.audit import audit_final
-        final_dir = target/'final'/final['library_hash']
+        final_dir = target/'test'/final['library_hash']
         self.assertEqual(audit_final(target, final_dir)['measured'], 1)
         summary = json.loads((final_dir/'summary.json').read_text())
         summary['successes'] = 0
@@ -765,7 +766,7 @@ class SerialL2Tests(unittest.TestCase):
     def test_frozen_routes_are_disjoint_and_admission_cannot_read_final(self):
         driver = self.prepared()
         plan = S.SplitPlan.make(
-            {0: "source", 1: "admission", 2: "admission", 3: "final"}, "searchqa", 42
+            {0: "train", 1: "val", 2: "val", 3: "test"}, "searchqa", 42
         )
         one = driver.initial[0]
         two = replace(
@@ -790,7 +791,7 @@ class SerialL2Tests(unittest.TestCase):
 
         with patch.object(PL, "run_generic", side_effect=route):
             routes = R.FrozenRoutes(
-                self.cfg, plan, [one, two], self.root / "isolated", "admission"
+                self.cfg, plan, [one, two], self.root / "isolated", "val"
             ).run()
         self.assertEqual(routes.groups, {one.skill_id: (1,), two.skill_id: (2,)})
         scorer = V.FixedSkillScorer(
@@ -803,7 +804,7 @@ class SerialL2Tests(unittest.TestCase):
         driver = self.prepared()
         with patch.object(PL, "run_generic", side_effect=self.fake_units):
             routes = R.FrozenRoutes(
-                self.cfg, driver.plan, driver.initial, self.root / "routes", "admission"
+                self.cfg, driver.plan, driver.initial, self.root / "routes", "val"
             ).run()
             scorer = V.FixedSkillScorer(
                 self.cfg, V.ScoreCache(self.root / "scores.jsonl"), routes
@@ -862,7 +863,7 @@ class SerialL2Tests(unittest.TestCase):
                 on_result({"task_id": spec.task_id, "error": "offline"})
 
         routes = R.FrozenRoutes(
-            self.cfg, driver.plan, driver.initial, root, "admission"
+            self.cfg, driver.plan, driver.initial, root, "val"
         )
         with patch.object(PL, "run_generic", side_effect=broken):
             with self.assertRaisesRegex(RuntimeError, "Routing incomplete"):
@@ -871,7 +872,7 @@ class SerialL2Tests(unittest.TestCase):
         self.assertFalse((root / "admission/complete.json").exists())
         with patch.object(PL, "run_generic", side_effect=self.fake_units):
             restored = R.FrozenRoutes(
-                self.cfg, driver.plan, driver.initial, root, "admission"
+                self.cfg, driver.plan, driver.initial, root, "val"
             ).run()
         self.assertEqual(restored.groups[driver.initial[0].skill_id], (2,))
 
@@ -930,8 +931,8 @@ class SerialL2Tests(unittest.TestCase):
         self.prepared()
         path = self.root / "split.json"
         value = json.loads(path.read_text())
-        value["assignment"]["2"] = "final"
-        value["assignment"]["3"] = "admission"
+        value["assignment"]["2"] = "test"
+        value["assignment"]["3"] = "val"
         path.write_text(json.dumps(value))
         with self.assertRaisesRegex(ValueError, "frozen manifest"):
             A.load_cold_start(self.root)

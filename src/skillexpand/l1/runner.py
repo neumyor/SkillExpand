@@ -39,9 +39,11 @@ def save(path, data):
 
 def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_skill_id,
         selection_source, selection_reason, selection_raw, k=4, supervised=True,
-        checkpoint_path=None, evolution_round=0):
+        supervised_attempts=1, checkpoint_path=None, evolution_round=0):
     if k < 1:
         raise ValueError('autonomous attempts must be >= 1')
+    if supervised_attempts < 0:
+        raise ValueError('supervised attempts must be >= 0')
     if split != S.SPLIT_SOURCE:
         raise ValueError('L1 repair is source-only')
     adapter = resolve(cfg)
@@ -51,7 +53,8 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
                 'env': agent.tasks[task_id]['env_kwargs'],
                 'adapter': type(adapter).__module__ + ':' + type(adapter).__name__,
                 'revision': adapter.revision, 'prompts': {key: getattr(adapter,key) for key in PROMPT_FIELDS},
-                'k': k, 'supervised': supervised, 'model': cfg.agent.llm,
+                'k': k, 'supervised': supervised, 'supervised_attempts': supervised_attempts,
+                'model': cfg.agent.llm,
                 'skill': {'key': skill.key, 'body': skill.body} if skill else None,
                 'evolution_round': evolution_round,
                 'selected_skill_id': selected_skill_id, 'settings': dict(settings),
@@ -113,7 +116,9 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
                     for t in trials)
             phase = 'autonomous' if n < k else 'supervised'
             if phase == 'supervised':
-                if not supervised or any(t['phase']=='supervised' and t['status']=='completed' for t in trials):
+                if (not supervised or supervised_attempts == 0 or
+                        sum(t['phase'] == 'supervised' and t['status'] == 'completed'
+                            for t in trials) >= supervised_attempts):
                     break
                 if not data['guidance_checked']:
                     data['guidance'] = adapter.prepare_guidance(agent,trials)

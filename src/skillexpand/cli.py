@@ -45,6 +45,8 @@ def build_parser():
         help="Concurrent capability-tag and family-assignment requests"
     )
     p.add_argument("--autonomous-attempts", type=int, default=4)
+    p.add_argument("--supervised-attempts", type=int, default=1,
+                   help="Maximum supervised repair trials after autonomous attempts")
     p.add_argument("--no-supervised-repair", action="store_true")
     p.add_argument(
         "--batch-size",
@@ -60,6 +62,8 @@ def build_parser():
         help="Number of Skill-aware L1 -> L2 evolution rounds")
     p.add_argument("--skill-edit-mode", choices=("rewrite", "structured"),
         default="rewrite", help="Rewrite complete Skill bodies or apply one structured rule edit")
+    p.add_argument("--acceptance-mode", choices=("predicted", "empirical"),
+        default="predicted", help="Accept by card-review predictions or paired admission execution")
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent source tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,
@@ -70,6 +74,12 @@ def build_parser():
         default=4,
         help="Concurrent final routing and evaluation tasks",
     )
+    p.add_argument('--l1-model', help='LLM used by the task execution agent')
+    p.add_argument('--cold-start-model', help='LLM used by cold-start discovery and Skill synthesis')
+    p.add_argument('--l2-planner-model', help='LLM used to propose L2 hypotheses')
+    p.add_argument('--l2-editor-model', help='LLM used to materialize rewrite-mode candidates')
+    p.add_argument('--l2-reviewer-model', help='LLM used by per-card L2 reviewers')
+    p.add_argument('--selector-model', help='LLM used to route validation/test tasks')
     p.add_argument("--resume", action="store_true")
     p.add_argument("--show-plan", action="store_true")
     return p
@@ -96,6 +106,36 @@ def make_plan(cfg, args, root):
     if any(not plan.tasks_in(split) for split in S.SPLITS):
         raise ValueError("source, admission and final must all be nonempty")
     return plan
+
+
+def apply_model_overrides(cfg, args):
+    """Freeze independent model names for executor and reasoning roles."""
+    defaults = {
+        'l1_executor': str(cfg.agent.llm),
+        'cold_start': str(cfg.agent.llm),
+        'l2_planner': str(cfg.agent.llm),
+        'l2_editor': str(cfg.agent.llm),
+        'l2_reviewer': str(cfg.agent.llm),
+        'selector': str(cfg.agent.llm),
+    }
+    existing = cfg.get('models', {})
+    for key in defaults:
+        if existing and existing.get(key):
+            defaults[key] = str(existing[key])
+    overrides = {
+        'l1_executor': args.l1_model,
+        'cold_start': args.cold_start_model,
+        'l2_planner': args.l2_planner_model,
+        'l2_editor': args.l2_editor_model,
+        'l2_reviewer': args.l2_reviewer_model,
+        'selector': args.selector_model,
+    }
+    for key, value in overrides.items():
+        if value:
+            defaults[key] = value
+    cfg.models = OmegaConf.create(defaults)
+    cfg.agent.llm = defaults['l1_executor']
+    return cfg
 
 
 def load_clustered_plan(root, plan):
@@ -142,7 +182,7 @@ def _final_evaluate(cfg, plan, root, final_workers):
     if any((root / 'evolution').glob('round-*/input.json')) and (
             {s.skill_id: s.key for s in skills} != status['skills']):
         raise ValueError('Skill library differs from completed evolution output')
-    target = root / "final" / VA.library_fingerprint(skills)
+    target = root / "test" / VA.library_fingerprint(skills)
     C.freeze(target / "library.json", [S.to_dict(s) for s in skills])
     C.freeze(
         target / "protocol.json",
@@ -178,7 +218,7 @@ def _final_evaluate(cfg, plan, root, final_workers):
     successes = sum(r["successes"] for r in per_skill.values())
     n = len(plan.tasks_in(S.SPLIT_FINAL))
     summary = {
-        "split": "final",
+        "split": "test",
         "library_hash": VA.library_fingerprint(skills),
         "routing_reference": "initial_skills",
         "tasks": n,
@@ -253,6 +293,10 @@ def main(argv=None):
     try:
         if args.cold_start_dir:
             cfg, plan = import_cold_start(source, root)
+        # Importing a cold start restores its frozen execution config.  Apply
+        # the stage's role map afterwards so Planner/Editor/Reviewer/selector
+        # can intentionally differ from the L1 executor in the new run.
+        cfg = apply_model_overrides(cfg, args)
         C.freeze(root / "config.json", OmegaConf.to_container(cfg, resolve=True))
         os.environ["EXPE_CONFIG_FILE"] = str(root / "config.json")
         os.environ["EXPE_TASK_FILE"] = cfg.benchmark.task_file
@@ -263,6 +307,7 @@ def main(argv=None):
                 root,
                 cold_start_workers=args.cold_start_workers,
                 k=args.autonomous_attempts,
+                supervised_attempts=args.supervised_attempts,
                 supervised=not args.no_supervised_repair,
                 family_discovery_workers=args.family_discovery_workers,
                 skill_edit_mode=args.skill_edit_mode,
@@ -272,9 +317,12 @@ def main(argv=None):
                 batch_size=args.batch_size,
                 candidate_count=args.candidate_count,
                 evolve_rounds=args.evolve_rounds,
+                autonomous_attempts=args.autonomous_attempts,
+                supervised_attempts=args.supervised_attempts,
                 evolve_l1_workers=args.evolve_l1_workers,
                 l2_review_workers=args.l2_review_workers,
                 skill_edit_mode=args.skill_edit_mode,
+                acceptance_mode=args.acceptance_mode,
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config)
             # All evolution entry points execute Skill-aware L1 before L2.

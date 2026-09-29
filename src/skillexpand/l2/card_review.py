@@ -5,6 +5,7 @@ import re
 from langchain.schema import HumanMessage, SystemMessage
 from skillexpand.l1.family_discovery import _extract_json
 from skillexpand.l1.protocol import projection
+from skillexpand.l2 import structured_skill as SS
 
 PROTOCOL = "serial-card-id-review-v5"
 LABELS = ("improve", "regress", "unchanged", "unknown")
@@ -53,10 +54,12 @@ card establishes it as true, false or unknown; if unconditional, say so.
 3. Outcome: whether that supported difference changes benchmark success on this card.
 If no different action is required, do not assign improve/regress. Do not replace a conditional
 rule with an unconditional paraphrase in your reason. Do not output extended deliberation.
-{"candidates":[{"id":"C1","evidence_ids":["t1:e1"],"rule_ids":["B1","C1R2"],
+{"candidates":[{"id":"C1","evidence_ids":["t1:e1"],"rule_ids":["P1","C2"],
 "reason":"Condition: ... Actions: ... Outcome: ...",
 "label":"improve|regress|unchanged|unknown"}]}.
 Evidence IDs refer only to this card. Rule IDs refer only to CURRENT or that candidate.
+For structured Skills, use the real stable IDs (P1, C2, V1) and their section; never
+renumber them into candidate-local aliases.
 For improve/regress cite at least one evidence ID and at least one changed rule ID, and
 explain how the behavioral difference affects this card. A rule can be removed or added.
 Use unchanged for equivalent behavior; unknown when information is insufficient.
@@ -82,7 +85,14 @@ def card_payload(experiences):
     return result
 
 
-def rule_table(body, prefix):
+def rule_table(body, prefix=None, structured=False):
+    if structured:
+        sections = SS.parse(body)
+        return [
+            {"section": section, "id": row["id"], "text": row["text"]}
+            for section, rows in sections.items()
+            for row in rows
+        ]
     chunks = re.split(r"(?m)(?=^[ \t]*(?:\d+|[PCV]\d+)[.)]\s+)", body)
     rows = []
     for chunk in chunks:
@@ -98,22 +108,39 @@ def normalized_rule(text):
 
 
 def review_payload(base, candidates, card):
-    baseline = rule_table(base.body, "B")
+    structured = base.body.lstrip().startswith("## Procedure") or any(
+        c["body"].lstrip().startswith("## Procedure") for c in candidates
+    )
+    base_body = (
+        SS.render(SS.from_legacy(base.body))
+        if structured and not base.body.lstrip().startswith("## Procedure")
+        else base.body
+    )
+    baseline = rule_table(base_body, "B", structured=structured)
     bodies = [
-        {"id": c["id"], "rules": rule_table(c["body"], c["id"] + "R")}
+        {"id": c["id"], "rules": rule_table(c["body"], c["id"] + "R", structured=structured)}
         for c in candidates
     ]
     for candidate in bodies:
-        other = {normalized_rule(r["text"]) for r in candidate["rules"]}
-        original = {normalized_rule(r["text"]) for r in baseline}
-        candidate["changed_rule_ids"] = [
-            r["id"] for r in baseline if normalized_rule(r["text"]) not in other
-        ]
-        candidate["changed_rule_ids"] += [
-            r["id"]
-            for r in candidate["rules"]
-            if normalized_rule(r["text"]) not in original
-        ]
+        if structured:
+            original = {r["id"]: normalized_rule(r["text"]) for r in baseline}
+            other = {r["id"]: normalized_rule(r["text"]) for r in candidate["rules"]}
+            candidate["changed_rule_ids"] = [
+                rid for rid, text in original.items()
+                if rid not in other or other[rid] != text
+            ] + [rid for rid in other if rid not in original]
+        else:
+            other = {normalized_rule(r["text"]) for r in candidate["rules"]}
+            original = {normalized_rule(r["text"]) for r in baseline}
+            candidate["changed_rule_ids"] = [
+                r["id"] for r in baseline if normalized_rule(r["text"]) not in other
+            ]
+            candidate["changed_rule_ids"] += [
+                r["id"]
+                for r in candidate["rules"]
+                if normalized_rule(r["text"]) not in original
+            ]
+        candidate["changed_rule_ids"] = list(dict.fromkeys(candidate["changed_rule_ids"]))
     return {"current_skill_key": base.key, "current_rules": baseline,
             "candidates": bodies, "card": card}
 

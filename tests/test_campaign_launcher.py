@@ -107,9 +107,9 @@ def test_validation_errors_do_not_retry_due_to_old_network_error(campaign):
 
 def test_input_validation_rejects_missing_tasks_and_unknown_roles():
     with pytest.raises(ValueError):
-        C.validate_inputs([{}, {}, {}], {'assignment': {'0': 'source', '1': 'final'}})
+        C.validate_inputs([{}, {}, {}], {'assignment': {'0': 'train', '1': 'test'}})
     with pytest.raises(ValueError):
-        C.validate_inputs([{}, {}, {}], {'assignment': {'0': 'source', '1': 'final', '2': 'training'}})
+        C.validate_inputs([{}, {}, {}], {'assignment': {'0': 'train', '1': 'test', '2': 'training'}})
 
 
 def test_campaign_runtime_uses_local_configuration(tmp_path, monkeypatch):

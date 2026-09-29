@@ -1,4 +1,4 @@
-"""A small, deterministic rule format for optional bounded Skill edits."""
+"""A small, deterministic rule format for optional structured Skill edits."""
 
 import re
 
@@ -94,7 +94,7 @@ def from_legacy(body):
     return from_sections({"procedure": texts, "conditions": [], "completion_checks": []})
 
 
-def apply_edit(sections, edit, max_rules=None):
+def apply_edit(sections, edit):
     """Apply one add/replace operation; all other rule bytes and IDs survive."""
     if not isinstance(edit, dict) or set(edit) != {"op", "section", "target_id", "text"}:
         raise ValueError("Edit must contain only op, section, target_id and text")
@@ -115,8 +115,6 @@ def apply_edit(sections, edit, max_rules=None):
     else:
         if target is not None and not any(row["id"] == target for row in updated[section]):
             raise ValueError("Add anchor must exist in its own section")
-        if max_rules is not None and sum(map(len, updated.values())) >= max_rules:
-            raise ValueError("Structured Skill rule budget is full")
         prefix = PREFIXES[section]
         next_id = max((int(row["id"][1:]) for row in updated[section]), default=0) + 1
         position = next((i + 1 for i, row in enumerate(updated[section]) if row["id"] == target),

@@ -155,6 +155,7 @@ class ExperienceSpec:
     max_trials: Optional[int] = None
     l1_checkpoint_path: Optional[str] = None
     supervised_repair: bool = True
+    supervised_attempts: int = 1
     evolution_round: int = 0
 
 
@@ -200,6 +201,7 @@ def execute_experience(spec: ExperienceSpec) -> Dict[str, Any]:
             selection_raw=spec.selection_raw,
             max_attempts=spec.max_trials, checkpoint_path=spec.l1_checkpoint_path,
             supervised_repair=spec.supervised_repair,
+            supervised_attempts=spec.supervised_attempts,
             evolution_round=spec.evolution_round)
         close_environment(agent)
         return {

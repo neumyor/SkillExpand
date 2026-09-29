@@ -64,6 +64,15 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
+def role_models(manifest):
+    """Return the frozen role map, accepting pre-role-map manifests for reads."""
+    current = manifest.get('models') or {}
+    fallback = manifest.get('model', '')
+    return {role: current.get(role) or fallback for role in (
+        'l1_executor', 'cold_start', 'l2_planner', 'l2_editor',
+        'l2_reviewer', 'selector')}
+
+
 def save(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,14 +102,17 @@ def validate_inputs(tasks, split):
     if set(map(int, assignment)) != set(range(len(tasks))):
         raise ValueError('Split must cover each task exactly once')
     counts = Counter(assignment.values())
-    if set(counts) != {'source', 'admission', 'final'}:
+    if set(counts) != {'train', 'val', 'test'}:
         raise ValueError('All three disjoint splits are required')
     return dict(counts)
 
 
-def prepare(root, inputs, skill_edit_mode='rewrite'):
+def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted', models=None,
+            autonomous_attempts=4, supervised_attempts=1):
     if skill_edit_mode not in ('rewrite', 'structured'):
         raise ValueError('Unknown Skill edit mode')
+    if acceptance_mode not in ('predicted', 'empirical'):
+        raise ValueError('Unknown acceptance mode')
     repo = Path(__file__).resolve().parents[1]
     runtime = configured_runtime()
     if root.exists() and any(root.iterdir()):
@@ -121,24 +133,32 @@ def prepare(root, inputs, skill_edit_mode='rewrite'):
         assignment = split.get('assignment', split)
         # All smoke tasks come from full SOURCE. No final question is exposed
         # during implementation checks or used to select the smoke sample.
-        selected = sorted(int(t) for t, part in assignment.items() if part == 'source')[:4]
+        selected = sorted(int(t) for t, part in assignment.items() if part == 'train')[:4]
         if len(selected) < 4:
             raise ValueError('Preflight needs four source tasks')
         save(root / 'inputs' / f'{benchmark}-preflight-tasks.json', [tasks[t] for t in selected])
         save(root / 'inputs' / f'{benchmark}-preflight-split.json',
-             {'assignment': {'0': 'source', '1': 'source', '2': 'admission', '3': 'final'}})
+             {'assignment': {'0': 'train', '1': 'train', '2': 'val', '3': 'test'}})
         details[benchmark] = {'counts': counts, 'preflight_original_task_ids': selected,
                               'original_tasks': str(task_path), 'original_split': str(split_path)}
     files = {str(p.relative_to(root)): digest(p) for folder in ('code', 'inputs')
              for p in sorted((root / folder).rglob('*')) if p.is_file()}
+    role_models = {'l1_executor': runtime['model'], 'cold_start': runtime['model'],
+                   'l2_planner': runtime['model'], 'l2_editor': runtime['model'],
+                   'l2_reviewer': runtime['model'], 'selector': runtime['model']}
+    if models:
+        role_models.update({k: v for k, v in models.items() if v})
     manifest = {
         'schema': 1, 'repo': str(repo), **runtime,
-        'concurrency': CONCURRENCY, 'evolve_rounds': 2, 'autonomous_attempts': 4,
+        'models': role_models,
+        'concurrency': CONCURRENCY, 'evolve_rounds': 2,
+        'autonomous_attempts': autonomous_attempts, 'supervised_attempts': supervised_attempts,
         'batch_size': 50, 'candidate_count': 3,
-        'skill_edit_mode': skill_edit_mode, 'benchmarks': details,
+        'skill_edit_mode': skill_edit_mode, 'acceptance_mode': acceptance_mode,
+        'benchmarks': details,
         'request_interval_seconds': REQUEST_INTERVAL_SECONDS,
         'files': files, 'created': time.time(),
-        'metric': 'Source-task first-autonomous-attempt success at cold start, evolve-1, and evolve-2; paired by task.',
+        'metric': 'Train-task first-autonomous-attempt success at cold start, evolve-1, and evolve-2; paired by task.',
         'comparison': 'Report each benchmark independently using the fixed three stages; no best-round selection or held-out execution.',
         'timeouts': {'request': 300, 'request_retries': 2, 'environment': 120, 'worker_progress': 3600},
     }
@@ -151,9 +171,15 @@ def verify(root):
     for relative, expected in manifest['files'].items():
         if digest(root / relative) != expected:
             raise ValueError(f'Frozen campaign file changed: {relative}')
-    if (not manifest['model'] or manifest['concurrency'] != CONCURRENCY or
+    models = role_models(manifest)
+    if (not manifest.get('model') and not all(models.values())):
+        raise ValueError('No LLM model configured')
+    if (not all(models.values()) or manifest['concurrency'] != CONCURRENCY or
             manifest['evolve_rounds'] != 2 or
             manifest.get('skill_edit_mode', 'rewrite') not in ('rewrite', 'structured') or
+            manifest.get('acceptance_mode', 'predicted') not in ('predicted', 'empirical') or
+            int(manifest.get('autonomous_attempts', 4)) < 1 or
+            int(manifest.get('supervised_attempts', 1)) < 0 or
             manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
         raise ValueError('Unexpected campaign protocol')
     for key, kind in (('python', 'file'), ('overlay', 'dir'), ('alfworld_data', 'dir'),
@@ -178,7 +204,7 @@ def environment(root):
     for key in ('EXPE_CONFIG_FILE', 'EXPE_TASK_FILE', 'EXPE_LLM_EXTRA_JSON', 'OPENAI_API_BASE'):
         env.pop(key, None)
     timeout = manifest['timeouts']
-    env.update(EXPE_LLM_MODEL=manifest['model'], EXPE_LLM_DISABLE_THINKING='1', EXPE_SHOW_ADMISSIBLE='1',
+    env.update(EXPE_LLM_MODEL=role_models(manifest)['l1_executor'], EXPE_LLM_DISABLE_THINKING='1', EXPE_SHOW_ADMISSIBLE='1',
         PYTHONPATH=str(root / 'code/src') + os.pathsep + manifest['overlay'], PYTHONUNBUFFERED='1',
         ALFWORLD_DATA=manifest['alfworld_data'],
         ALFWORLD_CONFIG=manifest['alfworld_config'],
@@ -195,7 +221,7 @@ def environment(root):
 
 def health(root):
     env = environment(root)
-    model = read(root / 'manifest.json')['model']
+    model = role_models(read(root / 'manifest.json'))['l1_executor']
     payload = {'model': model, 'messages': [{'role': 'user', 'content': 'Reply with OK.'}],
                'max_tokens': 8, 'temperature': 0, 'enable_thinking': False}
     request = urllib.request.Request(env['EXPE_LLM_BASE_URL'].rstrip('/') + '/chat/completions',
@@ -225,9 +251,17 @@ def stage_args(root, mode, benchmark, stage):
         '--evolve-l1-workers', str(concurrency['evolve_l1_workers']),
         '--l2-review-workers', str(concurrency['l2_review_workers']),
         '--final-workers', str(concurrency['final_workers']),
-        '--autonomous-attempts', str(manifest['autonomous_attempts']), '--batch-size', str(manifest['batch_size']),
+        '--autonomous-attempts', str(manifest['autonomous_attempts']),
+        '--supervised-attempts', str(manifest.get('supervised_attempts', 1)),
+        '--batch-size', str(manifest['batch_size']),
         '--candidate-count', str(manifest['candidate_count']), '--resume']
     args += ['--skill-edit-mode', manifest.get('skill_edit_mode', 'rewrite')]
+    args += ['--acceptance-mode', manifest.get('acceptance_mode', 'predicted')]
+    models = role_models(manifest)
+    for flag, key in (('--l1-model', 'l1_executor'), ('--cold-start-model', 'cold_start'),
+                      ('--l2-planner-model', 'l2_planner'), ('--l2-editor-model', 'l2_editor'),
+                      ('--l2-reviewer-model', 'l2_reviewer'), ('--selector-model', 'selector')):
+        args += [flag, models[key]]
     if stage.startswith('evolve-'):
         args += ['--phase', 'evolve', '--evolve-rounds', stage.split('-')[1]]
     else:
@@ -244,20 +278,20 @@ def audit_stage(root, mode, benchmark, stage):
     from skillexpand.evaluation.audit import audit_final
     run = root / mode / benchmark / 'run'
     cfg, plan, initial, _ = load_cold_start(run)
-    if cfg.agent.llm != read(root / 'manifest.json')['model']:
+    if cfg.agent.llm != role_models(read(root / 'manifest.json'))['l1_executor']:
         raise ValueError('Actual model differs from requested model')
     if stage == 'final':
         summary = read(run / 'summary.json')
         if summary['latest_evolution_round'] != 2:
             raise ValueError('Final preceded the second evolve round')
-        finals = list((run / 'final').glob('*/summary.json'))
+        finals = list((run / 'test').glob('*/summary.json'))
         if len(finals) != 1:
             raise ValueError('Final must contain exactly one evaluated library')
         return audit_final(run, finals[0].parent)
     directory = run / ('discovery' if stage == 'cold-start' else 'evolution/round-' + stage.split('-')[1])
     adapter = resolve(OmegaConf.load(run / 'config.json'))
     rows = []
-    for task in sorted(plan.tasks_in('source')):
+    for task in sorted(plan.tasks_in('train')):
         path = directory / 'trials' / f'{task}.json'
         data = read(path)
         rows.append(dict(audit_checkpoint(data, adapter), usage=audit_usage(path, data)))
@@ -471,10 +505,25 @@ def main():
     parser.add_argument('--attempt', type=int)
     parser.add_argument('--skill-edit-mode', choices=('rewrite', 'structured'), default='rewrite',
                         help='Skill editing mode frozen when preparing a campaign')
+    parser.add_argument('--acceptance-mode', choices=('predicted', 'empirical'), default='predicted',
+                        help='Skill acceptance mode frozen when preparing a campaign')
+    parser.add_argument('--autonomous-attempts', type=int, default=4)
+    parser.add_argument('--supervised-attempts', type=int, default=1)
+    parser.add_argument('--l1-model')
+    parser.add_argument('--cold-start-model')
+    parser.add_argument('--l2-planner-model')
+    parser.add_argument('--l2-editor-model')
+    parser.add_argument('--l2-reviewer-model')
+    parser.add_argument('--selector-model')
     args = parser.parse_args()
     root = args.root.resolve()
     if args.action == 'prepare':
-        result = prepare(root, args.inputs.resolve(), args.skill_edit_mode)
+        models = {'l1_executor': args.l1_model, 'cold_start': args.cold_start_model,
+                  'l2_planner': args.l2_planner_model, 'l2_editor': args.l2_editor_model,
+                  'l2_reviewer': args.l2_reviewer_model, 'selector': args.selector_model}
+        result = prepare(root, args.inputs.resolve(), args.skill_edit_mode, args.acceptance_mode,
+                         models=models, autonomous_attempts=args.autonomous_attempts,
+                         supervised_attempts=args.supervised_attempts)
         print(json.dumps({'root': str(root), 'benchmarks': result['benchmarks'], 'model': result['model']}))
     elif args.action == 'check':
         result = verify(root)

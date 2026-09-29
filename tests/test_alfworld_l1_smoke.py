@@ -40,7 +40,7 @@ class NativeAlfworldSmoke(unittest.TestCase):
         model = Model()
         with tempfile.TemporaryDirectory() as directory, patch.object(F, 'LLM_CLS', return_value=model):
             path = Path(directory)/'task.json'
-            exp, agent = gather_task_experience(cfg, 0, 'native', 'source', skill=skill,
+            exp, agent = gather_task_experience(cfg, 0, 'native', 'train', skill=skill,
                 selected_skill_id=skill.skill_id, evolution_round=2,
                 max_attempts=1, supervised_repair=False, checkpoint_path=path)
             try:
@@ -52,7 +52,7 @@ class NativeAlfworldSmoke(unittest.TestCase):
                 self.assertTrue(any(skill.body in m.content for m in model.prompts[0]))
                 before = path.read_bytes()
                 calls = len(model.prompts)
-                same, second = gather_task_experience(cfg, 0, 'native', 'source', skill=skill,
+                same, second = gather_task_experience(cfg, 0, 'native', 'train', skill=skill,
                     selected_skill_id=skill.skill_id, evolution_round=2,
                     max_attempts=1, supervised_repair=False, checkpoint_path=path)
                 second.env.close()

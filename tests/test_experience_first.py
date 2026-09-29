@@ -64,7 +64,7 @@ class ExperienceFirstTests(unittest.TestCase):
         self.cfg.benchmark.task_file = str(self.tasks)
         self.cfg.agent.llm = "gpt-3.5-turbo"
         self.plan = S.SplitPlan.make(
-            {0: "source", 1: "source", 2: "admission", 3: "final"}, "searchqa", 42
+            {0: "train", 1: "train", 2: "val", 3: "test"}, "searchqa", 42
         )
         self.calls = []
         self.executed = []
@@ -153,8 +153,8 @@ class ExperienceFirstTests(unittest.TestCase):
         self.assertTrue(
             all(s.skill_key is None and not s.skill_aware for s in self.executed)
         )
-        self.assertEqual(plan.tasks_in("admission"), (2,))
-        self.assertEqual(plan.tasks_in("final"), (3,))
+        self.assertEqual(plan.tasks_in("val"), (2,))
+        self.assertEqual(plan.tasks_in("test"), (3,))
         self.assertEqual(set(plan.families["family-p001"]), {0, 1})
         mapping = json.loads((self.root / "task_skill_map.json").read_text())
         self.assertEqual(

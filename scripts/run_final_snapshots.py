@@ -155,7 +155,7 @@ def prepare(root, sources):
         # Preflight uses two SOURCE tasks, so implementation checks do not inspect Final.
         smoke_ids = sorted(plan.tasks_in(S.SPLIT_SOURCE))[:2]
         smoke_split = read(source / 'split.json')
-        smoke_split['assignment'] = {str(t): ('final' if t in smoke_ids else 'source') for t in range(len(tasks))}
+        smoke_split['assignment'] = {str(t): ('test' if t in smoke_ids else 'train') for t in range(len(tasks))}
         save(dest / 'preflight-split.json', smoke_split)
         libs = {}
         for label, raw in snapshots.items():
@@ -226,7 +226,7 @@ def evaluate(root, benchmark, mode):
         results = {}
         for label in LABELS:
             fingerprint = manifest['benchmarks'][benchmark]['snapshots'][label]
-            target = target_root / 'final' / fingerprint
+            target = target_root / 'test' / fingerprint
             raw = read(inputs / f'{label}.json')
             skills = [S.from_dict(S.Skill, s) for s in raw]
             save(target_root / 'status.json', dict(status='evaluating', snapshot=label, target=str(target), pid=os.getpid(), updated=time.time()))
@@ -256,7 +256,7 @@ def evaluate(root, benchmark, mode):
                     print(f'{benchmark} {label} {skill.key}: {score.successes}/{score.n}; reused={score.from_cache}', flush=True)
                 successes = sum(v['successes'] for v in per_skill.values())
                 n = len(plan.tasks_in(S.SPLIT_FINAL))
-                save(target / 'summary.json', dict(split='final', library_hash=fingerprint, routing_reference='initial_skills',
+                save(target / 'summary.json', dict(split='test', library_hash=fingerprint, routing_reference='initial_skills',
                     tasks=n, successes=successes, score=successes/n, per_skill=per_skill, routing_failures=list(routes.failed_task_ids)))
                 audit = audit_final(target_root, target)
             save(target / 'audit.json', audit)
@@ -264,7 +264,8 @@ def evaluate(root, benchmark, mode):
             results[label] = dict(target=str(target), audit=audit, **read(target / 'summary.json'))
             save(target_root / 'snapshots.json', results)
         paired = paired_results(results)
-        save(target_root / 'routing-usage-audit.json', audit_token_ledgers(target_root / 'routes/final/usage'))
+        save(target_root / 'routing-usage-audit.json',
+             audit_token_ledgers(target_root / 'routes' / S.SPLIT_FINAL / 'usage'))
         save(target_root / 'paired.json', paired)
         save(target_root / 'status.json', dict(status='complete', pid=os.getpid(), snapshots=results, paired=paired, updated=time.time()))
 

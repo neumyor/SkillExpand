@@ -25,7 +25,7 @@ class ExpelAgent(ReflectAgent):
                  system_critique_instructions: Dict[str, str],
                  human_critiques: Dict[str, PromptTemplate],
                  rule_template: PromptTemplate,
-                 max_num_rules: Union[int, str],
+                 max_num_rules: Union[int, str, None],
                  truncate_strategy: str,
                  embedder: Callable,
                  embedder_path: str,
@@ -45,6 +45,9 @@ class ExpelAgent(ReflectAgent):
         self.benchmark_name = benchmark_name
         self.system_critique_instructions = system_critique_instructions
         self.human_critiques = human_critiques
+        # ``None`` means no rule-count threshold.  It preserves the legacy
+        # counter based pruning mechanism while removing the arbitrary cap from
+        # the prompt and from add/remove strength decisions.
         self.max_num_rules = max_num_rules
         self.rule_template = rule_template
         self.truncate_strategy = truncate_strategy
@@ -239,7 +242,10 @@ class ExpelAgent(ReflectAgent):
         if existing_rules is not None:
             human_format_dict['existing_rules'] = '\n'.join([f'{i}. {r}' for i, r in enumerate(existing_rules, 1)])
         human_critique_summary_message = self.human_critiques[critique_type].format_messages(**human_format_dict)[0]
-        critique_summary_suffix = self.critique_summary_suffix['full'] if self.max_num_rules <= len(self.rule_items_with_count) else self.critique_summary_suffix['not_full']
+        list_full = (self.max_num_rules is not None and
+                     self.max_num_rules <= len(self.rule_items_with_count))
+        critique_summary_suffix = (self.critique_summary_suffix['full'] if list_full
+                                   else self.critique_summary_suffix['not_full'])
         human_critique_summary_message.content = human_critique_summary_message.content + critique_summary_suffix
         critique_history.append(human_critique_summary_message)
         return critique_history
@@ -314,7 +320,10 @@ class ExpelAgent(ReflectAgent):
             parsed_operations = parse_rules(llm_output)
 
             # update the rule_items with counter
-            self.rule_items_with_count = update_rules(self.rule_items_with_count, parsed_operations, list_full = self.max_num_rules+5 <= len(self.rule_items_with_count))
+            list_full = (self.max_num_rules is not None and
+                         self.max_num_rules + 5 <= len(self.rule_items_with_count))
+            self.rule_items_with_count = update_rules(
+                self.rule_items_with_count, parsed_operations, list_full=list_full)
 
             new_ordered_rules_str = [rule[0] for rule in self.rule_items_with_count]
             return new_ordered_rules_str, llm_output

@@ -12,6 +12,7 @@ from skillexpand.l2.patterns import validate_cache
 from skillexpand.l1.audit import audit_checkpoint
 from skillexpand.l1.adapters import resolve
 from omegaconf import OmegaConf
+from skillexpand.l2 import structured_skill as SS
 
 
 def require(condition, message):
@@ -27,20 +28,47 @@ def audit_batch(root, batch, base, cards):
     meta = S.from_dict(S.MetaSkill, records[0])
     protocol = json.loads((root / 'l2_manifest.json').read_text())
     mode = protocol['config'].get('skill_edit_mode', 'rewrite')
-    runtime = json.loads((root / 'config.json').read_text())
-    max_rules = runtime['agent']['max_num_rules']
-    runner = SkillPatchRunner(SkillEditor(None, meta, max_rules, mode), None,
-                              root / 'l2_proposals', read_only=True)
+    acceptance_mode = protocol['config'].get('acceptance_mode', 'predicted')
+    require(protocol.get('acceptance_mode', acceptance_mode) == acceptance_mode,
+            'L2 manifest acceptance mode disagrees with frozen config')
+    runner = SkillPatchRunner(
+        SkillEditor(None, meta, skill_edit_mode=mode), None,
+        root / 'l2_proposals', read_only=True,
+        acceptance_mode=acceptance_mode,
+    )
     pattern_path = root / 'l2_patterns' / (batch['batch_id'] + '.json')
     patterns = json.loads(pattern_path.read_text())
     require(batch['batch_patterns'] == patterns, 'batch pattern journal mismatch')
     validate_cache(patterns, cards)
     result = runner.run(base, cards, batch['requested_candidates'],
-                        batch_patterns=patterns['patterns'])
+                        batch_patterns=patterns['patterns'],
+                        acceptance_record=batch.get('acceptance') if acceptance_mode == 'empirical' else None)
     require(all(batch.get(k) == v for k, v in result.record.items()),
             'L2 journal differs from cached proposal/review replay')
     require(batch.get('candidate') == (S.to_dict(result.candidate) if result.candidate else None),
             'committed candidate differs from replayed decision')
+    if mode == 'structured':
+        candidates = []
+        for proposal in batch.get('proposals', []):
+            raw_candidate = proposal.get('edit', {}).get('candidate')
+            if raw_candidate:
+                candidates.append(S.from_dict(S.CandidateSkill, raw_candidate))
+        for candidate in candidates:
+            require(len(candidate.edits) == 1, 'structured candidate must carry one edit')
+            edit = candidate.edits[0]
+            require(edit.section in SS.SECTION_NAMES, 'structured candidate has unknown section')
+            require(edit.op in ('ADD', 'EDIT'), 'structured candidate has unsupported edit op')
+            require(isinstance(edit.text, str) and edit.text.strip(),
+                    'structured candidate has empty edit text')
+            operation = {
+                'op': 'add' if edit.op == 'ADD' else 'replace',
+                'section': edit.section,
+                'target_id': edit.target_id,
+                'text': edit.text,
+            }
+            replayed = SS.render(SS.apply_edit(SS.from_legacy(base.body), operation))
+            require(replayed == candidate.skill.body,
+                    'structured candidate body does not match its recorded operation')
 
 
 def audit_round(root, round_index):
@@ -54,6 +82,9 @@ def audit_round(root, round_index):
     require(manifest['task_ids'] == source == inputs['task_ids'], 'round/source coverage mismatch')
     heads = {s['family_id']: S.from_dict(S.Skill, s) for s in inputs['skills']}
     protocol = json.loads((root / 'l2_manifest.json').read_text())
+    expected_acceptance_mode = protocol['config'].get('acceptance_mode', 'predicted')
+    require(protocol.get('acceptance_mode', expected_acceptance_mode) == expected_acceptance_mode,
+            'L2 manifest acceptance mode disagrees with frozen config')
     require(inputs['round'] == manifest['round'] == round_index, 'round identity mismatch')
     require(len(heads) == len(inputs['skills']), 'duplicate input Skill family')
     if round_index == 1:
@@ -141,8 +172,29 @@ def audit_round(root, round_index):
                     and candidate.skill.description == base.description, 'invalid candidate version/description')
             require(library.get(candidate.skill.key) == candidate.skill, 'journal/Skill store mismatch')
             heads[batch['family_id']] = candidate.skill
-        require(batch.get('empirically_validated') is False,
-                'review prediction was mislabeled as empirical validation')
+        expected_mode = expected_acceptance_mode
+        require(batch.get('acceptance_mode') == expected_mode,
+                'batch acceptance mode differs from frozen protocol')
+        require(batch.get('acceptance', {}).get('mode') == expected_mode,
+                'batch acceptance record mode differs from frozen protocol')
+        if expected_mode == 'predicted':
+            require(batch.get('empirically_validated') is False,
+                    'prediction was mislabeled as empirical validation')
+            require(batch.get('acceptance', {}).get('executions', 0) == 0,
+                    'predicted acceptance executed admission')
+        else:
+            require(batch.get('empirically_validated') is bool(batch.get('acceptance', {}).get('candidates')),
+                    'empirical validation flag mismatch')
+            acceptance = batch.get('acceptance', {})
+            if acceptance.get('candidates'):
+                candidate_ids = {row.get('candidate_id') for row in acceptance['candidates']}
+                proposed_ids = {
+                    row['edit']['candidate']['candidate_id']
+                    for row in batch.get('proposals', [])
+                    if row.get('edit', {}).get('candidate')
+                }
+                require(candidate_ids == proposed_ids,
+                        'empirical acceptance does not cover every proposed candidate')
     require(tuple(sorted(seen)) == expected_tasks,
             'round batches do not cover each source task exactly once')
     for skill in heads.values():
@@ -153,15 +205,20 @@ def audit_round(root, round_index):
         require(summary.get('status') == 'complete', 'round summary is incomplete')
         require(summary.get('source_cards') == len(expected_tasks),
                 'round summary card count mismatch')
-        require(summary.get('admission_executions') == 0,
-                'admission execution leaked into evolution')
+        expected_mode = expected_acceptance_mode
+        require(summary.get('acceptance_mode') == expected_mode,
+                'summary acceptance mode mismatch')
+        if expected_mode == 'predicted':
+            require(summary.get('admission_executions') == 0,
+                    'admission execution leaked into predicted evolution')
         require(summary['skills'] == {s.skill_id: s.key for s in heads.values()}, 'summary Skill mismatch')
         require(summary['completed_batches'] == summary['batches'] == len(journals), 'batch count mismatch')
         require(summary['review_approved_updates'] == sum(b['outcome'] == 'review_approved' for b in journals),
                 'approval count mismatch')
     return {'round': round_index, 'tasks': len(cards), 'batches': len(journals),
             'review_approved': sum(x.get('outcome') == 'review_approved' for x in journals),
-            'empirical_validation': False}
+            'acceptance_mode': expected_acceptance_mode,
+            'empirical_validation': expected_acceptance_mode == 'empirical'}
 
 
 def main():

@@ -66,7 +66,7 @@ def main():
     routes = FrozenRoutes(cfg, plan, initial, run / 'routes', S.SPLIT_FINAL,
                           args.final_workers)
     for task in routes.ids:
-        routes._add(json.loads((run / 'routes/final/tasks' / f'{task}.json').read_text()))
+        routes._add(json.loads((run / 'routes' / S.SPLIT_FINAL / 'tasks' / f'{task}.json').read_text()))
     if set(routes.records) != set(routes.ids):
         raise ValueError('Missing frozen final routes')
     scorer = FixedSkillScorer(cfg, ScoreCache(output / 'scores.jsonl'), routes,
@@ -100,7 +100,7 @@ def main():
     if args.smoke:
         total = sum(item['tasks'] for item in per_skill.values())
     successes = sum(item['successes'] for item in per_skill.values())
-    result = {'status': 'complete', 'benchmark': plan.benchmark, 'split': 'final',
+    result = {'status': 'complete', 'benchmark': plan.benchmark, 'split': 'test',
               'evolution_round': args.round, 'library_hash': library_fingerprint(skills),
               'routing_reference': 'initial_skills', 'tasks': total, 'successes': successes,
               'score': successes / total if total else None,

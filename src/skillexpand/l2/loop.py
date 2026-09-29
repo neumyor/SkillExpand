@@ -1,4 +1,4 @@
-"""Serial source-batch editing and independent predicted review; no admission execution."""
+"""Serial source-batch editing with selectable predicted or empirical acceptance."""
 
 import json
 import os
@@ -18,6 +18,8 @@ from skillexpand.persistence.artifacts import provider_signature
 from skillexpand.l1.cold_start import freeze
 from skillexpand.l1.runner import save
 from skillexpand.runtime import parallel as PL
+from skillexpand.evaluation.routing import FrozenRoutes
+from skillexpand.evaluation import validation as VA
 
 
 @dataclass
@@ -26,15 +28,22 @@ class EvolutionConfig:
     candidate_count: int = 3
     evolve_l1_workers: int = 8
     l2_review_workers: int = 8
+    autonomous_attempts: int = 4
+    supervised_attempts: int = 1
     evolve_rounds: int = 1
     skill_edit_mode: str = "rewrite"
+    acceptance_mode: str = "predicted"
 
     def __post_init__(self):
         if min(self.batch_size, self.candidate_count, self.evolve_l1_workers,
-               self.l2_review_workers, self.evolve_rounds) < 1:
+               self.l2_review_workers, self.evolve_rounds, self.autonomous_attempts) < 1:
             raise ValueError("Evolution budgets must be positive")
+        if self.supervised_attempts < 0:
+            raise ValueError("supervised_attempts must be nonnegative")
         if self.skill_edit_mode not in ("rewrite", "structured"):
             raise ValueError("Unknown Skill edit mode")
+        if self.acceptance_mode not in ("predicted", "empirical"):
+            raise ValueError("Unknown acceptance mode")
 
     def to_dict(self):
         return S.to_dict(self)
@@ -125,8 +134,9 @@ class SerialEvolutionLoop:
             t: replace(e, family_id=plan.family_of(t)) for t, e in cold_cards.items()
         }
         manifest = json.loads((paths.root / "manifest.json").read_text())
-        self.l1_attempts = int(manifest.get("k", 4))
+        self.l1_attempts = int(manifest.get("k", self.config.autonomous_attempts))
         self.l1_supervised = bool(manifest.get("supervised", True))
+        self.l1_supervised_attempts = int(manifest.get("supervised_attempts", self.config.supervised_attempts))
         # Assignment is derived from the audited source map. selected_skill_id and
         # initial_skill_key stay None: these tasks were executed WITHOUT a Skill.
         protocol_config = self.config.to_dict()
@@ -137,6 +147,7 @@ class SerialEvolutionLoop:
         identity = {
             "protocol": PROTOCOL,
             "execution_protocol": "skill-aware-rounds-v2",
+            "acceptance_mode": self.config.acceptance_mode,
             "l1": {"attempts": self.l1_attempts, "supervised": self.l1_supervised},
             "config": protocol_config,
             "cards": {
@@ -173,6 +184,42 @@ class SerialEvolutionLoop:
         if self.meta.head().version != 0:
             raise ValueError("L3 is frozen; use a fresh cold-start import")
         self._recover_transactions()
+        self.admission_routes = None
+        self.admission_scorer = None
+
+    def _ensure_admission_scorer(self):
+        if self.config.acceptance_mode != "empirical":
+            return None
+        if self.admission_scorer is not None:
+            return self.admission_scorer
+        self.admission_routes = FrozenRoutes(
+            self.cfg, self.plan, self.initial, self.paths.root / "routes",
+            S.SPLIT_ADMISSION, self.config.l2_review_workers
+        ).run()
+        self.admission_scorer = VA.FixedSkillScorer(
+            self.cfg,
+            VA.ScoreCache(self.paths.root / "val" / "scores.jsonl"),
+            self.admission_routes,
+            self.config.l2_review_workers,
+        )
+        return self.admission_scorer
+
+    def _reasoning_host(self, role, usage_path):
+        """Build a role-specific host while keeping the two-argument API usable.
+
+        A few offline integrations replace ``build_reasoning_host`` with a small
+        factory accepting only ``(cfg, path)``.  Passing a role through a cloned
+        config preserves that compatibility and still makes the selected model
+        explicit in the host's config and usage artifact.
+        """
+        from omegaconf import OmegaConf
+        role_cfg = OmegaConf.create(OmegaConf.to_container(self.cfg, resolve=True))
+        role_cfg.agent.llm = F.role_model(self.cfg, role)
+        role_cfg.models = OmegaConf.create(
+            {**dict(OmegaConf.to_container(self.cfg.get('models', {}), resolve=True)),
+             role: role_cfg.agent.llm}
+        )
+        return F.build_reasoning_host(role_cfg, usage_path)
 
     def skill_heads(self):
         return [self.skills.head(f) for f in sorted(self.skills.families)]
@@ -246,30 +293,34 @@ class SerialEvolutionLoop:
             return
         skill = self.skills.head(batch["family_id"])
         evidence = [self.cards[t] for t in batch["task_ids"]]
-        host = F.build_reasoning_host(
-            self.cfg, self.paths.root / "usage" / f"editor-{skill.skill_id}.json"
-        )
+        planner_host = self._reasoning_host(
+            'l2_planner', self.paths.root / "usage" / f"planner-{skill.skill_id}.json")
+        editor_host = None
+        if self.config.skill_edit_mode != 'structured':
+            editor_host = self._reasoning_host(
+                'l2_editor', self.paths.root / "usage" / f"editor-{skill.skill_id}.json")
         def reviewer_factory(card):
             card_key = S.content_hash(card)
-            host = F.build_reasoning_host(
-                self.cfg,
-                self.paths.root / "usage" / f"reviewer-{skill.skill_id}-{card_key}.json",
-            )
+            host = self._reasoning_host(
+                'l2_reviewer',
+                self.paths.root / "usage" / f"reviewer-{skill.skill_id}-{card_key}.json")
             return CardReviewer(host)
 
         runner = UP.SkillPatchRunner(
-            ED.SkillEditor(host, self.meta.head(), self.cfg.agent.max_num_rules,
-                           self.config.skill_edit_mode),
+            ED.SkillEditor(planner_host, self.meta.head(), self.config.skill_edit_mode,
+                           editor_host=editor_host),
             None,
             self.paths.root / "l2_proposals",
             reviewer_factory=reviewer_factory,
+            acceptance_mode=self.config.acceptance_mode,
+            admission_scorer=self._ensure_admission_scorer(),
         )
         pattern_path = self.paths.root / 'l2_patterns' / (batch['batch_id'] + '.json')
         if pattern_path.exists():
             patterns = json.loads(pattern_path.read_text())
             BP.validate_cache(patterns,evidence)
         else:
-            patterns = BP.generate(host, evidence) if len(evidence) > 1 else {
+            patterns = BP.generate(planner_host, evidence) if len(evidence) > 1 else {
                 'raw': None, 'patterns': [], 'status': 'insufficient_cards'}
             save(pattern_path, patterns)
         result = runner.run(skill, evidence, self.config.candidate_count,
@@ -362,6 +413,7 @@ class SerialEvolutionLoop:
                     selection_source=S.SELECTION_FIXED,
                     max_trials=self.l1_attempts,
                     supervised_repair=self.l1_supervised,
+                    supervised_attempts=self.l1_supervised_attempts,
                     evolution_round=round_index,
                     l1_checkpoint_path=str(directory / "trials" / f"{task_id}.json")))
         errors = []
@@ -500,8 +552,13 @@ class SerialEvolutionLoop:
                 for r in records
             ),
             "skills": {s.skill_id: s.key for s in self.skill_heads()},
-            "empirically_validated": False,
-            "admission_executions": 0,
+            "acceptance_mode": self.config.acceptance_mode,
+            "empirically_validated": bool(records) and self.config.acceptance_mode == "empirical" and all(
+                r.get("empirically_validated") is True for r in records
+            ),
+            "admission_executions": sum(
+                int(r.get("acceptance", {}).get("executions", 0)) for r in records
+            ),
             "description_frozen": True,
             "meta_skill": self.meta.head().key,
             "l3_enabled": False,

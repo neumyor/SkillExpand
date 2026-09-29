@@ -1,7 +1,6 @@
 name: expel
 llm: gpt-3.5-turbo # gpt-3.5-turbo-0301
 max_reflection_depth: 3
-max_num_rules: 20
 truncate_strategy: null
 fewshot_strategy: task_similarity # task_similarity, step_similarity, reflection_similarity, thought_similarity, action_similarity, rotation, task_thought_similarity
 critique_truncate_strategy: random

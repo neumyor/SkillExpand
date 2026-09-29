@@ -22,7 +22,7 @@ class UpdateResult:
     candidate: object = None
 
 
-def parse_plan(raw, experiences, limit):
+def parse_plan(raw, experiences, limit, structured=False, base_skill=None):
     rows = _extract_json(raw).get("hypotheses")
     if not isinstance(rows, list) or len(rows) > limit:
         raise ValueError("Hypotheses must be a list no larger than K")
@@ -59,18 +59,39 @@ def parse_plan(raw, experiences, limit):
                 raise ValueError(
                     f"Evidence {ref!r} must reference a supplied card_id and evidence_id."
                 )
+        if structured:
+            edit = row.get('edit')
+            if not isinstance(edit, dict):
+                raise ValueError('Structured hypothesis needs an edit')
+            if set(edit) != {'op', 'section', 'target_id', 'text'}:
+                raise ValueError('Structured edit has an invalid schema')
+            # Let structured_skill.apply_edit perform the authoritative ID and
+            # section validation, while checking here that the Planner emitted
+            # the required fields before candidate materialization.
+            if edit['op'] not in ('add', 'replace') or edit['section'] not in (
+                    'procedure', 'conditions', 'completion_checks'):
+                raise ValueError('Unsupported structured edit')
+            if not isinstance(edit['text'], str) or not edit['text'].strip():
+                raise ValueError('Structured edit text is empty')
     return rows
 
 
 class SkillPatchRunner:
     def __init__(self, editor, reviewer, audit_dir, read_only=False,
-                 reviewer_factory=None):
+                 reviewer_factory=None, acceptance_mode="predicted",
+                 admission_scorer=None):
         self.editor, self.reviewer, self.audit_dir = editor, reviewer, Path(audit_dir)
         self.read_only = read_only
         self.reviewer_factory = reviewer_factory
+        if acceptance_mode not in ("predicted", "empirical"):
+            raise ValueError("Unknown acceptance mode")
+        if acceptance_mode == "empirical" and admission_scorer is None and not read_only:
+            raise ValueError("Empirical acceptance requires an admission scorer")
+        self.acceptance_mode = acceptance_mode
+        self.admission_scorer = admission_scorer
 
     def run(self, base_skill, experiences, candidate_count=3, batch_patterns=(),
-            l2_review_workers=1):
+            l2_review_workers=1, acceptance_record=None):
         experiences = tuple(experiences)
         if (
             candidate_count < 1
@@ -92,6 +113,7 @@ class SkillPatchRunner:
                 "meta": S.to_dict(self.editor.meta_skill),
                 "patterns": list(batch_patterns),
                 "skill_edit_mode": self.editor.skill_edit_mode,
+                "acceptance_mode": self.acceptance_mode,
             }
         )
         directory = self.audit_dir / identity
@@ -117,6 +139,7 @@ class SkillPatchRunner:
             "selection_method": "batch_card_review",
             "requested_candidates": candidate_count,
             "skill_edit_mode": self.editor.skill_edit_mode,
+            "acceptance_mode": self.acceptance_mode,
             "hypotheses": [],
             "proposals": [],
             "reviews": [],
@@ -124,10 +147,14 @@ class SkillPatchRunner:
             "outcome": "hold",
             "reason": "",
             "empirically_validated": False,
+            "acceptance": {"mode": self.acceptance_mode, "executions": 0, "task_ids": [], "candidates": []},
         }
         for repair in range(2):
             try:
-                hypotheses = parse_plan(plan["raw"], experiences, candidate_count)
+                hypotheses = parse_plan(
+                    plan["raw"], experiences, candidate_count,
+                    structured=self.editor.skill_edit_mode == 'structured',
+                    base_skill=base_skill)
                 break
             except (ValueError, KeyError, TypeError) as exc:
                 if repair:
@@ -156,14 +183,16 @@ class SkillPatchRunner:
         for index, hypothesis in enumerate(hypotheses):
             edit = cached(
                 f"candidate-{index}",
-                lambda: S.to_dict(
-                    self.editor.propose(
-                        base_skill,
-                        experiences,
-                        hypothesis=hypothesis,
-                        previous_changes=previous,
-                    )
-                ),
+                    lambda: S.to_dict(
+                        self.editor.apply_planner_edit(base_skill, experiences, hypothesis)
+                        if self.editor.skill_edit_mode == 'structured' else
+                        self.editor.propose(
+                            base_skill,
+                            experiences,
+                            hypothesis=hypothesis,
+                            previous_changes=previous,
+                        )
+                    ),
             )
             candidate = (
                 S.from_dict(S.CandidateSkill, edit["candidate"])
@@ -262,11 +291,71 @@ class SkillPatchRunner:
             record["partial_review_units"] = units
             return UpdateResult(record)
         results = aggregate(payload, cards, units)
-        selected, reason = choose(results)
+        acceptance = {
+            "mode": self.acceptance_mode,
+            "executions": 0,
+            "task_ids": [],
+            "candidates": [],
+        }
+        if self.acceptance_mode == "predicted":
+            selected, reason = choose(results)
+            acceptance["predicted"] = results
+        else:
+            # The route group is fixed from the initial Skill descriptions. Every
+            # candidate is paired with the current head on exactly that panel.
+            if acceptance_record is not None:
+                task_ids = tuple(acceptance_record.get("task_ids", ()))
+                panel_key = acceptance_record.get("panel", "")
+            else:
+                task_ids = tuple(self.admission_scorer.routes.groups[base_skill.skill_id])
+                panel_key = f"admission:{self.admission_scorer.routes.fingerprint}:{base_skill.skill_id}"
+            acceptance.update({"task_ids": list(task_ids), "panel": panel_key})
+            validations = []
+            if acceptance_record is not None:
+                # Offline audit reuses the recorded paired measurements; it must
+                # never execute an environment or silently choose a new winner.
+                acceptance = acceptance_record
+                validations = list(acceptance.get("candidates", []))
+                task_ids = tuple(acceptance.get("task_ids", ()))
+            elif task_ids:
+                alias_by_candidate = {v.candidate_id: k for k, v in aliases.items()}
+                for candidate in ordered:
+                    validation = self.admission_scorer.validate(
+                        base_skill.skill_id, base_skill, candidate.skill, task_ids, panel_key
+                    )
+                    validations.append({
+                        "id": alias_by_candidate[candidate.candidate_id],
+                        "candidate_id": candidate.candidate_id,
+                        "result": S.to_dict(validation),
+                    })
+            acceptance["candidates"] = validations
+            if acceptance_record is None:
+                acceptance["executions"] = sum(
+                    int(len(task_ids) - v["result"]["metrics"]["base_from_cache"])
+                    + int(len(task_ids) - v["result"]["metrics"]["candidate_from_cache"])
+                    for v in validations
+                )
+            passed = [v for v in validations if v["result"].get("passed")]
+            if passed:
+                winner = max(
+                    passed,
+                    key=lambda v: (
+                        v["result"].get("metrics", {}).get("success_delta", float("-inf")),
+                        v["result"].get("metrics", {}).get("mean_candidate", float("-inf")),
+                        v["id"],
+                    ),
+                )
+                selected, reason = winner["id"], "empirical_approved: candidate beat the frozen admission panel"
+            elif not task_ids:
+                selected, reason = None, "hold: admission panel is empty"
+            else:
+                selected, reason = None, "hold: no candidate beat the frozen admission panel"
         record.update(
             reviews=results,
+            acceptance=acceptance,
             reason=reason,
             selected_candidate_id=aliases[selected].candidate_id if selected else None,
             outcome="review_approved" if selected else "hold",
+            empirically_validated=(self.acceptance_mode == "empirical" and bool(acceptance["candidates"])),
         )
         return UpdateResult(record, aliases[selected] if selected else None)

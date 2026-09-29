@@ -64,16 +64,18 @@ def task_batches(items, workers):
 
 class ColdStart:
     def __init__(self,cfg,plan,root,cold_start_workers=8,k=4,supervised=True,
+                 supervised_attempts=1,
                  family_discovery_workers=8, ask=None,run_units=None,card_batch_size=12,
                  skill_edit_mode='rewrite'):
         self.cfg,self.plan,self.root=cfg,plan,Path(root)
         self.cold_start_workers,self.k,self.supervised=cold_start_workers,k,supervised
+        self.supervised_attempts=supervised_attempts
         self.family_discovery_workers=family_discovery_workers
         self.card_batch_size=card_batch_size
         if skill_edit_mode not in ('rewrite', 'structured'):
             raise ValueError('Unknown Skill edit mode')
         self.skill_edit_mode=skill_edit_mode
-        if min(cold_start_workers,family_discovery_workers,k,card_batch_size)<1:
+        if min(cold_start_workers,family_discovery_workers,k,card_batch_size)<1 or supervised_attempts < 0:
             raise ValueError('cold-start budgets must be positive')
         self._ask=ask
         self._run_units=run_units or PL.run_generic
@@ -85,14 +87,15 @@ class ColdStart:
             'config':OmegaConf.to_container(cfg,resolve=True),
             'task_table_hash':S.content_hash(F.task_table(cfg)),
             'prompts':{key:getattr(adapter,key) for key in PROMPT_FIELDS},
-            'k':k,'supervised':supervised,'card_batch_size':card_batch_size,
+            'k':k,'supervised':supervised,'supervised_attempts':supervised_attempts,
+            'card_batch_size':card_batch_size,
             'skill_edit_mode':skill_edit_mode,
             'code':{str(p.relative_to(source)):S.content_hash(p.read_text())
                     for p in sorted(source.rglob('*.py'))}}
         freeze(self.root/'manifest.json',identity)
         freeze(self.root/'split.json',json.loads(json.dumps(S.to_dict(plan))))
 
-    def ask(self,prompt):
+    def ask(self,prompt, role='cold_start'):
         import uuid
         adapter=resolve(self.cfg)
         context={'benchmark':self.plan.benchmark,
@@ -107,7 +110,7 @@ class ColdStart:
         save(path,{'input':prompt,'status':'started'})
         try:
             if self._ask is None:
-                host=F.build_reasoning_host(self.cfg,self.directory/'usage'/f'{request_id}.json')
+                host=F.build_reasoning_host(self.cfg,self.directory/'usage'/f'{request_id}.json', role=role)
                 raw=host.llm([HumanMessage(content=prompt)],stop=[],replace_newline=False)
             else:
                 raw=self._ask(prompt)
@@ -128,6 +131,7 @@ class ColdStart:
                 task_id=t,family_id='unassigned',split=S.SPLIT_SOURCE,skill_aware=False,
                 selection_source=S.SELECTION_UNSKILLED,max_trials=self.k,
                 supervised_repair=self.supervised,
+                supervised_attempts=self.supervised_attempts,
                 l1_checkpoint_path=str(self.directory/'trials'/f'{t}.json')) for t in batch]
             errors=[]
             received=set()

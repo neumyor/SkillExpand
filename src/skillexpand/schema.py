@@ -48,15 +48,20 @@ SCHEMA_VERSION = 3
 
 #: Where a task sits in the three-way split of a family.
 #:
-#: ``SOURCE`` tasks may produce task experience that drives skill edits.
-#: ``ADMISSION`` tasks may be evaluated repeatedly while accepting or rejecting
+#: ``TRAIN`` tasks may produce task experience that drives skill edits.
+#: ``VAL`` tasks may be evaluated repeatedly while accepting or rejecting
 #: candidates, so scores on them are contaminated by selection.
-#: ``FINAL`` tasks must never enter the evolution loop; they carry the only
+#: ``TEST`` tasks must never enter the evolution loop; they carry the only
 #: uncontaminated estimate of generalisation.
-SPLIT_SOURCE = 'source'
-SPLIT_ADMISSION = 'admission'
-SPLIT_FINAL = 'final'
-SPLITS = (SPLIT_SOURCE, SPLIT_ADMISSION, SPLIT_FINAL)
+SPLIT_TRAIN = 'train'
+SPLIT_VAL = 'val'
+SPLIT_TEST = 'test'
+SPLITS = (SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST)
+# Semantic aliases keep the execution code readable while the persisted split
+# vocabulary follows the standard train/validation/test naming.
+SPLIT_SOURCE = SPLIT_TRAIN
+SPLIT_ADMISSION = SPLIT_VAL
+SPLIT_FINAL = SPLIT_TEST
 
 ROLE_EVAL = 'eval'
 ROLES = (ROLE_EVAL,)
@@ -330,12 +335,15 @@ class SkillEdit:
     Mirrors ExpeL's ``ADD / EDIT / REMOVE / AGREE`` vocabulary
     (``agent/expel.py:665`` ``parse_rules``).  Storing the operations, not just
     the resulting text, is what lets the meta-layer learn *which kinds of edit*
-    survive admission.
+    survive admission. Structured edits additionally retain the real section and
+    stable target rule ID used to construct the candidate.
     """
 
     op: str
     text: str
     rule_index: Optional[int] = None
+    section: Optional[str] = None
+    target_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         allowed = ('ADD', 'EDIT', 'REMOVE', 'AGREE')

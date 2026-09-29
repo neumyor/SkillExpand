@@ -19,7 +19,7 @@ def test_partition_is_reproducible_and_cluster_independent():
 
 def test_duplicate_ids_and_invalid_ratios_rejected():
     for fn in (lambda:SP.build_split_plan({'a':[1],'b':[1]}),
-               lambda:SP.allocate(10,{'source':.7,'final':.5})):
+               lambda:SP.allocate(10,{'train':.7,'test':.5})):
         try:fn()
         except ValueError:pass
         else:raise AssertionError('Invalid partition accepted')
@@ -31,7 +31,7 @@ def test_small_partition_keeps_all_three_roles():
 
 
 def test_source_membership_never_assigns_heldout():
-    plan=S.SplitPlan.make({0:'source',1:'admission',2:'final'},'x',42,{'cluster':(0,)})
-    assert SP.select_tasks(plan,'cluster','source')==[0]
-    assert SP.select_tasks(plan,'cluster','admission')==[]
+    plan=S.SplitPlan.make({0:'train',1:'val',2:'test'},'x',42,{'cluster':(0,)})
+    assert SP.select_tasks(plan,'cluster','train')==[0]
+    assert SP.select_tasks(plan,'cluster','val')==[]
     assert plan.family_of(2) is None

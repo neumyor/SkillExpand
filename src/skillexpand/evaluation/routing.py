@@ -33,7 +33,7 @@ def route_task(spec):
 
     try:
         cfg = PL._config(spec.benchmark)
-        host = F.build_reasoning_host(cfg, spec.usage_path)
+        host = F.build_reasoning_host(cfg, spec.usage_path, role='selector')
         skills = [SimpleNamespace(**s) for s in spec.descriptions]
         choice = SkillSelector(host).select(F.task_text_of(cfg, spec.task_id), skills)
         return {

@@ -96,6 +96,14 @@ def load_config(benchmark: str = 'alfworld', agent: str = 'expel') -> Any:
     return OmegaConf.create({
         'benchmark': bench,
         'agent': ag,
+        'models': {
+            'l1_executor': ag.llm,
+            'cold_start': ag.llm,
+            'l2_planner': ag.llm,
+            'l2_editor': ag.llm,
+            'l2_reviewer': ag.llm,
+            'selector': ag.llm,
+        },
         'ai_name': bench.ai_name,
         'agent_type': ag.name,
         'log_dir': 'logs',
@@ -198,8 +206,11 @@ def build_agent(
         max_relfection_depth=depth,
         system_critique_instructions=SYSTEM_CRITIQUE_INSTRUCTION[cfg.benchmark.name],
         human_critiques=HUMAN_CRITIQUES,
-        max_num_rules=max_num_rules if max_num_rules is not None
-        else (cfg.agent.max_num_rules if 'max_num_rules' in cfg.agent.keys() else 0),
+        # Rule growth is intentionally unbounded.  The old 20-rule cap made
+        # the executor silently change its add/remove policy once a Skill grew
+        # past an arbitrary threshold; structured L2 edits already constrain
+        # each individual change.
+        max_num_rules=max_num_rules,
         rule_template=RULE_TEMPLATE[cfg.benchmark.name],
         truncate_strategy=cfg.agent.truncate_strategy if 'truncate_strategy' in cfg.agent.keys() else None,
         llm_parser=LLM_PARSER[cfg.benchmark.name],
@@ -319,7 +330,14 @@ def task_text_of(cfg: Any, task_id: int) -> str:
     return text
 
 
-def build_reasoning_host(cfg,usage_path=None):
+def role_model(cfg, role: str) -> str:
+    """Return a role-specific reasoning model, falling back to the executor."""
+    models = cfg.get('models', {})
+    value = models.get(role) if models else None
+    return str(value or cfg.agent.llm)
+
+
+def build_reasoning_host(cfg,usage_path=None, model=None, role=None):
     """A model/prompt host without constructing or reading a task environment."""
     from types import SimpleNamespace
     import tiktoken
@@ -327,7 +345,8 @@ def build_reasoning_host(cfg,usage_path=None):
     key=os.environ.get('OPENAI_API_KEY','')
     if not key:
         raise RuntimeError('OPENAI_API_KEY is required')
-    llm=LLM_CLS(llm_name=cfg.agent.llm,openai_api_key=key,long_ver=False)
+    selected = model or (role_model(cfg, role) if role else cfg.agent.llm)
+    llm=LLM_CLS(llm_name=selected,openai_api_key=key,long_ver=False)
     if usage_path:
         from skillexpand.persistence.usage import attach_usage
         attach_usage([llm],usage_path)

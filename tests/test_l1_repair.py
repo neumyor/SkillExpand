@@ -76,7 +76,7 @@ class L1RepairTests(unittest.TestCase):
         from skillexpand.l1.experience import gather_task_experience
         model = Model(['Action 1: Search[Prius]', 'Action 2: Finish[Toyota]'])
         with patch.object(F, 'LLM_CLS', lambda **kwargs: model):
-            exp, agent = gather_task_experience(self.cfg, 0, 'family-p001', 'source',
+            exp, agent = gather_task_experience(self.cfg, 0, 'family-p001', 'train',
                 skill=self.skill, selected_skill_id=self.skill.skill_id,
                 max_attempts=1, checkpoint_path=self.root / 'public.json')
         self.assertTrue(exp.reward)
@@ -296,7 +296,7 @@ class L1RepairTests(unittest.TestCase):
         self.assertEqual(card['task']['text'],'task '*100)
     def test_reconstruct_selected_skill_identity(self):
         spec=PL.ExperienceSpec(unit_id='x',benchmark='searchqa',task_id=0,family_id='family-p001',
-            split='source',skill_key=self.skill.key,skill_body=self.skill.body,skill_description=self.skill.description,
+            split='train',skill_key=self.skill.key,skill_body=self.skill.body,skill_description=self.skill.description,
             selected_skill_id=self.skill.skill_id)
         self.assertEqual(PL._reconstruct_skill(spec).key,self.skill.key)
 

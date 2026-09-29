@@ -2,7 +2,7 @@
 import random
 from skillexpand import schema as S
 from typing import Dict
-DEFAULT_RATIOS={'source':.5,'admission':.25,'final':.25}
+DEFAULT_RATIOS={'train':.5,'val':.25,'test':.25}
 class SplitError(ValueError):
     pass
 
