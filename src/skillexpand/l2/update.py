@@ -79,7 +79,8 @@ def parse_plan(raw, experiences, limit, structured=False, base_skill=None):
 class SkillPatchRunner:
     def __init__(self, editor, reviewer, audit_dir, read_only=False,
                  reviewer_factory=None, acceptance_mode="predicted",
-                 admission_scorer=None, jev_scorer=None):
+                 admission_scorer=None, jev_scorer=None,
+                 predicted_review_scope="val", predicted_scorer=None):
         self.editor, self.reviewer, self.audit_dir = editor, reviewer, Path(audit_dir)
         self.read_only = read_only
         self.reviewer_factory = reviewer_factory
@@ -89,9 +90,16 @@ class SkillPatchRunner:
             raise ValueError("Empirical acceptance requires an admission scorer")
         if acceptance_mode == "jev" and jev_scorer is None and not read_only:
             raise ValueError("JEV acceptance requires a JEV scorer")
+        if predicted_review_scope not in ("val", "train_cards"):
+            raise ValueError("Unknown predicted review scope")
+        if (acceptance_mode == "predicted" and predicted_review_scope == "val"
+                and predicted_scorer is None and not read_only):
+            raise ValueError("Predicted val acceptance requires a predicted scorer")
         self.acceptance_mode = acceptance_mode
+        self.predicted_review_scope = predicted_review_scope
         self.admission_scorer = admission_scorer
         self.jev_scorer = jev_scorer
+        self.predicted_scorer = predicted_scorer
 
     def run(self, base_skill, experiences, candidate_count=3, batch_patterns=(),
             l2_review_workers=1, acceptance_record=None):
@@ -107,6 +115,11 @@ class SkillPatchRunner:
             )
         if l2_review_workers < 1:
             raise ValueError("l2_review_workers must be positive")
+        acceptance_protocol = getattr(
+            self.predicted_scorer or self.jev_scorer or self.admission_scorer,
+            "protocol_hash", None)
+        if acceptance_protocol is None and acceptance_record is not None:
+            acceptance_protocol = acceptance_record.get("protocol_hash")
         identity = S.content_hash(
             {
                 "protocol": PROTOCOL,
@@ -117,8 +130,8 @@ class SkillPatchRunner:
                 "patterns": list(batch_patterns),
                 "skill_edit_mode": self.editor.skill_edit_mode,
                 "acceptance_mode": self.acceptance_mode,
-                "acceptance_protocol": getattr(
-                    self.jev_scorer or self.admission_scorer, "protocol_hash", None),
+                "predicted_review_scope": self.predicted_review_scope,
+                "acceptance_protocol": acceptance_protocol,
             }
         )
         directory = self.audit_dir / identity
@@ -145,6 +158,7 @@ class SkillPatchRunner:
             "requested_candidates": candidate_count,
             "skill_edit_mode": self.editor.skill_edit_mode,
             "acceptance_mode": self.acceptance_mode,
+            "predicted_review_scope": self.predicted_review_scope,
             "hypotheses": [],
             "proposals": [],
             "reviews": [],
@@ -155,8 +169,11 @@ class SkillPatchRunner:
             "jev_validated": False,
             "acceptance": {
                 "mode": self.acceptance_mode,
+                "scope": self.predicted_review_scope if self.acceptance_mode == "predicted" else None,
+                "protocol_hash": acceptance_protocol,
                 "executions": 0,
                 "jev_requests": 0,
+                "predicted_requests": 0,
                 "task_ids": [],
                 "candidates": [],
             },
@@ -246,6 +263,79 @@ class SkillPatchRunner:
         record["candidate_aliases"] = {
             key: c.candidate_id for key, c in aliases.items()
         }
+
+        # The default predicted protocol is an independent validation-panel
+        # forecast.  It deliberately does not expose L1 cards or trajectories
+        # to the reviewer and therefore skips card-level review entirely.
+        if self.acceptance_mode == "predicted" and self.predicted_review_scope == "val":
+            if acceptance_record is not None:
+                acceptance = acceptance_record
+                task_ids = tuple(acceptance.get("task_ids", ()))
+                validations = list(acceptance.get("candidates", ()))
+            else:
+                scorer = self.predicted_scorer
+                task_ids = tuple(scorer.routes.groups[base_skill.skill_id])
+                panel_key = f"val:{scorer.routes.fingerprint}:{base_skill.skill_id}"
+                validations = []
+                alias_by_candidate = {v.candidate_id: k for k, v in aliases.items()}
+                if task_ids:
+                    for candidate in ordered:
+                        validation = scorer.validate(
+                            base_skill.skill_id, base_skill, candidate.skill,
+                            task_ids, panel_key
+                        )
+                        validations.append({
+                            "id": alias_by_candidate[candidate.candidate_id],
+                            "candidate_id": candidate.candidate_id,
+                            "result": S.to_dict(validation),
+                        })
+                request_count = sum(
+                    int(len(task_ids) - v["result"]["metrics"]["base_from_cache"])
+                    + int(len(task_ids) - v["result"]["metrics"]["candidate_from_cache"])
+                    for v in validations
+                )
+                acceptance = {
+                    "mode": "predicted",
+                    "scope": "val",
+                    "panel": panel_key,
+                    "protocol_hash": scorer.protocol_hash,
+                    "task_ids": list(task_ids),
+                    "candidates": validations,
+                    "candidate_ids": [c.candidate_id for c in ordered],
+                    "predicted_requests": request_count,
+                    "executions": 0,
+                    "jev_requests": 0,
+                }
+            passed = [v for v in validations if v.get("result", {}).get("passed")]
+            if passed:
+                winner = max(
+                    passed,
+                    key=lambda v: (
+                        v["result"].get("metrics", {}).get("success_delta", float("-inf")),
+                        v["result"].get("metrics", {}).get("mean_candidate", float("-inf")),
+                        v["id"],
+                    ),
+                )
+                selected = winner["id"]
+                reason = "predicted_val_approved: candidate beat the frozen val panel"
+            else:
+                selected = None
+                reason = ("hold: frozen val panel is empty" if not task_ids else
+                          "hold: no candidate beat the frozen val panel")
+            record.update(
+                selection_method="predicted_val_skill_success",
+                reviews=[],
+                review_errors=[],
+                reviewed_card_count=0,
+                acceptance=acceptance,
+                reason=reason,
+                selected_candidate_id=aliases[selected].candidate_id if selected else None,
+                outcome="review_approved" if selected else "hold",
+                empirically_validated=False,
+                jev_validated=False,
+            )
+            return UpdateResult(record, aliases[selected] if selected else None)
+
         cards = card_payload(experiences)
         record["review_protocol"] = PROTOCOL
         def review_one(card):
@@ -311,7 +401,10 @@ class SkillPatchRunner:
         results = aggregate(payload, cards, units)
         acceptance = {
             "mode": self.acceptance_mode,
+            "scope": self.predicted_review_scope if self.acceptance_mode == "predicted" else None,
+            "protocol_hash": acceptance_protocol,
             "executions": 0,
+            "predicted_requests": 0,
             "task_ids": [],
             "candidates": [],
         }

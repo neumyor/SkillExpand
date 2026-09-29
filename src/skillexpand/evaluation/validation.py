@@ -1,7 +1,9 @@
 """Paired validation and per-task caching on frozen selector-assigned Skill groups."""
 
+import json
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -359,4 +361,199 @@ class FixedSkillScorer:
             reasons=reasons,
             pairs=paired.pairs,
             returned_to_editor=False,
+        )
+
+
+@dataclass
+class PredictedPanelScore:
+    """One Skill revision's LLM-predicted score on a frozen val panel."""
+
+    skill_key: str
+    body: str
+    task_ids: Tuple[int, ...]
+    predictions: Tuple[Dict[str, Any], ...]
+    from_cache: int = 0
+    measured: int = 0
+
+    @property
+    def n(self) -> int:
+        return len(self.predictions)
+
+    @property
+    def successes(self) -> int:
+        return sum(1 for item in self.predictions if item["predicted_success"])
+
+    @property
+    def mean_probability(self) -> Optional[float]:
+        return (sum(float(item["probability_true"]) for item in self.predictions) / self.n
+                if self.n else None)
+
+    def as_arm(self, arm_id: str) -> S.ArmEvaluation:
+        outcomes = tuple(
+            S.TaskOutcome(
+                task_id=item["task_id"],
+                family_id=self.skill_key.split("@", 1)[0].split(".", 1)[-1],
+                role=S.ROLE_EVAL,
+                success=bool(item["predicted_success"]),
+                note=f"predicted_probability={item['probability_true']:.6f}",
+            )
+            for item in self.predictions
+        )
+        return S.ArmEvaluation(
+            arm_id=arm_id, role=S.ROLE_EVAL,
+            mode=S.MODE_CONSOLIDATED_DIRECT, skill_key=self.skill_key,
+            outcomes=outcomes, executor_fresh=True,
+            experience_withheld=True, fewshot_strategy="none",
+        )
+
+
+class PredictedSkillScorer:
+    """Predict Skill success independently on a frozen validation panel.
+
+    This is separate from JEV: it uses the configured L2 reviewer model through
+    the normal chat host, while JEV uses its dedicated judge endpoint. Both share
+    the same route groups and paired comparison for direct calibration.
+    """
+
+    PROTOCOL = "predicted-val-skill-success-v1"
+
+    def __init__(self, cfg, routes, cache, workers=8, judge_factory=None,
+                 threshold=0.5):
+        self.cfg = cfg
+        self.routes = routes
+        self.cache = cache
+        self.workers = max(1, int(workers))
+        self.judge_factory = judge_factory
+        self.threshold = float(threshold)
+        if not 0.0 <= self.threshold <= 1.0:
+            raise ValueError("prediction threshold must be between 0 and 1")
+        self.protocol_hash = S.content_hash({
+            "protocol": self.PROTOCOL,
+            "benchmark": cfg.benchmark.name,
+            "routes": routes.fingerprint,
+            "threshold": self.threshold,
+        })
+
+    @staticmethod
+    def prompt(task: str, skill: S.Skill) -> str:
+        return json.dumps({
+            "task": task,
+            "skill": {"description": skill.description, "body": skill.body},
+            "question": (
+                "Predict whether a fresh executor will complete this task successfully "
+                "with one autonomous attempt using this Skill. Do not assume rejected "
+                "answers can be retried and do not use any execution trace."
+            ),
+            "output": {
+                "probability_true": "number in [0,1]",
+                "predicted_success": "boolean",
+                "reason": "brief evidence-based explanation",
+            },
+        }, ensure_ascii=False)
+
+    def _parse(self, raw):
+        from skillexpand.l1.family_discovery import _extract_json
+        value = _extract_json(raw)
+        probability = value.get("probability_true", value.get("probability"))
+        if probability is None and isinstance(value.get("predicted_success"), bool):
+            probability = 1.0 if value["predicted_success"] else 0.0
+        try:
+            probability = float(probability)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Predicted reviewer must return probability_true") from exc
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("Predicted probability is outside [0, 1]")
+        return {
+            "probability_true": probability,
+            "predicted_success": probability >= self.threshold,
+            "reason": str(value.get("reason", "")),
+            "raw": value,
+            "threshold": self.threshold,
+        }
+
+    def score(self, skill, task_ids, panel_key):
+        task_ids = tuple(sorted(int(t) for t in task_ids))
+        if not task_ids or not set(task_ids) <= set(self.routes.groups[skill.skill_id]):
+            raise ValueError("Predicted tasks must belong to the frozen Skill route group")
+        keys = {
+            t: ScoreCache.make_key(self.cfg.benchmark.name, panel_key, t,
+                                   f"predicted:{self.protocol_hash}", skill.body)
+            for t in task_ids
+        }
+        records, pending = {}, []
+        for task_id in task_ids:
+            hit = self.cache.get(keys[task_id])
+            if hit is None:
+                pending.append(task_id)
+            else:
+                records[task_id] = hit
+
+        def one(task_id):
+            if self.judge_factory is None:
+                raise RuntimeError("Predicted val scorer requires a judge factory")
+            host = self.judge_factory(
+                task_id, skill,
+                self.cache.path.parent / "usage" /
+                f"predicted-{skill.skill_id}-{task_id}-{S.content_hash(skill.body)}.json",
+            )
+            from langchain.schema import HumanMessage
+            result = self._parse(host.llm(
+                [HumanMessage(content=self.prompt(F.task_text_of(self.cfg, task_id), skill))],
+                stop=[], replace_newline=False,
+            ))
+            return {"task_id": task_id, "skill_key": skill.key,
+                    "cache_key": keys[task_id], "panel_key": panel_key,
+                    "protocol_hash": self.protocol_hash, **result}
+
+        errors = []
+        if pending:
+            with ThreadPoolExecutor(max_workers=min(self.workers, len(pending)),
+                                    thread_name_prefix="predicted-val") as pool:
+                futures = {task_id: pool.submit(one, task_id) for task_id in pending}
+                for task_id in pending:
+                    try:
+                        record = futures[task_id].result()
+                    except Exception as exc:
+                        errors.append({"task_id": task_id,
+                                       "error": f"{type(exc).__name__}: {exc}"})
+                    else:
+                        self.cache.put(keys[task_id], record)
+                        records[task_id] = record
+        if errors or set(records) != set(task_ids):
+            raise RuntimeError(f"Incomplete predicted validation ({len(errors)} failed task(s))")
+        return PredictedPanelScore(
+            skill.key, skill.body, task_ids,
+            tuple(records[t] for t in task_ids),
+            from_cache=len(task_ids) - len(pending), measured=len(pending),
+        )
+
+    def validate(self, skill_id: str, base_skill: S.Skill, candidate_skill: S.Skill,
+                 task_ids: Sequence[int], panel_key: str) -> S.ValidationResult:
+        if base_skill.skill_id != skill_id or candidate_skill.skill_id != skill_id:
+            raise ValueError("Both predicted arms must evaluate the same Skill")
+        base = self.score(base_skill, task_ids, panel_key)
+        candidate = self.score(candidate_skill, task_ids, panel_key)
+        base_arm, candidate_arm = base.as_arm(S.ARM_BASE), candidate.as_arm(S.ARM_CANDIDATE)
+        paired = S.paired_delta(base_arm, candidate_arm)
+        passed = (base.mean_probability is not None and candidate.mean_probability is not None
+                  and candidate.mean_probability > base.mean_probability)
+        return S.ValidationResult(
+            skill_id=skill_id, panel_key=panel_key, task_ids=tuple(task_ids),
+            base_skill_key=base.skill_key, candidate_skill_key=candidate.skill_key,
+            arms=(base_arm, candidate_arm),
+            metrics={
+                "mean_base": base.mean_probability,
+                "mean_candidate": candidate.mean_probability,
+                "success_delta": (candidate.mean_probability - base.mean_probability
+                                   if base.mean_probability is not None and candidate.mean_probability is not None
+                                   else None),
+                "predicted_base_successes": float(base.successes),
+                "predicted_candidate_successes": float(candidate.successes),
+                "n_paired": float(paired.n_paired),
+                "base_from_cache": float(base.from_cache),
+                "candidate_from_cache": float(candidate.from_cache),
+            },
+            passed=passed,
+            reasons=() if passed else ("predicted_val_no_gain",),
+            pairs=paired.pairs, returned_to_editor=False,
         )

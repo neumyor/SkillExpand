@@ -34,6 +34,7 @@ class EvolutionConfig:
     evolve_rounds: int = 1
     skill_edit_mode: str = "rewrite"
     acceptance_mode: str = "predicted"
+    predicted_review_scope: str = "val"
 
     def __post_init__(self):
         if min(self.batch_size, self.candidate_count, self.evolve_l1_workers,
@@ -45,6 +46,8 @@ class EvolutionConfig:
             raise ValueError("Unknown Skill edit mode")
         if self.acceptance_mode not in ("predicted", "empirical", "jev"):
             raise ValueError("Unknown acceptance mode")
+        if self.predicted_review_scope not in ("val", "train_cards"):
+            raise ValueError("Unknown predicted review scope")
 
     def to_dict(self):
         return S.to_dict(self)
@@ -189,6 +192,8 @@ class SerialEvolutionLoop:
         self.admission_scorer = None
         self.jev_routes = None
         self.jev_scorer = None
+        self.predicted_routes = None
+        self.predicted_scorer = None
 
     def _ensure_admission_scorer(self):
         if self.config.acceptance_mode != "empirical":
@@ -222,6 +227,31 @@ class SerialEvolutionLoop:
             self.config.l2_review_workers,
         )
         return self.jev_scorer
+
+    def _ensure_predicted_scorer(self):
+        if (self.config.acceptance_mode != "predicted" or
+                self.config.predicted_review_scope != "val"):
+            return None
+        if self.predicted_scorer is not None:
+            return self.predicted_scorer
+        self.predicted_routes = FrozenRoutes(
+            self.cfg, self.plan, self.initial, self.paths.root / "routes",
+            S.SPLIT_ADMISSION, self.config.l2_review_workers
+        ).run()
+
+        def judge_factory(task_id, skill, usage_path):
+            # The predicted reviewer is an ordinary configured L2 reviewer model;
+            # it is independent from the JEV endpoint and receives no trajectory.
+            return self._reasoning_host("l2_reviewer", usage_path)
+
+        self.predicted_scorer = VA.PredictedSkillScorer(
+            self.cfg,
+            self.predicted_routes,
+            VA.ScoreCache(self.paths.root / "val" / "predicted_scores.jsonl"),
+            self.config.l2_review_workers,
+            judge_factory=judge_factory,
+        )
+        return self.predicted_scorer
 
     def _reasoning_host(self, role, usage_path):
         """Build a role-specific host while keeping the two-argument API usable.
@@ -318,12 +348,15 @@ class SerialEvolutionLoop:
         if self.config.skill_edit_mode != 'structured':
             editor_host = self._reasoning_host(
                 'l2_editor', self.paths.root / "usage" / f"editor-{skill.skill_id}.json")
-        def reviewer_factory(card):
-            card_key = S.content_hash(card)
-            host = self._reasoning_host(
-                'l2_reviewer',
-                self.paths.root / "usage" / f"reviewer-{skill.skill_id}-{card_key}.json")
-            return CardReviewer(host)
+        reviewer_factory = None
+        if not (self.config.acceptance_mode == "predicted" and
+                self.config.predicted_review_scope == "val"):
+            def reviewer_factory(card):
+                card_key = S.content_hash(card)
+                host = self._reasoning_host(
+                    'l2_reviewer',
+                    self.paths.root / "usage" / f"reviewer-{skill.skill_id}-{card_key}.json")
+                return CardReviewer(host)
 
         runner = UP.SkillPatchRunner(
             ED.SkillEditor(planner_host, self.meta.head(), self.config.skill_edit_mode,
@@ -332,8 +365,10 @@ class SerialEvolutionLoop:
             self.paths.root / "l2_proposals",
             reviewer_factory=reviewer_factory,
             acceptance_mode=self.config.acceptance_mode,
+            predicted_review_scope=self.config.predicted_review_scope,
             admission_scorer=self._ensure_admission_scorer(),
             jev_scorer=self._ensure_jev_scorer(),
+            predicted_scorer=self._ensure_predicted_scorer(),
         )
         pattern_path = self.paths.root / 'l2_patterns' / (batch['batch_id'] + '.json')
         if pattern_path.exists():
@@ -564,6 +599,11 @@ class SerialEvolutionLoop:
             "completed_batches": len(records),
             "hypotheses": sum(len(r["hypotheses"]) for r in records),
             "reviewed_candidates": sum(len(r["reviews"]) for r in records),
+            "predicted_val_candidates": sum(
+                len(r.get("acceptance", {}).get("candidates", ()))
+                for r in records
+                if r.get("acceptance", {}).get("scope") == "val"
+            ),
             "review_approved_updates": sum(
                 r["outcome"] == "review_approved" for r in records
             ),
@@ -573,6 +613,7 @@ class SerialEvolutionLoop:
             ),
             "skills": {s.skill_id: s.key for s in self.skill_heads()},
             "acceptance_mode": self.config.acceptance_mode,
+            "predicted_review_scope": self.config.predicted_review_scope,
             "empirically_validated": bool(records) and self.config.acceptance_mode == "empirical" and all(
                 r.get("empirically_validated") is True for r in records
             ),
@@ -584,6 +625,10 @@ class SerialEvolutionLoop:
             ),
             "jev_requests": sum(
                 int(r.get("acceptance", {}).get("jev_requests", 0)) for r in records
+            ),
+            "predicted_val_requests": sum(
+                int(r.get("acceptance", {}).get("predicted_requests", 0))
+                for r in records
             ),
             "description_frozen": True,
             "meta_skill": self.meta.head().key,

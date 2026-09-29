@@ -38,6 +38,10 @@ class SerialL2Tests(unittest.TestCase):
         C.freeze(
             self.root / "config.json", OmegaConf.to_container(self.cfg, resolve=True)
         )
+        # These legacy integration tests exercise the card-review protocol.  The
+        # product default is the independent val-panel protocol; select the
+        # compatibility scope explicitly for this fixture.
+        config.setdefault("predicted_review_scope", "train_cards")
         return L.SerialEvolutionLoop(
             self.cfg,
             plan,
@@ -160,6 +164,51 @@ class SerialL2Tests(unittest.TestCase):
             F, "build_reasoning_host", side_effect=AssertionError("resume model")
         ):
             self.assertEqual(restored.run(), summary)
+
+    def test_predicted_val_scope_uses_paired_skill_forecast_and_audits_offline(self):
+        driver = self.prepared(batch_size=50, predicted_review_scope="val")
+        editor, _ = self.hosts(driver)
+        judge_calls = []
+
+        class Routes:
+            fingerprint = "test-val-routes"
+            groups = {skill.skill_id: (2,) for skill in driver.initial}
+
+        class Judge:
+            token_counter = len
+
+            @staticmethod
+            def llm(messages, **kwargs):
+                payload = json.loads(messages[-1].content)
+                body = payload["skill"]["body"]
+                judge_calls.append(body)
+                return json.dumps({
+                    "probability_true": 0.8 if body.startswith("NEW ") else 0.2,
+                    "reason": "controlled test forecast",
+                })
+
+        def factory(cfg, path):
+            return Judge() if "predicted-" in str(path) else editor
+
+        fake_routes = Routes()
+        with patch.object(PL, "run_generic", side_effect=self.units), patch.object(
+            F, "build_reasoning_host", side_effect=factory
+        ), patch.object(L.FrozenRoutes, "run", return_value=fake_routes), patch.object(
+            CR.CardReviewer, "review", side_effect=AssertionError("card reviewer must be skipped")
+        ):
+            summary = driver.run()
+
+        self.assertEqual(summary["predicted_review_scope"], "val")
+        self.assertGreater(summary["predicted_val_requests"], 0)
+        self.assertEqual(summary["admission_executions"], 0)
+        self.assertTrue(judge_calls)
+        for path in (self.root / "l2_batches").glob("*.json"):
+            batch = json.loads(path.read_text())
+            self.assertEqual(batch["predicted_review_scope"], "val")
+            self.assertEqual(batch["acceptance"]["scope"], "val")
+            self.assertEqual(batch["acceptance"]["executions"], 0)
+            self.assertTrue(batch["acceptance"]["panel"].startswith("val:"))
+            self.assertEqual(batch["reviews"], [])
 
     def test_card_reviews_use_bounded_pool_and_keep_card_order(self):
         driver = self.prepared(batch_size=50, l2_review_workers=2)
@@ -545,7 +594,7 @@ class SerialL2Tests(unittest.TestCase):
 
         resumed = L.SerialEvolutionLoop(
             driver.cfg, driver.plan, L.LoopPaths(self.root),
-            L.EvolutionConfig(batch_size=1),
+            L.EvolutionConfig(batch_size=1, predicted_review_scope="train_cards"),
         )
         with patch.object(PL, "run_generic", side_effect=AssertionError("resampled")), patch.object(
             F, "build_reasoning_host", side_effect=AssertionError("resampled")
@@ -656,6 +705,8 @@ class SerialL2Tests(unittest.TestCase):
                     str(target),
                     "--phase",
                     "l2",
+                    "--predicted-review-scope",
+                    "train_cards",
                 ]
             )
         summary = json.loads((target / "summary.json").read_text())

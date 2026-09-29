@@ -108,11 +108,14 @@ def validate_inputs(tasks, split):
 
 
 def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted', models=None,
-            autonomous_attempts=4, supervised_attempts=1):
+            autonomous_attempts=4, supervised_attempts=1,
+            predicted_review_scope='val'):
     if skill_edit_mode not in ('rewrite', 'structured'):
         raise ValueError('Unknown Skill edit mode')
     if acceptance_mode not in ('predicted', 'empirical', 'jev'):
         raise ValueError('Unknown acceptance mode')
+    if predicted_review_scope not in ('val', 'train_cards'):
+        raise ValueError('Unknown predicted review scope')
     repo = Path(__file__).resolve().parents[1]
     runtime = configured_runtime()
     if root.exists() and any(root.iterdir()):
@@ -155,6 +158,7 @@ def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted'
         'autonomous_attempts': autonomous_attempts, 'supervised_attempts': supervised_attempts,
         'batch_size': 50, 'candidate_count': 3,
         'skill_edit_mode': skill_edit_mode, 'acceptance_mode': acceptance_mode,
+        'predicted_review_scope': predicted_review_scope,
         'benchmarks': details,
         'request_interval_seconds': REQUEST_INTERVAL_SECONDS,
         'files': files, 'created': time.time(),
@@ -178,6 +182,7 @@ def verify(root):
             manifest['evolve_rounds'] != 2 or
             manifest.get('skill_edit_mode', 'rewrite') not in ('rewrite', 'structured') or
             manifest.get('acceptance_mode', 'predicted') not in ('predicted', 'empirical', 'jev') or
+            manifest.get('predicted_review_scope', 'val') not in ('val', 'train_cards') or
             int(manifest.get('autonomous_attempts', 4)) < 1 or
             int(manifest.get('supervised_attempts', 1)) < 0 or
             manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
@@ -257,6 +262,7 @@ def stage_args(root, mode, benchmark, stage):
         '--candidate-count', str(manifest['candidate_count']), '--resume']
     args += ['--skill-edit-mode', manifest.get('skill_edit_mode', 'rewrite')]
     args += ['--acceptance-mode', manifest.get('acceptance_mode', 'predicted')]
+    args += ['--predicted-review-scope', manifest.get('predicted_review_scope', 'val')]
     models = role_models(manifest)
     for flag, key in (('--l1-model', 'l1_executor'), ('--cold-start-model', 'cold_start'),
                       ('--l2-planner-model', 'l2_planner'), ('--l2-editor-model', 'l2_editor'),
@@ -507,6 +513,8 @@ def main():
                         help='Skill editing mode frozen when preparing a campaign')
     parser.add_argument('--acceptance-mode', choices=('predicted', 'empirical', 'jev'), default='predicted',
                         help='Skill acceptance mode frozen when preparing a campaign')
+    parser.add_argument('--predicted-review-scope', choices=('val', 'train_cards'), default='val',
+                        help='Evidence scope for predicted acceptance')
     parser.add_argument('--autonomous-attempts', type=int, default=4)
     parser.add_argument('--supervised-attempts', type=int, default=1)
     parser.add_argument('--l1-model')
@@ -523,7 +531,8 @@ def main():
                   'l2_reviewer': args.l2_reviewer_model, 'selector': args.selector_model}
         result = prepare(root, args.inputs.resolve(), args.skill_edit_mode, args.acceptance_mode,
                          models=models, autonomous_attempts=args.autonomous_attempts,
-                         supervised_attempts=args.supervised_attempts)
+                         supervised_attempts=args.supervised_attempts,
+                         predicted_review_scope=args.predicted_review_scope)
         print(json.dumps({'root': str(root), 'benchmarks': result['benchmarks'], 'model': result['model']}))
     elif args.action == 'check':
         result = verify(root)

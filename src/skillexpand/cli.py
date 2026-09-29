@@ -64,6 +64,8 @@ def build_parser():
         default="rewrite", help="Rewrite complete Skill bodies or apply one structured rule edit")
     p.add_argument("--acceptance-mode", choices=("predicted", "empirical", "jev"),
         default="predicted", help="Accept by card review, paired execution, or JEV validation")
+    p.add_argument("--predicted-review-scope", choices=("val", "train_cards"),
+        default="val", help="Evidence scope for predicted acceptance")
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent source tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,
@@ -323,6 +325,7 @@ def main(argv=None):
                 l2_review_workers=args.l2_review_workers,
                 skill_edit_mode=args.skill_edit_mode,
                 acceptance_mode=args.acceptance_mode,
+                predicted_review_scope=args.predicted_review_scope,
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config)
             # All evolution entry points execute Skill-aware L1 before L2.

@@ -30,12 +30,14 @@ def audit_batch(root, batch, base, cards):
     protocol = json.loads((root / 'l2_manifest.json').read_text())
     mode = protocol['config'].get('skill_edit_mode', 'rewrite')
     acceptance_mode = protocol['config'].get('acceptance_mode', 'predicted')
+    predicted_scope = protocol['config'].get('predicted_review_scope', 'val')
     require(protocol.get('acceptance_mode', acceptance_mode) == acceptance_mode,
             'L2 manifest acceptance mode disagrees with frozen config')
     runner = SkillPatchRunner(
         SkillEditor(None, meta, skill_edit_mode=mode), None,
         root / 'l2_proposals', read_only=True,
         acceptance_mode=acceptance_mode,
+        predicted_review_scope=predicted_scope,
     )
     pattern_path = root / 'l2_patterns' / (batch['batch_id'] + '.json')
     patterns = json.loads(pattern_path.read_text())
@@ -44,12 +46,14 @@ def audit_batch(root, batch, base, cards):
     result = runner.run(base, cards, batch['requested_candidates'],
                         batch_patterns=patterns['patterns'],
                         acceptance_record=batch.get('acceptance')
-                        if acceptance_mode in ('empirical', 'jev') else None)
+                        if acceptance_mode in ('empirical', 'jev') or
+                        (acceptance_mode == 'predicted' and predicted_scope == 'val')
+                        else None)
     require(all(batch.get(k) == v for k, v in result.record.items()),
             'L2 journal differs from cached proposal/review replay')
     require(batch.get('candidate') == (S.to_dict(result.candidate) if result.candidate else None),
             'committed candidate differs from replayed decision')
-    if acceptance_mode == 'predicted':
+    if acceptance_mode == 'predicted' and predicted_scope == 'train_cards':
         # v6 predicted review is a paired-outcome protocol.  Keep the derived
         # effect for selection, but require the raw old/new outcomes to remain
         # auditable in every card judgment.
@@ -58,6 +62,44 @@ def audit_batch(root, batch, base, cards):
                 require(judgment.get('old_outcome') in CR_OUTCOMES and
                         judgment.get('new_outcome') in CR_OUTCOMES,
                         'predicted review lacks canonical old/new outcomes')
+    if acceptance_mode == 'predicted' and predicted_scope == 'val':
+        acceptance = result.record.get('acceptance', {})
+        require(acceptance.get('mode') == 'predicted' and
+                acceptance.get('scope') == 'val',
+                'predicted val acceptance scope is missing')
+        require(acceptance.get('executions', 0) == 0,
+                'predicted val acceptance executed benchmark episodes')
+        candidate_ids = {row.get('candidate_id') for row in acceptance.get('candidates', ())}
+        proposed_ids = {
+            row['edit']['candidate']['candidate_id']
+            for row in batch.get('proposals', [])
+            if row.get('edit', {}).get('candidate')
+        }
+        if not proposed_ids:
+            require(candidate_ids == proposed_ids,
+                    'predicted val acceptance does not cover every proposed candidate')
+            require(not acceptance.get('candidates'),
+                    'predicted val acceptance has candidates without proposals')
+            return
+        if not acceptance.get('task_ids'):
+            require(not candidate_ids,
+                    'empty predicted val panel contains scored candidates')
+            require(set(acceptance.get('candidate_ids', ())) == proposed_ids,
+                    'empty predicted val panel lost candidate coverage')
+            return
+        require(candidate_ids == proposed_ids,
+                'predicted val acceptance does not cover every proposed candidate')
+        require(isinstance(acceptance.get('panel'), str) and acceptance.get('panel'),
+                'predicted val acceptance has no frozen panel')
+        require(acceptance.get('task_ids'), 'predicted val panel is empty')
+        for row in acceptance.get('candidates', ()):
+            result_value = row.get('result', {})
+            require(result_value.get('task_ids') == acceptance.get('task_ids'),
+                    'predicted val candidate panel differs from acceptance panel')
+            require(result_value.get('base_skill_key') == batch['base_skill_key'],
+                    'predicted val base Skill differs from batch head')
+            require(isinstance(result_value.get('metrics', {}).get('success_delta'), (int, float)),
+                    'predicted val candidate lacks success delta')
     if mode == 'structured':
         candidates = []
         for proposal in batch.get('proposals', []):
@@ -94,8 +136,11 @@ def audit_round(root, round_index):
     heads = {s['family_id']: S.from_dict(S.Skill, s) for s in inputs['skills']}
     protocol = json.loads((root / 'l2_manifest.json').read_text())
     expected_acceptance_mode = protocol['config'].get('acceptance_mode', 'predicted')
+    expected_predicted_scope = protocol['config'].get('predicted_review_scope', 'val')
     require(protocol.get('acceptance_mode', expected_acceptance_mode) == expected_acceptance_mode,
             'L2 manifest acceptance mode disagrees with frozen config')
+    require(expected_predicted_scope in ('val', 'train_cards'),
+            'unknown predicted review scope in frozen config')
     require(inputs['round'] == manifest['round'] == round_index, 'round identity mismatch')
     require(len(heads) == len(inputs['skills']), 'duplicate input Skill family')
     if round_index == 1:
@@ -163,7 +208,10 @@ def audit_round(root, round_index):
         require(batch['base_skill_key'] == base.key, 'broken sequential Skill chain')
         require(bool(batch.get('candidate')) == (batch['outcome'] == 'review_approved'),
                 'approval/candidate mismatch')
-        require(batch['outcome'] != 'review_approved' or bool(batch['reviews']), 'approval without reviews')
+        require(batch['outcome'] != 'review_approved' or
+                bool(batch['reviews']) or
+                (expected_acceptance_mode == 'predicted' and expected_predicted_scope == 'val'),
+                'approval without reviews')
         audit_batch(root, batch, base, [cards[t] for t in batch['task_ids']])
         require(batch.get('card_hashes'), 'round batch has no card hashes')
         for task_id in batch['task_ids']:
@@ -193,6 +241,10 @@ def audit_round(root, round_index):
                     'prediction was mislabeled as empirical validation')
             require(batch.get('acceptance', {}).get('executions', 0) == 0,
                     'predicted acceptance executed admission')
+            require(batch.get('predicted_review_scope') == expected_predicted_scope,
+                    'batch predicted review scope mismatch')
+            require(batch.get('acceptance', {}).get('scope') == expected_predicted_scope,
+                    'predicted acceptance scope mismatch')
         elif expected_mode == 'empirical':
             require(batch.get('empirically_validated') is bool(batch.get('acceptance', {}).get('candidates')),
                     'empirical validation flag mismatch')
@@ -236,6 +288,8 @@ def audit_round(root, round_index):
         expected_mode = expected_acceptance_mode
         require(summary.get('acceptance_mode') == expected_mode,
                 'summary acceptance mode mismatch')
+        require(summary.get('predicted_review_scope', 'val') == expected_predicted_scope,
+                'summary predicted review scope mismatch')
         if expected_mode == 'predicted':
             require(summary.get('admission_executions') == 0,
                     'admission execution leaked into predicted evolution')
@@ -255,6 +309,10 @@ def audit_round(root, round_index):
         require(summary['completed_batches'] == summary['batches'] == len(journals), 'batch count mismatch')
         require(summary['review_approved_updates'] == sum(b['outcome'] == 'review_approved' for b in journals),
                 'approval count mismatch')
+        if expected_mode == 'predicted' and expected_predicted_scope == 'val':
+            require(summary.get('predicted_val_candidates') == sum(
+                len(b.get('acceptance', {}).get('candidates', ())) for b in journals
+            ), 'predicted val candidate count mismatch')
     return {'round': round_index, 'tasks': len(cards), 'batches': len(journals),
             'review_approved': sum(x.get('outcome') == 'review_approved' for x in journals),
             'acceptance_mode': expected_acceptance_mode,

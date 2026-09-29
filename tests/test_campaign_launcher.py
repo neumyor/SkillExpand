@@ -73,6 +73,7 @@ def test_explicit_stage_arguments_and_concurrency(campaign):
             if stage.startswith('evolve-'):
                 assert args[args.index('--evolve-rounds') + 1] == stage[-1]
             assert args[args.index('--task-file') + 1].endswith(f'{benchmark}-tasks.json')
+            assert args[args.index('--predicted-review-scope') + 1] == 'val'
 
 
 def test_full_start_requires_matching_preflight(campaign):
