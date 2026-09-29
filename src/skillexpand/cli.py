@@ -62,8 +62,8 @@ def build_parser():
         help="Number of Skill-aware L1 -> L2 evolution rounds")
     p.add_argument("--skill-edit-mode", choices=("rewrite", "structured"),
         default="rewrite", help="Rewrite complete Skill bodies or apply one structured rule edit")
-    p.add_argument("--acceptance-mode", choices=("predicted", "empirical"),
-        default="predicted", help="Accept by card-review predictions or paired admission execution")
+    p.add_argument("--acceptance-mode", choices=("predicted", "empirical", "jev"),
+        default="predicted", help="Accept by card review, paired execution, or JEV validation")
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent source tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,

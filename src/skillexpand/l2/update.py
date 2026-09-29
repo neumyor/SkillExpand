@@ -79,16 +79,19 @@ def parse_plan(raw, experiences, limit, structured=False, base_skill=None):
 class SkillPatchRunner:
     def __init__(self, editor, reviewer, audit_dir, read_only=False,
                  reviewer_factory=None, acceptance_mode="predicted",
-                 admission_scorer=None):
+                 admission_scorer=None, jev_scorer=None):
         self.editor, self.reviewer, self.audit_dir = editor, reviewer, Path(audit_dir)
         self.read_only = read_only
         self.reviewer_factory = reviewer_factory
-        if acceptance_mode not in ("predicted", "empirical"):
+        if acceptance_mode not in ("predicted", "empirical", "jev"):
             raise ValueError("Unknown acceptance mode")
         if acceptance_mode == "empirical" and admission_scorer is None and not read_only:
             raise ValueError("Empirical acceptance requires an admission scorer")
+        if acceptance_mode == "jev" and jev_scorer is None and not read_only:
+            raise ValueError("JEV acceptance requires a JEV scorer")
         self.acceptance_mode = acceptance_mode
         self.admission_scorer = admission_scorer
+        self.jev_scorer = jev_scorer
 
     def run(self, base_skill, experiences, candidate_count=3, batch_patterns=(),
             l2_review_workers=1, acceptance_record=None):
@@ -114,6 +117,8 @@ class SkillPatchRunner:
                 "patterns": list(batch_patterns),
                 "skill_edit_mode": self.editor.skill_edit_mode,
                 "acceptance_mode": self.acceptance_mode,
+                "acceptance_protocol": getattr(
+                    self.jev_scorer or self.admission_scorer, "protocol_hash", None),
             }
         )
         directory = self.audit_dir / identity
@@ -147,7 +152,14 @@ class SkillPatchRunner:
             "outcome": "hold",
             "reason": "",
             "empirically_validated": False,
-            "acceptance": {"mode": self.acceptance_mode, "executions": 0, "task_ids": [], "candidates": []},
+            "jev_validated": False,
+            "acceptance": {
+                "mode": self.acceptance_mode,
+                "executions": 0,
+                "jev_requests": 0,
+                "task_ids": [],
+                "candidates": [],
+            },
         }
         for repair in range(2):
             try:
@@ -307,8 +319,10 @@ class SkillPatchRunner:
                 task_ids = tuple(acceptance_record.get("task_ids", ()))
                 panel_key = acceptance_record.get("panel", "")
             else:
-                task_ids = tuple(self.admission_scorer.routes.groups[base_skill.skill_id])
-                panel_key = f"admission:{self.admission_scorer.routes.fingerprint}:{base_skill.skill_id}"
+                scorer = self.jev_scorer if self.acceptance_mode == "jev" else self.admission_scorer
+                task_ids = tuple(scorer.routes.groups[base_skill.skill_id])
+                split_name = "val" if self.acceptance_mode == "jev" else "admission"
+                panel_key = f"{split_name}:{scorer.routes.fingerprint}:{base_skill.skill_id}"
             acceptance.update({"task_ids": list(task_ids), "panel": panel_key})
             validations = []
             if acceptance_record is not None:
@@ -320,7 +334,8 @@ class SkillPatchRunner:
             elif task_ids:
                 alias_by_candidate = {v.candidate_id: k for k, v in aliases.items()}
                 for candidate in ordered:
-                    validation = self.admission_scorer.validate(
+                    scorer = self.jev_scorer if self.acceptance_mode == "jev" else self.admission_scorer
+                    validation = scorer.validate(
                         base_skill.skill_id, base_skill, candidate.skill, task_ids, panel_key
                     )
                     validations.append({
@@ -330,11 +345,18 @@ class SkillPatchRunner:
                     })
             acceptance["candidates"] = validations
             if acceptance_record is None:
-                acceptance["executions"] = sum(
+                request_count = sum(
                     int(len(task_ids) - v["result"]["metrics"]["base_from_cache"])
                     + int(len(task_ids) - v["result"]["metrics"]["candidate_from_cache"])
                     for v in validations
                 )
+                if self.acceptance_mode == "jev":
+                    # JEV is a predictive judge and never runs the benchmark
+                    # environment.  Keep the historical ``executions`` field
+                    # reserved for empirical admission episodes.
+                    acceptance["jev_requests"] = request_count
+                else:
+                    acceptance["executions"] = request_count
             passed = [v for v in validations if v["result"].get("passed")]
             if passed:
                 winner = max(
@@ -345,7 +367,9 @@ class SkillPatchRunner:
                         v["id"],
                     ),
                 )
-                selected, reason = winner["id"], "empirical_approved: candidate beat the frozen admission panel"
+                reason_prefix = "jev_approved" if self.acceptance_mode == "jev" else "empirical_approved"
+                panel_name = "frozen val panel" if self.acceptance_mode == "jev" else "frozen admission panel"
+                selected, reason = winner["id"], f"{reason_prefix}: candidate beat the {panel_name}"
             elif not task_ids:
                 selected, reason = None, "hold: admission panel is empty"
             else:
@@ -357,5 +381,6 @@ class SkillPatchRunner:
             selected_candidate_id=aliases[selected].candidate_id if selected else None,
             outcome="review_approved" if selected else "hold",
             empirically_validated=(self.acceptance_mode == "empirical" and bool(acceptance["candidates"])),
+            jev_validated=(self.acceptance_mode == "jev" and bool(acceptance["candidates"])),
         )
         return UpdateResult(record, aliases[selected] if selected else None)

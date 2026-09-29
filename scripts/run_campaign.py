@@ -111,7 +111,7 @@ def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted'
             autonomous_attempts=4, supervised_attempts=1):
     if skill_edit_mode not in ('rewrite', 'structured'):
         raise ValueError('Unknown Skill edit mode')
-    if acceptance_mode not in ('predicted', 'empirical'):
+    if acceptance_mode not in ('predicted', 'empirical', 'jev'):
         raise ValueError('Unknown acceptance mode')
     repo = Path(__file__).resolve().parents[1]
     runtime = configured_runtime()
@@ -177,7 +177,7 @@ def verify(root):
     if (not all(models.values()) or manifest['concurrency'] != CONCURRENCY or
             manifest['evolve_rounds'] != 2 or
             manifest.get('skill_edit_mode', 'rewrite') not in ('rewrite', 'structured') or
-            manifest.get('acceptance_mode', 'predicted') not in ('predicted', 'empirical') or
+            manifest.get('acceptance_mode', 'predicted') not in ('predicted', 'empirical', 'jev') or
             int(manifest.get('autonomous_attempts', 4)) < 1 or
             int(manifest.get('supervised_attempts', 1)) < 0 or
             manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
@@ -505,7 +505,7 @@ def main():
     parser.add_argument('--attempt', type=int)
     parser.add_argument('--skill-edit-mode', choices=('rewrite', 'structured'), default='rewrite',
                         help='Skill editing mode frozen when preparing a campaign')
-    parser.add_argument('--acceptance-mode', choices=('predicted', 'empirical'), default='predicted',
+    parser.add_argument('--acceptance-mode', choices=('predicted', 'empirical', 'jev'), default='predicted',
                         help='Skill acceptance mode frozen when preparing a campaign')
     parser.add_argument('--autonomous-attempts', type=int, default=4)
     parser.add_argument('--supervised-attempts', type=int, default=1)

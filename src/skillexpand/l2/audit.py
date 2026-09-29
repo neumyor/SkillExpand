@@ -42,7 +42,8 @@ def audit_batch(root, batch, base, cards):
     validate_cache(patterns, cards)
     result = runner.run(base, cards, batch['requested_candidates'],
                         batch_patterns=patterns['patterns'],
-                        acceptance_record=batch.get('acceptance') if acceptance_mode == 'empirical' else None)
+                        acceptance_record=batch.get('acceptance')
+                        if acceptance_mode in ('empirical', 'jev') else None)
     require(all(batch.get(k) == v for k, v in result.record.items()),
             'L2 journal differs from cached proposal/review replay')
     require(batch.get('candidate') == (S.to_dict(result.candidate) if result.candidate else None),
@@ -182,7 +183,7 @@ def audit_round(root, round_index):
                     'prediction was mislabeled as empirical validation')
             require(batch.get('acceptance', {}).get('executions', 0) == 0,
                     'predicted acceptance executed admission')
-        else:
+        elif expected_mode == 'empirical':
             require(batch.get('empirically_validated') is bool(batch.get('acceptance', {}).get('candidates')),
                     'empirical validation flag mismatch')
             acceptance = batch.get('acceptance', {})
@@ -195,6 +196,23 @@ def audit_round(root, round_index):
                 }
                 require(candidate_ids == proposed_ids,
                         'empirical acceptance does not cover every proposed candidate')
+        else:
+            require(batch.get('empirically_validated') is False,
+                    'JEV acceptance was mislabeled as empirical validation')
+            require(batch.get('jev_validated') is bool(batch.get('acceptance', {}).get('candidates')),
+                    'JEV validation flag mismatch')
+            acceptance = batch.get('acceptance', {})
+            require(acceptance.get('executions', 0) == 0,
+                    'JEV acceptance executed benchmark episodes')
+            if acceptance.get('candidates'):
+                candidate_ids = {row.get('candidate_id') for row in acceptance['candidates']}
+                proposed_ids = {
+                    row['edit']['candidate']['candidate_id']
+                    for row in batch.get('proposals', [])
+                    if row.get('edit', {}).get('candidate')
+                }
+                require(candidate_ids == proposed_ids,
+                        'JEV acceptance does not cover every proposed candidate')
     require(tuple(sorted(seen)) == expected_tasks,
             'round batches do not cover each source task exactly once')
     for skill in heads.values():
@@ -211,6 +229,18 @@ def audit_round(root, round_index):
         if expected_mode == 'predicted':
             require(summary.get('admission_executions') == 0,
                     'admission execution leaked into predicted evolution')
+        elif expected_mode == 'jev':
+            expected_jev_validated = bool(journals) and all(
+                bool(b.get('acceptance', {}).get('candidates')) for b in journals
+            )
+            require(summary.get('empirically_validated') is False and
+                    summary.get('jev_validated') is expected_jev_validated,
+                    'JEV summary validation flags mismatch')
+            require(summary.get('admission_executions') == 0,
+                    'JEV summary counted judge requests as admission executions')
+            require(summary.get('jev_requests') == sum(
+                int(b.get('acceptance', {}).get('jev_requests', 0)) for b in journals
+            ), 'JEV request count mismatch')
         require(summary['skills'] == {s.skill_id: s.key for s in heads.values()}, 'summary Skill mismatch')
         require(summary['completed_batches'] == summary['batches'] == len(journals), 'batch count mismatch')
         require(summary['review_approved_updates'] == sum(b['outcome'] == 'review_approved' for b in journals),

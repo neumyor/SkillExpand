@@ -52,7 +52,18 @@ class FrozenRoutes:
         if split not in (S.SPLIT_ADMISSION, S.SPLIT_FINAL):
             raise ValueError("Only held-out tasks are routed")
         self.cfg, self.plan, self.split = cfg, plan, split
-        self.root, self.final_workers = Path(root) / split, final_workers
+        route_root = Path(root) / split
+        persisted_split = split
+        # Runs created before the train/val/test vocabulary used ``admission`` for
+        # the validation directory.  Reusing such a frozen route is safe because
+        # the route records themselves carry task ids and Skill ids; only the
+        # on-disk directory name changed.
+        if split == S.SPLIT_VAL and not route_root.exists():
+            legacy_root = Path(root) / "admission"
+            if legacy_root.exists():
+                route_root = legacy_root
+                persisted_split = "admission"
+        self.root, self.final_workers = route_root, final_workers
         self.ids = tuple(sorted(plan.tasks_in(split)))
         self.descriptions = tuple(
             {"skill_id": s.skill_id, "description": s.description}
@@ -66,7 +77,9 @@ class FrozenRoutes:
             )
         identity = {
             "protocol": "fixed-description-routes-v1",
-            "split": split,
+            # Preserve the spelling used by a reused legacy manifest so its
+            # fingerprint remains the identity of the frozen route.
+            "split": persisted_split,
             "config": OmegaConf.to_container(cfg, resolve=True),
             "provider": provider_signature(),
             "descriptions": list(self.descriptions),
@@ -76,6 +89,55 @@ class FrozenRoutes:
         self.fingerprint = S.content_hash(identity)
         freeze(self.root / "manifest.json", identity)
         self.records = {}
+
+    @classmethod
+    def load_existing(cls, cfg, plan, library, root, split):
+        """Load a completed frozen route without revalidating its provider hash.
+
+        This is intentionally read-only.  It is used for post-hoc calibration when
+        the selector service version has changed since the route was measured; the
+        task-to-Skill assignment is the frozen input we want to reuse, while a new
+        selector call would silently change the evaluation panel.
+        """
+        if split not in (S.SPLIT_ADMISSION, S.SPLIT_FINAL):
+            raise ValueError("Only held-out tasks are routed")
+        route_root = Path(root) / split
+        if not route_root.exists() and split == S.SPLIT_VAL:
+            legacy_root = Path(root) / "admission"
+            if legacy_root.exists():
+                route_root = legacy_root
+        manifest_path = route_root / "manifest.json"
+        complete_path = route_root / "complete.json"
+        if not manifest_path.exists() or not complete_path.exists():
+            raise FileNotFoundError(f"incomplete frozen route at {route_root}")
+        manifest = json.loads(manifest_path.read_text())
+        complete = json.loads(complete_path.read_text())
+        obj = cls.__new__(cls)
+        obj.cfg, obj.plan, obj.split = cfg, plan, split
+        obj.root, obj.final_workers = route_root, 1
+        obj.ids = tuple(sorted(plan.tasks_in(split)))
+        obj.descriptions = tuple(
+            {"skill_id": s.skill_id, "description": s.description}
+            for s in sorted(library, key=lambda s: s.skill_id)
+        )
+        if manifest.get("descriptions") != list(obj.descriptions):
+            raise ValueError("Frozen route descriptions do not match supplied Skills")
+        obj.fingerprint = complete.get("fingerprint") or S.content_hash(manifest)
+        obj.records = {}
+        for task_id in obj.ids:
+            path = route_root / "tasks" / f"{task_id}.json"
+            if not path.exists():
+                raise ValueError(f"Frozen route is missing task {task_id}")
+            obj._add(json.loads(path.read_text()))
+        if set(obj.records) != set(obj.ids):
+            raise ValueError("Frozen route does not cover the requested split")
+        recorded_groups = {
+            str(skill_id): tuple(int(task_id) for task_id in task_ids)
+            for skill_id, task_ids in (complete.get("groups") or {}).items()
+        }
+        if recorded_groups != obj.groups:
+            raise ValueError("Frozen route complete.json disagrees with task records")
+        return obj
 
     def run(self):
         for task_id in self.ids:

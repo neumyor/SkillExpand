@@ -1,4 +1,4 @@
-"""Serial source-batch editing with selectable predicted or empirical acceptance."""
+"""Serial source-batch editing with selectable predictive, empirical, or JEV acceptance."""
 
 import json
 import os
@@ -20,6 +20,7 @@ from skillexpand.l1.runner import save
 from skillexpand.runtime import parallel as PL
 from skillexpand.evaluation.routing import FrozenRoutes
 from skillexpand.evaluation import validation as VA
+from skillexpand.evaluation.jev import JevSkillScorer
 
 
 @dataclass
@@ -42,7 +43,7 @@ class EvolutionConfig:
             raise ValueError("supervised_attempts must be nonnegative")
         if self.skill_edit_mode not in ("rewrite", "structured"):
             raise ValueError("Unknown Skill edit mode")
-        if self.acceptance_mode not in ("predicted", "empirical"):
+        if self.acceptance_mode not in ("predicted", "empirical", "jev"):
             raise ValueError("Unknown acceptance mode")
 
     def to_dict(self):
@@ -186,6 +187,8 @@ class SerialEvolutionLoop:
         self._recover_transactions()
         self.admission_routes = None
         self.admission_scorer = None
+        self.jev_routes = None
+        self.jev_scorer = None
 
     def _ensure_admission_scorer(self):
         if self.config.acceptance_mode != "empirical":
@@ -203,6 +206,22 @@ class SerialEvolutionLoop:
             self.config.l2_review_workers,
         )
         return self.admission_scorer
+
+    def _ensure_jev_scorer(self):
+        if self.config.acceptance_mode != "jev":
+            return None
+        if self.jev_scorer is not None:
+            return self.jev_scorer
+        self.jev_routes = FrozenRoutes(
+            self.cfg, self.plan, self.initial, self.paths.root / "routes",
+            S.SPLIT_ADMISSION, self.config.l2_review_workers
+        ).run()
+        self.jev_scorer = JevSkillScorer(
+            self.cfg, self.jev_routes,
+            VA.ScoreCache(self.paths.root / "val" / "jev_scores.jsonl"),
+            self.config.l2_review_workers,
+        )
+        return self.jev_scorer
 
     def _reasoning_host(self, role, usage_path):
         """Build a role-specific host while keeping the two-argument API usable.
@@ -314,6 +333,7 @@ class SerialEvolutionLoop:
             reviewer_factory=reviewer_factory,
             acceptance_mode=self.config.acceptance_mode,
             admission_scorer=self._ensure_admission_scorer(),
+            jev_scorer=self._ensure_jev_scorer(),
         )
         pattern_path = self.paths.root / 'l2_patterns' / (batch['batch_id'] + '.json')
         if pattern_path.exists():
@@ -556,8 +576,14 @@ class SerialEvolutionLoop:
             "empirically_validated": bool(records) and self.config.acceptance_mode == "empirical" and all(
                 r.get("empirically_validated") is True for r in records
             ),
+            "jev_validated": bool(records) and self.config.acceptance_mode == "jev" and all(
+                r.get("jev_validated") is True for r in records
+            ),
             "admission_executions": sum(
                 int(r.get("acceptance", {}).get("executions", 0)) for r in records
+            ),
+            "jev_requests": sum(
+                int(r.get("acceptance", {}).get("jev_requests", 0)) for r in records
             ),
             "description_frozen": True,
             "meta_skill": self.meta.head().key,
