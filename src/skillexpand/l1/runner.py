@@ -44,8 +44,8 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
         raise ValueError('autonomous attempts must be >= 1')
     if supervised_attempts < 0:
         raise ValueError('supervised attempts must be >= 0')
-    if split != S.SPLIT_SOURCE:
-        raise ValueError('L1 repair is source-only')
+    if split != S.SPLIT_TRAIN:
+        raise ValueError('L1 repair is train-only')
     adapter = resolve(cfg)
     adapter.configure(agent)
     settings = cfg.benchmark.get('l1', {})

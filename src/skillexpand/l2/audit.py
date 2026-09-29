@@ -131,8 +131,8 @@ def audit_round(root, round_index):
     inputs = json.loads((directory / 'input.json').read_text())
     split = json.loads((root / 'split.json').read_text())
     mapping = json.loads((root / 'task_skill_map.json').read_text())
-    source = sorted(int(t) for t, value in split['assignment'].items() if value == S.SPLIT_SOURCE)
-    require(manifest['task_ids'] == source == inputs['task_ids'], 'round/source coverage mismatch')
+    train = sorted(int(t) for t, value in split['assignment'].items() if value == S.SPLIT_TRAIN)
+    require(manifest['task_ids'] == train == inputs['task_ids'], 'round/train coverage mismatch')
     heads = {s['family_id']: S.from_dict(S.Skill, s) for s in inputs['skills']}
     protocol = json.loads((root / 'l2_manifest.json').read_text())
     expected_acceptance_mode = protocol['config'].get('acceptance_mode', 'predicted')
@@ -160,14 +160,14 @@ def audit_round(root, round_index):
     require(manifest['skill_keys'] == {f: s.key for f, s in heads.items()}, 'input Skill keys mismatch')
     expected_tasks = tuple(sorted(manifest['task_ids']))
     require({p.name for p in (directory / 'cards').glob('*.json')} ==
-            {f'{t}.json' for t in source}, 'unexpected/missing card files')
+            {f'{t}.json' for t in train}, 'unexpected/missing card files')
     cards = {}
     for task_id in expected_tasks:
         path = directory / 'cards' / f'{task_id}.json'
         value = json.loads(path.read_text())
         exp = S.from_dict(S.TaskExperience, value)
         require(exp.task_id == task_id, f'card filename/task mismatch: {task_id}')
-        require(exp.split == S.SPLIT_SOURCE, f'non-source card: {task_id}')
+        require(exp.split == S.SPLIT_TRAIN, f'non-train card: {task_id}')
         require(exp.evolution_round == round_index, f'wrong card round: {task_id}')
         require(exp.benchmark == split['benchmark'] and exp.selected_skill_id == mapping[str(task_id)],
                 'card benchmark/routing mismatch')
@@ -240,7 +240,7 @@ def audit_round(root, round_index):
             require(batch.get('empirically_validated') is False,
                     'prediction was mislabeled as empirical validation')
             require(batch.get('acceptance', {}).get('executions', 0) == 0,
-                    'predicted acceptance executed admission')
+                    'predicted acceptance executed val tasks')
             require(batch.get('predicted_review_scope') == expected_predicted_scope,
                     'batch predicted review scope mismatch')
             require(batch.get('acceptance', {}).get('scope') == expected_predicted_scope,
@@ -276,14 +276,14 @@ def audit_round(root, round_index):
                 require(candidate_ids == proposed_ids,
                         'JEV acceptance does not cover every proposed candidate')
     require(tuple(sorted(seen)) == expected_tasks,
-            'round batches do not cover each source task exactly once')
+            'round batches do not cover each train task exactly once')
     for skill in heads.values():
         require(library.get(skill.key) == skill, 'round output differs from Skill history')
     summary_path = directory / 'summary.json'
     if summary_path.exists():
         summary = json.loads(summary_path.read_text())
         require(summary.get('status') == 'complete', 'round summary is incomplete')
-        require(summary.get('source_cards') == len(expected_tasks),
+        require(summary.get('train_cards') == len(expected_tasks),
                 'round summary card count mismatch')
         expected_mode = expected_acceptance_mode
         require(summary.get('acceptance_mode') == expected_mode,
@@ -291,8 +291,8 @@ def audit_round(root, round_index):
         require(summary.get('predicted_review_scope', 'val') == expected_predicted_scope,
                 'summary predicted review scope mismatch')
         if expected_mode == 'predicted':
-            require(summary.get('admission_executions') == 0,
-                    'admission execution leaked into predicted evolution')
+            require(summary.get('val_executions') == 0,
+                    'val execution leaked into predicted evolution')
         elif expected_mode == 'jev':
             expected_jev_validated = bool(journals) and all(
                 bool(b.get('acceptance', {}).get('candidates')) for b in journals
@@ -300,8 +300,8 @@ def audit_round(root, round_index):
             require(summary.get('empirically_validated') is False and
                     summary.get('jev_validated') is expected_jev_validated,
                     'JEV summary validation flags mismatch')
-            require(summary.get('admission_executions') == 0,
-                    'JEV summary counted judge requests as admission executions')
+            require(summary.get('val_executions') == 0,
+                    'JEV summary counted judge requests as val executions')
             require(summary.get('jev_requests') == sum(
                 int(b.get('acceptance', {}).get('jev_requests', 0)) for b in journals
             ), 'JEV request count mismatch')

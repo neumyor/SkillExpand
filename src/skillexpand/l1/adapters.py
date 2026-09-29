@@ -1,4 +1,4 @@
-"""Benchmark-owned prompts, feedback and optional source-only supervision.
+"""Benchmark-owned prompts, feedback and optional train-only supervision.
 
 Custom adapters subclass Adapter and register with register(), or set
 benchmark.l1.adapter to 'module:Class' (importable in spawned workers).

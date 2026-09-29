@@ -115,7 +115,7 @@ def task_identity(table):
     return rows
 
 
-def prepare(root, sources):
+def prepare(root, train_runs):
     if root.exists() and any(root.iterdir()):
         raise ValueError('prepare requires an empty directory')
     env = runtime(root)
@@ -130,18 +130,18 @@ def prepare(root, sources):
     shutil.copytree(repo / 'src', root / 'code/src', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     shutil.copyfile(__file__, root / 'code/run_final_snapshots.py')
     settings = {}
-    for benchmark, source in sources.items():
-        cfg, plan, initial, _ = load_cold_start(source)
-        audits = [audit_round(source, n) for n in (1, 2)]
-        summaries = [read(source / f'evolution/round-{n}/summary.json') for n in (1, 2)]
-        history = [json.loads(line) for line in (source / 'skills.jsonl').read_text().splitlines()]
+    for benchmark, train_run in train_runs.items():
+        cfg, plan, initial, _ = load_cold_start(train_run)
+        audits = [audit_round(train_run, n) for n in (1, 2)]
+        summaries = [read(train_run / f'evolution/round-{n}/summary.json') for n in (1, 2)]
+        history = [json.loads(line) for line in (train_run / 'skills.jsonl').read_text().splitlines()]
         snapshots = select_snapshots([S.to_dict(s) for s in initial], history, summaries)
         dest = root / 'inputs' / benchmark
         # Preserve raw input format: task_table is a derived runtime structure,
         # containing environment constructors/configs, not a valid task-file format.
         tasks = read(cfg.benchmark.task_file)
         save(dest / 'tasks.json', tasks)
-        config = read(source / 'config.json')
+        config = read(train_run / 'config.json')
         if config['agent']['llm'] != env['EXPE_LLM_MODEL']:
             raise ValueError('Configured model differs from original experiment')
         config['benchmark']['task_file'] = str(dest / 'tasks.json')
@@ -150,27 +150,27 @@ def prepare(root, sources):
         table_hash = S.content_hash(task_identity(task_table(OmegaConf.create(config), refresh=True)))
         if table_hash != S.content_hash(task_identity(task_table(cfg, refresh=True))):
             raise ValueError('Task-table invariant changed after freezing raw inputs')
-        split = read(source / 'split.json')
+        split = read(train_run / 'split.json')
         save(dest / 'split.json', split)
-        # Preflight uses two SOURCE tasks, so implementation checks do not inspect Final.
-        smoke_ids = sorted(plan.tasks_in(S.SPLIT_SOURCE))[:2]
-        smoke_split = read(source / 'split.json')
+        # Preflight uses two train tasks, so implementation checks do not inspect test.
+        smoke_ids = sorted(plan.tasks_in(S.SPLIT_TRAIN))[:2]
+        smoke_split = read(train_run / 'split.json')
         smoke_split['assignment'] = {str(t): ('test' if t in smoke_ids else 'train') for t in range(len(tasks))}
         save(dest / 'preflight-split.json', smoke_split)
         libs = {}
         for label, raw in snapshots.items():
             save(dest / f'{label}.json', raw)
             libs[label] = library_fingerprint([S.from_dict(S.Skill, s) for s in raw])
-        settings[benchmark] = dict(source=str(source), final_tasks=len(plan.tasks_in(S.SPLIT_FINAL)),
-            source_audits=audits, snapshots=libs, workers=WORKERS[benchmark], preflight_tasks=smoke_ids,
+        settings[benchmark] = dict(train_run=str(train_run), test_tasks=len(plan.tasks_in(S.SPLIT_TEST)),
+            train_audits=audits, snapshots=libs, workers=WORKERS[benchmark], preflight_tasks=smoke_ids,
             frozen_task_identity_hash=table_hash,
-            source_config_hash=digest(source / 'config.json'), source_split_hash=digest(source / 'split.json'))
+            train_config_hash=digest(train_run / 'config.json'), train_split_hash=digest(train_run / 'split.json'))
     files = {str(p.relative_to(root)): digest(p) for folder in ('code', 'inputs') for p in sorted((root / folder).rglob('*')) if p.is_file()}
     save(root / 'manifest.json', dict(repo=str(repo), model=env['EXPE_LLM_MODEL'], benchmarks=settings, files=files,
         metric='Single autonomous episode; SearchQA normalized EM / ALFWorld environment success; no reflection, guidance or fewshots',
         routing='One frozen initial-description selector assignment per task, shared by all snapshots',
         unchanged_libraries='Identical fingerprints reuse one evaluation; unchanged Skill keys/bodies reuse per-task scores across libraries',
-        reporting='All three snapshots and paired changes; no selection of best Final result',
+        reporting='All three snapshots and paired changes; no selection of best Test result',
         request_interval_seconds=0.5, created=time.time()))
     print(json.dumps(settings, ensure_ascii=False))
 
@@ -210,7 +210,7 @@ def evaluate(root, benchmark, mode):
     from skillexpand.persistence.artifacts import code_signature, provider_signature
     from skillexpand.evaluation.routing import FrozenRoutes
     from skillexpand.evaluation.validation import FixedSkillScorer, ScoreCache
-    from skillexpand.evaluation.audit import audit_final
+    from skillexpand.evaluation.audit import audit_test
     inputs = root / 'inputs' / benchmark
     target_root = root / mode / benchmark
     with locked(target_root / 'job.lock'):
@@ -221,7 +221,7 @@ def evaluate(root, benchmark, mode):
         initial = read(inputs / 'cold-start.json')
         workers = 2 if mode == 'preflight' else manifest['benchmarks'][benchmark]['workers']
         save(target_root / 'status.json', dict(status='routing', pid=os.getpid(), updated=time.time()))
-        routes = FrozenRoutes(cfg, plan, [S.from_dict(S.Skill, s) for s in initial], target_root / 'routes', S.SPLIT_FINAL, workers).run()
+        routes = FrozenRoutes(cfg, plan, [S.from_dict(S.Skill, s) for s in initial], target_root / 'routes', S.SPLIT_TEST, workers).run()
         shared_cache = ScoreCache(target_root / 'shared-scores.jsonl')
         results = {}
         for label in LABELS:
@@ -234,13 +234,13 @@ def evaluate(root, benchmark, mode):
             freeze(target / 'protocol.json', dict(code=code_signature(), provider=provider_signature(),
                 config=read(inputs / 'config.json'), routing_reference=initial))
             if (target / 'summary.json').exists():
-                audit = audit_final(target_root, target)
+                audit = audit_test(target_root, target)
             else:
                 scorer = FixedSkillScorer(cfg, ScoreCache(target / 'scores.jsonl'), routes, workers)
                 freeze(target / 'score_protocol.json', dict(hash=scorer.protocol_hash))
                 per_skill = {}
                 for skill in skills:
-                    panel = f'final:{routes.fingerprint}:{skill.skill_id}'
+                    panel = f'test:{routes.fingerprint}:{skill.skill_id}'
                     identity = S.content_hash(dict(protocol=scorer.protocol_hash, panel=panel, skill_id=skill.skill_id, body=skill.body))
                     for t in routes.groups[skill.skill_id]:
                         key = ScoreCache.make_key(benchmark, identity, t, S.ROLE_EVAL, skill.body)
@@ -255,17 +255,17 @@ def evaluate(root, benchmark, mode):
                     save(target / 'skills' / f'{skill.skill_id}.json', per_skill[skill.skill_id])
                     print(f'{benchmark} {label} {skill.key}: {score.successes}/{score.n}; reused={score.from_cache}', flush=True)
                 successes = sum(v['successes'] for v in per_skill.values())
-                n = len(plan.tasks_in(S.SPLIT_FINAL))
+                n = len(plan.tasks_in(S.SPLIT_TEST))
                 save(target / 'summary.json', dict(split='test', library_hash=fingerprint, routing_reference='initial_skills',
                     tasks=n, successes=successes, score=successes/n, per_skill=per_skill, routing_failures=list(routes.failed_task_ids)))
-                audit = audit_final(target_root, target)
+                audit = audit_test(target_root, target)
             save(target / 'audit.json', audit)
             save(target / 'usage-audit.json', audit_token_ledgers(target / 'usage'))
             results[label] = dict(target=str(target), audit=audit, **read(target / 'summary.json'))
             save(target_root / 'snapshots.json', results)
         paired = paired_results(results)
         save(target_root / 'routing-usage-audit.json',
-             audit_token_ledgers(target_root / 'routes' / S.SPLIT_FINAL / 'usage'))
+             audit_token_ledgers(target_root / 'routes' / S.SPLIT_TEST / 'usage'))
         save(target_root / 'paired.json', paired)
         save(target_root / 'status.json', dict(status='complete', pid=os.getpid(), snapshots=results, paired=paired, updated=time.time()))
 
@@ -371,16 +371,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('prepare', 'health', 'preflight', 'full', '_job'))
     parser.add_argument('--root', type=Path, required=True)
-    parser.add_argument('--searchqa-source', type=Path)
-    parser.add_argument('--alfworld-source', type=Path)
+    parser.add_argument('--searchqa-train-run', type=Path)
+    parser.add_argument('--alfworld-train-run', type=Path)
     parser.add_argument('--benchmark', choices=tuple(WORKERS))
     parser.add_argument('--mode', choices=('preflight', 'full'))
     args = parser.parse_args()
     root = args.root.resolve()
     if args.action == 'prepare':
-        if not args.searchqa_source or not args.alfworld_source:
-            parser.error('prepare requires both source directories')
-        prepare(root, dict(searchqa=args.searchqa_source.resolve(), alfworld=args.alfworld_source.resolve()))
+        if not args.searchqa_train_run or not args.alfworld_train_run:
+            parser.error('prepare requires both train run directories')
+        prepare(root, dict(searchqa=args.searchqa_train_run.resolve(),
+                           alfworld=args.alfworld_train_run.resolve()))
     elif args.action == 'health':
         health(root)
     elif args.action == '_job':

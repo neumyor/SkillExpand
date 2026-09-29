@@ -25,9 +25,8 @@ from skillexpand.runtime import agent_factory as F
 
 def load_plan(root, cfg):
     raw = json.loads((root / "split.json").read_text())
-    rename = {"source": "train", "admission": "val", "final": "test"}
     assignment = {
-        int(task_id): rename.get(split, split)
+        int(task_id): split
         for task_id, split in raw["assignment"].items()
     }
     mapping = json.loads((root / "task_skill_map.json").read_text())

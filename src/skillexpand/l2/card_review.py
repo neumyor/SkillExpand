@@ -16,7 +16,7 @@ otherwise it identifies the injected Skill revision. A later batch may edit a ne
 CURRENT than the revision that produced the card. Do not attribute that trace to CURRENT.
 execution.trials distinguishes first-attempt success from reflection or supervised recovery.
 Evaluation is ONE autonomous attempt: the first Finish ends it, even when rejected.
-Later source trials diagnose what might have been done before that Finish; a candidate
+Later train trials diagnose what might have been done before that Finish; a candidate
 that acts only after observing a rejected Finish cannot improve evaluation. Do not
 label such a post-rejection fallback improve. Supervised success is not autonomous.
 Use only supplied facts; diagnosis is a hypothesis, guided success is not autonomous evidence.
@@ -102,7 +102,7 @@ def observed_outcome(card, current_skill_key):
     """Return the outcome of the first autonomous attempt represented by a card.
 
     A card's result is a CURRENT observation only if its execution skill key matches
-    CURRENT.  Later source trials are useful diagnostic evidence, not the single
+    CURRENT.  Later train trials are useful diagnostic evidence, not the single
     autonomous attempt being evaluated.
     """
     execution = card.get("execution", {}) if isinstance(card, dict) else {}

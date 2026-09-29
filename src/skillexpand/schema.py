@@ -8,7 +8,7 @@ after the fact:
     time.  Re-running the same inputs yields the same ids, so a partial run can
     be resumed and diffed.
 
-2.  **Raw per-task outcomes are stored, not just verdicts.**  The admission
+2.  **Raw per-task outcomes are stored, not just verdicts.**  The val
     gate's thresholds are a *post-hoc* analysis choice; storing only
     ``admitted: bool`` would force a full re-run to try a different threshold.
     Every evaluated task keeps its own outcome.
@@ -19,7 +19,7 @@ after the fact:
     distinguish "better everywhere" from "better on two tasks, worse on two".
 
 4.  **Isolation is recorded, not assumed.**  Whether the executor was fresh and
-    whether source experience was withheld are explicit fields, and
+    whether train experience was withheld are explicit fields, and
     :func:`assert_isolation_valid` fails loudly when a configuration that
     claims to test consolidation still leaks experience.
 
@@ -57,11 +57,6 @@ SPLIT_TRAIN = 'train'
 SPLIT_VAL = 'val'
 SPLIT_TEST = 'test'
 SPLITS = (SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST)
-# Semantic aliases keep the execution code readable while the persisted split
-# vocabulary follows the standard train/validation/test naming.
-SPLIT_SOURCE = SPLIT_TRAIN
-SPLIT_ADMISSION = SPLIT_VAL
-SPLIT_FINAL = SPLIT_TEST
 
 ROLE_EVAL = 'eval'
 ROLES = (ROLE_EVAL,)
@@ -335,7 +330,7 @@ class SkillEdit:
     Mirrors ExpeL's ``ADD / EDIT / REMOVE / AGREE`` vocabulary
     (``agent/expel.py:665`` ``parse_rules``).  Storing the operations, not just
     the resulting text, is what lets the meta-layer learn *which kinds of edit*
-    survive admission. Structured edits additionally retain the real section and
+    survive val acceptance. Structured edits additionally retain the real section and
     stable target rule ID used to construct the candidate.
     """
 
@@ -460,9 +455,9 @@ class TaskExperience:
         return f'{benchmark}:{family_id}:{task_id}'
 
     @property
-    def is_source_eligible(self) -> bool:
-        """Only SOURCE-split tasks may drive a skill edit."""
-        return self.split == SPLIT_SOURCE
+    def is_train_eligible(self) -> bool:
+        """Only train tasks may drive a Skill edit."""
+        return self.split == SPLIT_TRAIN
 
     @property
     def solved_on_first_trial(self) -> bool:
@@ -846,7 +841,7 @@ class MetaSkill:
 class SplitPlan:
     """Per-family three-way split.
 
-    ``final`` tasks must never appear in a :class:`TaskExperience`.  Without
+    ``test`` tasks must never appear in a :class:`TaskExperience`.  Without
     that discipline every candidate edit is indirectly fitted to the same
     held-out set that the paper reports on.
     """
@@ -875,14 +870,14 @@ class SplitPlan:
                 return fam
         return None
 
-    def assert_final_is_untouched(self, experiences: List[TaskExperience]) -> None:
+    def assert_test_is_untouched(self, experiences: List[TaskExperience]) -> None:
         """Guard the single most expensive mistake in this design."""
         for exp in experiences:
             declared = self.assignment.get(exp.task_id)
-            if declared == SPLIT_FINAL:
+            if declared == SPLIT_TEST:
                 raise AssertionError(
-                    f'experience {exp.experience_id} was collected on FINAL-split '
-                    f'task {exp.task_id}; final tasks must never enter the '
+                    f'experience {exp.experience_id} was collected on test split '
+                    f'task {exp.task_id}; test tasks must never enter the '
                     'evolution loop')
 
     @staticmethod

@@ -66,11 +66,11 @@ def load_cold_start(root):
     expected = {
         str(t): f"{plan.benchmark}.{f}" for t, f in clusters.task_to_family.items()
     }
-    source = set(plan.tasks_in(S.SPLIT_SOURCE))
-    if complete.get("source_count") != len(source):
-        raise ValueError("Cold-start source count mismatch")
-    if mapping != expected or set(clusters.task_to_family) != source:
-        raise ValueError("Cold-start mapping must cover exactly source tasks")
+    train = set(plan.tasks_in(S.SPLIT_TRAIN))
+    if complete.get("train_count") != len(train):
+        raise ValueError("Cold-start train count mismatch")
+    if mapping != expected or set(clusters.task_to_family) != train:
+        raise ValueError("Cold-start mapping must cover exactly train tasks")
     if complete["mapping_hash"] != S.content_hash(mapping) or complete[
         "initial_skills_hash"
     ] != S.content_hash(initial):
@@ -86,7 +86,7 @@ def load_cold_start(root):
     ):
         raise ValueError("Initial library does not match clusters")
     cards = {}
-    for t in sorted(source):
+    for t in sorted(train):
         exp = S.from_dict(
             S.TaskExperience,
             json.loads((root / "discovery/results" / f"{t}.json").read_text()),
@@ -94,7 +94,7 @@ def load_cold_start(root):
         if (
             exp.task_id != t
             or exp.benchmark != plan.benchmark
-            or exp.split != S.SPLIT_SOURCE
+            or exp.split != S.SPLIT_TRAIN
             or exp.initial_skill_key is not None
             or exp.selected_skill_id is not None
             or not exp.experience_id.startswith("discovery:")
@@ -136,7 +136,7 @@ def load_cold_start(root):
             or tuple(skill.provenance.source_experience_ids)
             != tuple(cards[t].experience_id for t in ids)
         ):
-            raise ValueError("Initial Skill provenance does not match source cards")
+            raise ValueError("Initial Skill provenance does not match train cards")
     plan = S.SplitPlan.make(
         plan.assignment, plan.benchmark, plan.seed, clusters.families_index
     )

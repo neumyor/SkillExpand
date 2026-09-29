@@ -1,4 +1,4 @@
-"""Serial source-batch editing with selectable predictive, empirical, or JEV acceptance."""
+"""Serial train-batch editing with selectable predictive, empirical, or JEV acceptance."""
 
 import json
 import os
@@ -141,7 +141,7 @@ class SerialEvolutionLoop:
         self.l1_attempts = int(manifest.get("k", self.config.autonomous_attempts))
         self.l1_supervised = bool(manifest.get("supervised", True))
         self.l1_supervised_attempts = int(manifest.get("supervised_attempts", self.config.supervised_attempts))
-        # Assignment is derived from the audited source map. selected_skill_id and
+        # Assignment is derived from the audited train map. selected_skill_id and
         # initial_skill_key stay None: these tasks were executed WITHOUT a Skill.
         protocol_config = self.config.to_dict()
         # The requested horizon is resumable metadata, not a compatibility
@@ -188,29 +188,29 @@ class SerialEvolutionLoop:
         if self.meta.head().version != 0:
             raise ValueError("L3 is frozen; use a fresh cold-start import")
         self._recover_transactions()
-        self.admission_routes = None
-        self.admission_scorer = None
+        self.val_routes = None
+        self.val_scorer = None
         self.jev_routes = None
         self.jev_scorer = None
         self.predicted_routes = None
         self.predicted_scorer = None
 
-    def _ensure_admission_scorer(self):
+    def _ensure_val_scorer(self):
         if self.config.acceptance_mode != "empirical":
             return None
-        if self.admission_scorer is not None:
-            return self.admission_scorer
-        self.admission_routes = FrozenRoutes(
+        if self.val_scorer is not None:
+            return self.val_scorer
+        self.val_routes = FrozenRoutes(
             self.cfg, self.plan, self.initial, self.paths.root / "routes",
-            S.SPLIT_ADMISSION, self.config.l2_review_workers
+            S.SPLIT_VAL, self.config.l2_review_workers
         ).run()
-        self.admission_scorer = VA.FixedSkillScorer(
+        self.val_scorer = VA.FixedSkillScorer(
             self.cfg,
             VA.ScoreCache(self.paths.root / "val" / "scores.jsonl"),
-            self.admission_routes,
+            self.val_routes,
             self.config.l2_review_workers,
         )
-        return self.admission_scorer
+        return self.val_scorer
 
     def _ensure_jev_scorer(self):
         if self.config.acceptance_mode != "jev":
@@ -219,7 +219,7 @@ class SerialEvolutionLoop:
             return self.jev_scorer
         self.jev_routes = FrozenRoutes(
             self.cfg, self.plan, self.initial, self.paths.root / "routes",
-            S.SPLIT_ADMISSION, self.config.l2_review_workers
+            S.SPLIT_VAL, self.config.l2_review_workers
         ).run()
         self.jev_scorer = JevSkillScorer(
             self.cfg, self.jev_routes,
@@ -236,7 +236,7 @@ class SerialEvolutionLoop:
             return self.predicted_scorer
         self.predicted_routes = FrozenRoutes(
             self.cfg, self.plan, self.initial, self.paths.root / "routes",
-            S.SPLIT_ADMISSION, self.config.l2_review_workers
+            S.SPLIT_VAL, self.config.l2_review_workers
         ).run()
 
         def judge_factory(task_id, skill, usage_path):
@@ -366,7 +366,7 @@ class SerialEvolutionLoop:
             reviewer_factory=reviewer_factory,
             acceptance_mode=self.config.acceptance_mode,
             predicted_review_scope=self.config.predicted_review_scope,
-            admission_scorer=self._ensure_admission_scorer(),
+            val_scorer=self._ensure_val_scorer(),
             jev_scorer=self._ensure_jev_scorer(),
             predicted_scorer=self._ensure_predicted_scorer(),
         )
@@ -420,7 +420,7 @@ class SerialEvolutionLoop:
         if path.exists():
             value = json.loads(path.read_text())
             skills = [S.from_dict(S.Skill, s) for s in value['skills']]
-            if value['round'] != round_index or value['task_ids'] != sorted(self.plan.tasks_in(S.SPLIT_SOURCE)):
+            if value['round'] != round_index or value['task_ids'] != sorted(self.plan.tasks_in(S.SPLIT_TRAIN)):
                 raise ValueError('Round input identity mismatch')
             if {s.family_id for s in skills} != set(self.plan.families):
                 raise ValueError('Round input family coverage mismatch')
@@ -434,13 +434,13 @@ class SerialEvolutionLoop:
         if {s.skill_id: s.key for s in skills} != expected:
             raise ValueError('Skill heads differ from previous round output')
         freeze(path, {'round': round_index, 'skills': [S.to_dict(s) for s in skills],
-                      'task_ids': sorted(self.plan.tasks_in(S.SPLIT_SOURCE))})
+                      'task_ids': sorted(self.plan.tasks_in(S.SPLIT_TRAIN))})
         return skills
 
     def _check_card(self, exp, task_id, round_index, skills):
         skill = next(s for s in skills if s.family_id == self.plan.family_of(task_id))
         if (exp.task_id != task_id or exp.benchmark != self.plan.benchmark or
-                exp.split != S.SPLIT_SOURCE or exp.evolution_round != round_index or
+                exp.split != S.SPLIT_TRAIN or exp.evolution_round != round_index or
                 exp.family_id != skill.family_id or exp.initial_skill_key != skill.key or
                 exp.selected_skill_id != skill.skill_id or exp.selection_source != S.SELECTION_FIXED or
                 exp.experience_card is None or exp.experience_card.get('task', {}).get('task_id') != task_id):
@@ -461,7 +461,7 @@ class SerialEvolutionLoop:
                 specs.append(PL.ExperienceSpec(
                     unit_id=f"evolution:{round_index}:{task_id}",
                     benchmark=self.plan.benchmark, task_id=task_id,
-                    family_id=skill.family_id, split=S.SPLIT_SOURCE,
+                    family_id=skill.family_id, split=S.SPLIT_TRAIN,
                     skill_key=skill.key, skill_body=skill.body,
                     skill_description=skill.description, skill_aware=True,
                     selected_skill_id=skill.skill_id,
@@ -508,7 +508,7 @@ class SerialEvolutionLoop:
         skills = self._round_input(round_index)
         expected = sorted(t for ids in self.plan.families.values() for t in ids)
         if {p.name for p in results_dir.glob('*.json')} != {f'{t}.json' for t in expected}:
-            raise ValueError('Round card coverage differs from source tasks')
+            raise ValueError('Round card coverage differs from train tasks')
         cards = {}
         for task_id in expected:
             path = results_dir / f"{task_id}.json"
@@ -594,7 +594,7 @@ class SerialEvolutionLoop:
             "status": "complete" if len(records) == len(batches) else "partial",
             "protocol": PROTOCOL,
             "benchmark": self.plan.benchmark,
-            "source_cards": len(self.cards),
+            "train_cards": len(self.cards),
             "batches": len(batches),
             "completed_batches": len(records),
             "hypotheses": sum(len(r["hypotheses"]) for r in records),
@@ -620,7 +620,7 @@ class SerialEvolutionLoop:
             "jev_validated": bool(records) and self.config.acceptance_mode == "jev" and all(
                 r.get("jev_validated") is True for r in records
             ),
-            "admission_executions": sum(
+            "val_executions": sum(
                 int(r.get("acceptance", {}).get("executions", 0)) for r in records
             ),
             "jev_requests": sum(

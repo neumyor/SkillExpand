@@ -1,4 +1,4 @@
-"""Freeze selector assignments once, independently for admission and final."""
+"""Freeze selector assignments once, independently for validation and test."""
 
 import json
 from dataclasses import asdict, dataclass
@@ -48,22 +48,12 @@ def route_task(spec):
 
 
 class FrozenRoutes:
-    def __init__(self, cfg, plan, library, root, split, final_workers=4):
-        if split not in (S.SPLIT_ADMISSION, S.SPLIT_FINAL):
-            raise ValueError("Only held-out tasks are routed")
+    def __init__(self, cfg, plan, library, root, split, test_workers=4):
+        if split not in (S.SPLIT_VAL, S.SPLIT_TEST):
+            raise ValueError("Only val or test tasks are routed")
         self.cfg, self.plan, self.split = cfg, plan, split
         route_root = Path(root) / split
-        persisted_split = split
-        # Runs created before the train/val/test vocabulary used ``admission`` for
-        # the validation directory.  Reusing such a frozen route is safe because
-        # the route records themselves carry task ids and Skill ids; only the
-        # on-disk directory name changed.
-        if split == S.SPLIT_VAL and not route_root.exists():
-            legacy_root = Path(root) / "admission"
-            if legacy_root.exists():
-                route_root = legacy_root
-                persisted_split = "admission"
-        self.root, self.final_workers = route_root, final_workers
+        self.root, self.test_workers = route_root, test_workers
         self.ids = tuple(sorted(plan.tasks_in(split)))
         self.descriptions = tuple(
             {"skill_id": s.skill_id, "description": s.description}
@@ -77,9 +67,7 @@ class FrozenRoutes:
             )
         identity = {
             "protocol": "fixed-description-routes-v1",
-            # Preserve the spelling used by a reused legacy manifest so its
-            # fingerprint remains the identity of the frozen route.
-            "split": persisted_split,
+            "split": split,
             "config": OmegaConf.to_container(cfg, resolve=True),
             "provider": provider_signature(),
             "descriptions": list(self.descriptions),
@@ -99,13 +87,9 @@ class FrozenRoutes:
         task-to-Skill assignment is the frozen input we want to reuse, while a new
         selector call would silently change the evaluation panel.
         """
-        if split not in (S.SPLIT_ADMISSION, S.SPLIT_FINAL):
-            raise ValueError("Only held-out tasks are routed")
+        if split not in (S.SPLIT_VAL, S.SPLIT_TEST):
+            raise ValueError("Only val or test tasks are routed")
         route_root = Path(root) / split
-        if not route_root.exists() and split == S.SPLIT_VAL:
-            legacy_root = Path(root) / "admission"
-            if legacy_root.exists():
-                route_root = legacy_root
         manifest_path = route_root / "manifest.json"
         complete_path = route_root / "complete.json"
         if not manifest_path.exists() or not complete_path.exists():
@@ -114,7 +98,7 @@ class FrozenRoutes:
         complete = json.loads(complete_path.read_text())
         obj = cls.__new__(cls)
         obj.cfg, obj.plan, obj.split = cfg, plan, split
-        obj.root, obj.final_workers = route_root, 1
+        obj.root, obj.test_workers = route_root, 1
         obj.ids = tuple(sorted(plan.tasks_in(split)))
         obj.descriptions = tuple(
             {"skill_id": s.skill_id, "description": s.description}
@@ -165,7 +149,7 @@ class FrozenRoutes:
             self._add(record)
             save(self.root / "tasks" / f"{task_id}.json", record)
 
-        PL.run_generic(pending, route_task, workers=self.final_workers, on_result=sink)
+        PL.run_generic(pending, route_task, workers=self.test_workers, on_result=sink)
         if errors or set(self.records) != set(self.ids):
             raise RuntimeError(
                 "Routing incomplete; resume retries only provider failures or missing tasks"

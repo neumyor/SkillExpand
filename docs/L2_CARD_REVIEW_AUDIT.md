@@ -1,81 +1,50 @@
-# L2 经验卡评审重构与接口审计
+# L2 提案、验收与审计
 
-本文记录 v4 历史实验，不描述当前 fresh-start v6 relative-outcomes 协议。当前设计见 [架构](ARCHITECTURE.md)。
+本文描述当前 `serial-card-id-review-v6-relative-outcomes` 实现。L2 只消费当前 Evolve round 的 train 经验卡；test task 永不进入 L2，val 只在明确配置为验收面板时使用。
 
-## 当前协议
+## 提案生成
 
-协议为 `serial-card-id-review-v4`。每 Skill 每批最多 50 张 source 卡，至多 K 个候选（默认 3）。
-先提出不同的修改机制，再分别生成 body，后续生成可见前面的机制与完整 diff。
-相同 body 去重；仅改写措辞不应算作改善，不声称软件能够完整判定语义等价。
+每个 batch 固定一个 Skill、固定一组 train 卡和固定 pattern 候选。Planner 先阅读完整当前 Skill，识别已有覆盖、条件、顺序和 AND/OR 分支，再输出不重复的修改假设。每个假设必须引用本 batch 的 card/evidence ID。
 
-- description 由程序保留，L3 固定 M@v0，无 admission 回测、历史拒绝反馈或批外 source 卡。
-- 独立 reviewer host 每次仅接收当前完整规则、所有匿名候选规则和本批一张卡。
-  这是同一模型的独立调用上下文，不是独立模型；不提供编辑理由和其他卡的判断。
-- 证据引用使用本卡 E1... ID，保留字段路径和原始值；规则使用 B1...、C1R1... ID。
-  编辑假设同样使用证据 ID，写 body 时补充其对应的证据值，避免只有无法解释的 ID。
-- 每次响应必须覆盖所有候选且不重复。改善/回退须引用本卡证据及当前或本候选的变化规则；
-  拒绝跨候选、越界和只引用未变规则的方向性判断，删除规则可引用旧版本规则。
-- 目标为这道题的预期 benchmark 成功。当前预计失败而候选预计成功为 improve，反之为 regress；
-  两者预计均成功或均失败为 unchanged，证据不足为 unknown。
-  不能把未触发的备用规则、泛化稳健性或单纯省步骤当作本题成功率改善。
-- 程序逐卡汇总 I/R/U，N=I-R。N-U>0 且最高 N 候选的下界严格超过所有竞争者上界才提交；
-  并列或区间重叠保留原版。这是保守决策范围，不是统计置信区间。
-- 每卡原始响应独立落盘。假设及每卡格式最多各修正一次，任一卡仍非法则整批 hold，
-  不用残缺计数选择。服务中断可恢复，已完成单元不重新请求。
-- 保存候选、原始响应、完整 diff、逐卡判断、匿名映射与提交事务；最终评测仍需显式运行。
+- `rewrite`：Planner 生成假设，Editor 为每个假设生成完整候选 body；程序冻结 description、校验版本和去重 body。
+- `structured`：Planner 直接输出一个 `{op, section, target_id, text}` edit；程序依据真实 section/rule ID 应用 edit，候选只能新增或替换一个规则，其他规则保持不变。
 
-## 本次静态审查
+候选、原始响应、repair 响应和完整 diff 都写入 `l2_proposals/`。不合法假设或候选最多定向修正一次；没有有效候选则 batch hold。
 
-检查了 editor → update → card_review → loop → evolve 的调用链及持久化/审计脚本。
+## 三种验收模式
 
-修正了以下问题：
+### predicted + val（默认）
 
-1. 整批返回造成漏卡、引用原文精确匹配造成大量无效判断：改为单卡请求和软件分配 ID。
-2. 假设已有 ID，但 body 生成没有 ID 对照表：补充被引用字段的路径和值。
-3. 输入重复卡可能覆盖计数、非法 ID 类型可能导致解析异常：在入口明确拒绝。
-4. 汇总依赖未经验证的标签或错误卡归属：要求完整覆盖、合法标签和一致的 card_id。
-5. 旧全局行为变化/等价标记在新接口没有真实来源：删除，避免输出伪装成已验证事实。
-6. 旧实验审计无法读单卡缓存：从每个原始响应重新解析、复算并核对选择、版本历史和成本。
+`PredictedSkillScorer` 使用 selector 冻结的 `routes/val/` 分组。对当前 head 与每个候选，在同一组 val task 上逐题请求 `l2_reviewer` 模型。prompt 只包含 task 和 Skill，要求判断一次 autonomous attempt 的成功概率；不提供经验卡、轨迹、答案，也不假设 rejected answer 可以重试。
 
-已有 CLI 外层锁保护初始化，L2 内层锁保护运行；事务先落盘再提交。
-协议与代码指纹隔离旧缓存，新的正式实验使用新目录。
-未发现阻止当前实验启动的静态实现问题；这不构成评审推断正确性的证明。
+程序将 base/candidate 预测缓存到 `val/predicted_scores.jsonl`，以候选平均 `probability_true` 严格高于 base 为 paired improvement。该模式不会执行 benchmark，`acceptance.executions=0`，请求数量记录在 `acceptance.predicted_requests`。
 
-## 验证记录
+### predicted + train_cards
 
-- 107 项离线回归通过。涵盖当前批次隔离、冻结 description/L3、50 卡汇总、ID 校验、
-  未知/并列保留、逐卡恢复、单卡非法整批 hold、提交恢复、CLI 导入与 final 独立运行。
-- Ruff 与差异空白检查通过。
-- 独立完整性审计在合法/非法两类离线完整运行上通过；
-  人为篡改改善计数或删除非法判断记录后均被拒绝。
-- 第一轮 ID 接口小样本保存在 `runs/l2-card-id-review-20260923/`：
-  两个数据集各 5 卡，SearchQA 3 个候选、ALFWorld 2 个候选，完整解析和无模型重放均通过。
-  人工阅读发现模型把未触发备用规则的稳健性计作本题改善，因此没有据此启动完整实验。
-  该轮原始结果保留，不能作为有效性证据。
-- 收紧任务成功口径后的复查与正式实验目录：
-  `runs/l2-card-id-review-full-20260923/`。
-  启动前检查记录于 `checks/release.json`、`checks/audit-smoke.json`；
-  固定协议记录于 `protocol.json`，运行状态记录于 `status.json`。
-  完成后各数据集生成 `audit.json`，先审计再报告数字。
-- 最终启动前复查：两个数据集各 5 卡、3 候选，均覆盖全部 15 个判断并通过无模型重放。
-  SearchQA 无格式修正，结果 hold；ALFWorld 一次格式修正后通过，结果 review_approved。
-  真实生成健康检查 0.30 秒返回。上述结果只说明评审链路可运行。
-- 已于 2026-09-23 在新目录启动完整 L2：SearchQA 400 卡/10 批，ALFWorld 39 卡/4 批。
-  supervisor 和两个子进程均独立会话运行，支持逐卡恢复，完成后自动审计。
+这是兼容的卡片路径。每次 Reviewer 读取一张 train 经验卡、当前 Skill 和全部匿名候选；它为每个候选输出 `old_outcome` 与 `new_outcome`。程序推导：failure→success 为 improve，success→failure 为 regress，两个已知结果相同为 unchanged，其余为 unknown。Reviewer 预测不是实测成功率。
 
-## 仍然存在的限制
+### empirical / jev
 
-合法 ID 只能验证引用位置，不能证明推断因果关系正确。模型仍可能误读条件、
-把无 Skill 冷启动成功归因于当前 Skill、或对语义相近候选给出不一致判断。
-收紧 prompt 是约束，不是解决这些问题的证明。不得将 review_approved 或预测净值报告为实测提升。
+两者也使用冻结 `routes/val/` 和相同 paired task IDs。`empirical` 启动真实 executor，`jev` 调用 JEV 服务。每个候选都和旧 Skill 在相同 task panel 上比较，只有严格提高才接受。
 
-冷启动卡只用于初始 Skill 合成；`evolve` 会先用当前 Skill 重跑 source L1，
-再把该轮新卡交给 L2。小样本同时验证了 Skill-aware 卡的轮次、Skill provenance
-和完成 round 的恢复不会重复调用模型。
-机制有效性需另行在留出任务上检验。此前已用于诊断的 final 不能继续声称为未见确认集。
+## 批次工件
 
-## 历史记录
+`l2_batches/<batch-id>.json` 至少记录：
 
-旧整批引用式协议 v3 完整实验位于 `runs/l2-card-review-full-20260923/`。
-SearchQA 10 批中 9 批评审无效，ALFWorld 4 批中 2 批无效；
-这些是已完成但接口失败率较高的历史运行，不与 v4 结果合并。
+- `predicted_review_scope`、`acceptance.mode`、`acceptance.scope`
+- `panel`、`task_ids`、`protocol_hash`
+- 每个候选的 `candidate_id`、`ValidationResult` 或逐卡判断
+- `predicted_requests`、`executions`、选择理由和最终 candidate
+
+`summary.json` 区分 `reviewed_candidates`（train-card review）与 `predicted_val_candidates`；不能把 predicted approval 报成实测提升。
+
+## 离线审计
+
+`skillexpand.l2.audit` 不发模型请求，也不执行 benchmark：
+
+1. 校验 round 的 train 卡覆盖、checkpoint、Skill provenance 和 card hash；
+2. 读取已保存的 proposal/review/prediction，重放候选解析和选择；
+3. 对 val predicted 检查 scope、冻结 panel、候选覆盖、paired task IDs、`executions=0`；
+4. 校验 Skill 版本链、batch 顺序、summary 和最终提交一致。
+
+审计通过后才能把 round 数字用于后续分析。审计只验证记录和程序不变量，不证明 LLM 的自然语言因果判断正确。

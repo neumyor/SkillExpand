@@ -144,7 +144,7 @@ class SerialL2Tests(unittest.TestCase):
         self.assertEqual(summary["completed_batches"], 2)
         self.assertEqual(summary["review_approved_updates"], 1)
         self.assertFalse(summary["empirically_validated"])
-        self.assertEqual(summary["admission_executions"], 0)
+        self.assertEqual(summary["val_executions"], 0)
         self.assertEqual(driver.meta.head().version, 0)
         self.assertEqual(
             driver.skill_heads()[0].description, driver.initial[0].description
@@ -200,7 +200,7 @@ class SerialL2Tests(unittest.TestCase):
 
         self.assertEqual(summary["predicted_review_scope"], "val")
         self.assertGreater(summary["predicted_val_requests"], 0)
-        self.assertEqual(summary["admission_executions"], 0)
+        self.assertEqual(summary["val_executions"], 0)
         self.assertTrue(judge_calls)
         for path in (self.root / "l2_batches").glob("*.json"):
             batch = json.loads(path.read_text())
@@ -684,7 +684,7 @@ class SerialL2Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit_round(self.root, 1)
 
-    def test_cli_import_and_final_remain_separate(self):
+    def test_cli_import_and_test_remain_separate(self):
         driver = self.prepared()
         target = self.root.parent / "cli-import"
         editor, reviewer = self.hosts(driver)
@@ -715,17 +715,17 @@ class SerialL2Tests(unittest.TestCase):
         self.assertFalse((target / "routes").exists())
         cfg, plan, _, _ = A.load_cold_start(target)
         with patch.object(PL, "run_generic", side_effect=self.fake_units):
-            final = evolve.final_evaluate(cfg, plan, target, 1)
+            final = evolve.test_evaluate(cfg, plan, target, 1)
         self.assertEqual(final["tasks"], 1)
         self.assertEqual(final["successes"], 1)
-        from skillexpand.evaluation.audit import audit_final
+        from skillexpand.evaluation.audit import audit_test
         final_dir = target/'test'/final['library_hash']
-        self.assertEqual(audit_final(target, final_dir)['measured'], 1)
+        self.assertEqual(audit_test(target, final_dir)['measured'], 1)
         summary = json.loads((final_dir/'summary.json').read_text())
         summary['successes'] = 0
         (final_dir/'summary.json').write_text(json.dumps(summary))
         with self.assertRaisesRegex(ValueError, 'summary differs'):
-            audit_final(target, final_dir)
+            audit_test(target, final_dir)
 
     def test_failed_executor_keeps_partial_events(self):
         driver = self.prepared()
@@ -790,7 +790,7 @@ class SerialL2Tests(unittest.TestCase):
                     "error": None,
                 }
             else:
-                raise AssertionError("L2 must not collect or execute source tasks")
+                raise AssertionError("L2 must not collect or execute train tasks")
             self.executed.append(spec)
             output.append(item)
             on_result(item)
@@ -814,7 +814,7 @@ class SerialL2Tests(unittest.TestCase):
                 self.cfg, driver.plan, L.LoopPaths(self.root), driver.config
             )
 
-    def test_frozen_routes_are_disjoint_and_admission_cannot_read_final(self):
+    def test_frozen_routes_are_disjoint_and_val_cannot_read_test(self):
         driver = self.prepared()
         plan = S.SplitPlan.make(
             {0: "train", 1: "val", 2: "val", 3: "test"}, "searchqa", 42
@@ -920,7 +920,7 @@ class SerialL2Tests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Routing incomplete"):
                 routes.run()
         self.assertEqual(routes.records, {})
-        self.assertFalse((root / "admission/complete.json").exists())
+        self.assertFalse((root / "val/complete.json").exists())
         with patch.object(PL, "run_generic", side_effect=self.fake_units):
             restored = R.FrozenRoutes(
                 self.cfg, driver.plan, driver.initial, root, "val"
@@ -972,13 +972,13 @@ class SerialL2Tests(unittest.TestCase):
                 )
 
         with patch.object(PL, "run_generic", side_effect=bad_route):
-            result = evolve.final_evaluate(self.cfg, driver.plan, self.root, 1)
+            result = evolve.test_evaluate(self.cfg, driver.plan, self.root, 1)
         self.assertEqual(result["score"], 0)
         self.assertEqual(result["tasks"], 1)
         self.assertEqual(result["routing_failures"], [3])
         self.assertIsNone(result["per_skill"][driver.initial[0].skill_id]["score"])
 
-    def test_swapping_admission_and_final_cannot_change_frozen_protocol(self):
+    def test_swapping_val_and_test_cannot_change_frozen_protocol(self):
         self.prepared()
         path = self.root / "split.json"
         value = json.loads(path.read_text())

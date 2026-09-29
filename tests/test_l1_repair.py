@@ -69,7 +69,7 @@ class L1RepairTests(unittest.TestCase):
         a.train()
         return a, model
     def gather(self, agent, k=1, supervised=True, path=None):
-        return run(agent, self.cfg, 0, 'family-p001', S.SPLIT_SOURCE, self.skill, 0,
+        return run(agent, self.cfg, 0, 'family-p001', S.SPLIT_TRAIN, self.skill, 0,
                    self.skill.skill_id, S.SELECTION_AGENT, 'agent_choice', '',
                    k=k, supervised=supervised, checkpoint_path=path)[0]
     def test_experience_public_entrypoint(self):

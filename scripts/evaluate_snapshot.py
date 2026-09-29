@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate one frozen evolution-round Skill Bank on the final split."""
+"""Evaluate one frozen evolution-round Skill Bank on the test split."""
 import argparse
 import json
 import os
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from skillexpand.l2.loop import RunLock
 from skillexpand.l2.audit import audit_round
-from skillexpand.evaluation.audit import audit_final
+from skillexpand.evaluation.audit import audit_test
 
 from skillexpand import schema as S
 from skillexpand.evaluation.routing import FrozenRoutes
@@ -24,11 +24,11 @@ def main():
     p.add_argument('--run-dir', type=Path, required=True)
     p.add_argument('--round', type=int, required=True)
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--final-workers', type=int, default=256)
+    p.add_argument('--test-workers', type=int, default=256)
     p.add_argument('--smoke', action='store_true')
     args = p.parse_args()
-    if not 1 <= args.final_workers <= 256:
-        raise ValueError('final-workers must be between 1 and 256')
+    if not 1 <= args.test_workers <= 256:
+        raise ValueError('test-workers must be between 1 and 256')
     run = args.run_dir.resolve()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -50,32 +50,32 @@ def main():
     protocol_path = output / 'protocol.json'
     # Worker count is scheduling metadata, not part of the scorer cache key.
     # Keep the first value written for resumable evaluation metadata.
-    original_final_workers = (json.loads(protocol_path.read_text()).get(
-        'final_workers', args.final_workers) if protocol_path.exists()
-        else args.final_workers)
+    original_test_workers = (json.loads(protocol_path.read_text()).get(
+        'test_workers', args.test_workers) if protocol_path.exists()
+        else args.test_workers)
     freeze(protocol_path, {
         'round': args.round, 'library_hash': library_fingerprint(skills),
         'code': code_signature(), 'provider': provider_signature(),
         'routing_reference': [S.to_dict(s) for s in initial],
-        'final_workers': original_final_workers,
+        'test_workers': original_test_workers,
         'execution': 'fixed-skill-single-attempt-v1',
     })
     save(output / 'executions' / f'{time.time_ns()}-{os.getpid()}.json',
-         {'pid': os.getpid(), 'final_workers': args.final_workers, 'started': time.time(),
-          'round': args.round, 'original_final_workers': original_final_workers})
-    routes = FrozenRoutes(cfg, plan, initial, run / 'routes', S.SPLIT_FINAL,
-                          args.final_workers)
+         {'pid': os.getpid(), 'test_workers': args.test_workers, 'started': time.time(),
+          'round': args.round, 'original_test_workers': original_test_workers})
+    routes = FrozenRoutes(cfg, plan, initial, run / 'routes', S.SPLIT_TEST,
+                          args.test_workers)
     for task in routes.ids:
-        routes._add(json.loads((run / 'routes' / S.SPLIT_FINAL / 'tasks' / f'{task}.json').read_text()))
+        routes._add(json.loads((run / 'routes' / S.SPLIT_TEST / 'tasks' / f'{task}.json').read_text()))
     if set(routes.records) != set(routes.ids):
-        raise ValueError('Missing frozen final routes')
+        raise ValueError('Missing frozen test routes')
     scorer = FixedSkillScorer(cfg, ScoreCache(output / 'scores.jsonl'), routes,
-                              args.final_workers)
+                              args.test_workers)
     freeze(output / 'score_protocol.json', {'hash': scorer.protocol_hash})
     per_skill = {}
     failed_skills = []
     for skill in skills:
-        panel = f'final:{routes.fingerprint}:{skill.skill_id}'
+        panel = f'test:{routes.fingerprint}:{skill.skill_id}'
         ids = routes.groups[skill.skill_id]
         if args.smoke:
             ids = ids[:1]
@@ -96,7 +96,7 @@ def main():
     if failed_skills:
         raise RuntimeError(f'Incomplete Skill evaluation; failed groups: {failed_skills}')
         save(output / 'skills' / f'{skill.skill_id}.json', per_skill[skill.skill_id])
-    total = len(plan.tasks_in(S.SPLIT_FINAL))
+    total = len(plan.tasks_in(S.SPLIT_TEST))
     if args.smoke:
         total = sum(item['tasks'] for item in per_skill.values())
     successes = sum(item['successes'] for item in per_skill.values())
@@ -105,12 +105,12 @@ def main():
               'routing_reference': 'initial_skills', 'tasks': total, 'successes': successes,
               'score': successes / total if total else None,
               'per_skill': per_skill, 'routing_failures': list(routes.failed_task_ids),
-              'final_workers': args.final_workers}
+              'test_workers': args.test_workers}
     save(output / 'summary.json', result)
     if args.smoke:
         save(output / 'smoke.json', {'status': 'passed', 'tasks': sum(x['tasks'] for x in per_skill.values())})
     else:
-        save(output / 'audit.json', audit_final(run, output))
+        save(output / 'audit.json', audit_test(run, output))
     print(json.dumps(result, indent=2))
 
 

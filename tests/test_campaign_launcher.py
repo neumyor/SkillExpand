@@ -67,7 +67,7 @@ def test_explicit_stage_arguments_and_concurrency(campaign):
                 ('--family-discovery-workers', 'family_discovery_workers'),
                 ('--evolve-l1-workers', 'evolve_l1_workers'),
                 ('--l2-review-workers', 'l2_review_workers'),
-                ('--final-workers', 'final_workers'),
+                ('--test-workers', 'test_workers'),
             ):
                 assert args[args.index(flag) + 1] == str(expected[key])
             if stage.startswith('evolve-'):

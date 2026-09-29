@@ -31,7 +31,7 @@ remains, return no hypotheses or no_change as required by the output schema.
 SINGLE_ATTEMPT_POLICY = """EVALUATION CONTRACT: A new task is tested in exactly ONE autonomous attempt.
 The first Finish[answer] ends that attempt, whether accepted or rejected. There is no
 second Finish, reflection, supervised hint, or access to the reference answer.
-Use later attempts in a source card only as diagnostic evidence about what should
+Use later attempts in a train card only as diagnostic evidence about what should
 have been done BEFORE the first Finish. A successful retry is not evidence that a
 post-rejection fallback improves evaluation. Do not propose or write rules of the
 form 'if an answer is rejected, then try ...', or rules that require observing an
@@ -45,7 +45,7 @@ evidence of an autonomous repair procedure.
 
 
 def accepts(base_skill, experience):
-    return experience.split == S.SPLIT_SOURCE and (
+    return experience.split == S.SPLIT_TRAIN and (
         (experience.selected_skill_id == base_skill.skill_id)
         or (
             experience.initial_skill_key is None
@@ -153,7 +153,7 @@ class SkillEditor:
         ]
         evidence = "\n\n".join(x for x in (success, failure) if x)
         contract = (
-            "Propose ONE reusable Skill revision from source task evidence. "
+            "Propose ONE reusable Skill revision from train task evidence. "
             'Return JSON only: {"body":"complete numbered task-solving rules"}. '
             'Or {"no_change":true,"reason":"..."}. '
             "The description is FROZEN and managed by software; do not return it. Only revise the body. "
@@ -223,7 +223,7 @@ class SkillEditor:
         previous_changes=(),
     ):
         if any(not accepts(base_skill, e) for e in experiences):
-            raise ValueError("Cards must belong to this source Skill")
+            raise ValueError("Cards must belong to this train Skill")
         prompt, kind, stats = self.build_prompt(
             base_skill, base_skill.body, experiences, reject_buffer
         )
@@ -264,7 +264,7 @@ class SkillEditor:
                     content=(
                         f"Draft candidate {candidate_index + 1} of {candidate_count} independently from the current Skill. "
                         "Explore a plausible revision supported by the evidence. Do not assume another candidate's "
-                        "content or use admission questions or results."
+                        "content or use val questions or results."
                     )
                 ),
             )
@@ -311,7 +311,7 @@ class SkillEditor:
                 description,
                 body,
                 S.Provenance(
-                    rationale="Source-card batch revision",
+                    rationale="Train-card batch revision",
                     source_experience_ids=tuple(e.experience_id for e in experiences),
                     source_task_ids=tuple(e.task_id for e in experiences),
                 ),

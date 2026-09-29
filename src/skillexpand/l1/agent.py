@@ -1,4 +1,4 @@
-"""Shared bounded execution loop; only source L1 orchestrates retries and guidance."""
+"""Shared bounded execution loop; only train L1 orchestrates retries and guidance."""
 import json
 from langchain.schema import HumanMessage
 from skillexpand.runtime.agent.expel import ExpelAgent

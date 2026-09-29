@@ -1,4 +1,4 @@
-"""Complete L1 cold start, then batch-local L2 card review, with independent final evaluation."""
+"""Complete L1 cold start, then batch-local L2 card review, with independent test evaluation."""
 
 import argparse
 import json
@@ -31,14 +31,14 @@ def build_parser():
     )
     p.add_argument(
         "--phase",
-        choices=("cold-start", "l2", "evolve", "final", "all"),
+        choices=("cold-start", "l2", "evolve", "test", "all"),
         default="cold-start",
     )
     p.add_argument("--split-file")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--cold-start-workers", type=int, default=8,
-        help="Concurrent source-task L1 units during cold start"
+        help="Concurrent train-task L1 units during cold start"
     )
     p.add_argument(
         "--family-discovery-workers", type=int, default=8,
@@ -52,11 +52,11 @@ def build_parser():
         "--batch-size",
         type=int,
         default=50,
-        help="Source cards per serial L2 proposal; tails included",
+        help="Train cards per serial L2 proposal; tails included",
     )
     p.add_argument(
         "--candidate-count", type=int, default=3,
-        help="Maximum candidate bodies independently reviewed on each source-card batch",
+        help="Maximum candidate bodies independently reviewed on each train-card batch",
     )
     p.add_argument("--evolve-rounds", type=int, default=1,
         help="Number of Skill-aware L1 -> L2 evolution rounds")
@@ -67,14 +67,14 @@ def build_parser():
     p.add_argument("--predicted-review-scope", choices=("val", "train_cards"),
         default="val", help="Evidence scope for predicted acceptance")
     p.add_argument("--evolve-l1-workers", type=int, default=8,
-        help="Concurrent source tasks during each Skill-aware L1 round")
+        help="Concurrent train tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,
         help="Concurrent per-card LLM reviews within each L2 batch")
     p.add_argument(
-        "--final-workers",
+        "--test-workers",
         type=int,
         default=4,
-        help="Concurrent final routing and evaluation tasks",
+        help="Concurrent test routing and evaluation tasks",
     )
     p.add_argument('--l1-model', help='LLM used by the task execution agent')
     p.add_argument('--cold-start-model', help='LLM used by cold-start discovery and Skill synthesis')
@@ -106,7 +106,7 @@ def make_plan(cfg, args, root):
     ):
         raise ValueError("Split must cover exactly this benchmark task table")
     if any(not plan.tasks_in(split) for split in S.SPLITS):
-        raise ValueError("source, admission and final must all be nonempty")
+        raise ValueError("train, val and test must all be nonempty")
     return plan
 
 
@@ -151,9 +151,9 @@ def load_clustered_plan(root, plan):
         str(t): f"{plan.benchmark}.{f}" for t, f in clusters.task_to_family.items()
     }
     if mapping != expected or set(clusters.task_to_family) != set(
-        plan.tasks_in(S.SPLIT_SOURCE)
+        plan.tasks_in(S.SPLIT_TRAIN)
     ):
-        raise ValueError("Source mapping integrity failure")
+        raise ValueError("Train mapping integrity failure")
     initial = json.loads((root / "initial_skills.json").read_text())
     complete = json.loads((root / "cold_start_complete.json").read_text())
     if complete["mapping_hash"] != S.content_hash(mapping) or complete[
@@ -165,17 +165,17 @@ def load_clustered_plan(root, plan):
     )
 
 
-def final_evaluate(cfg, plan, root, final_workers):
+def test_evaluate(cfg, plan, root, test_workers):
     with L.RunLock(root / 'run.pid'):
-        return _final_evaluate(cfg, plan, root, final_workers)
+        return _test_evaluate(cfg, plan, root, test_workers)
 
 
-def _final_evaluate(cfg, plan, root, final_workers):
+def _test_evaluate(cfg, plan, root, test_workers):
     if any((root / 'evolution').glob('round-*/input.json')):
         from skillexpand.l2.audit import audit_round
         status = json.loads((root / 'summary.json').read_text())
         if status.get('status') != 'complete' or not status.get('latest_evolution_round'):
-            raise ValueError('Complete and audit evolution before final evaluation')
+            raise ValueError('Complete and audit evolution before test evaluation')
         for index in range(1, status['latest_evolution_round'] + 1):
             audit_round(root, index)
     _, _, initial, _ = load_cold_start(root)
@@ -195,13 +195,13 @@ def _final_evaluate(cfg, plan, root, final_workers):
             "routing_reference": [S.to_dict(s) for s in initial],
         },
     )
-    # Final questions/results are first accessed here. The initial descriptions are
-    # the immutable routing reference; L2 never executes admission or final.
+    # Test questions/results are first accessed here. The initial descriptions are
+    # the immutable routing reference; L2 never executes val or test tasks.
     routes = FrozenRoutes(
-        cfg, plan, initial, root / "routes", S.SPLIT_FINAL, final_workers
+        cfg, plan, initial, root / "routes", S.SPLIT_TEST, test_workers
     ).run()
     scorer = VA.FixedSkillScorer(
-        cfg, VA.ScoreCache(target / "scores.jsonl"), routes, final_workers
+        cfg, VA.ScoreCache(target / "scores.jsonl"), routes, test_workers
     )
     C.freeze(target / 'score_protocol.json', {'hash': scorer.protocol_hash})
     per_skill = {}
@@ -209,7 +209,7 @@ def _final_evaluate(cfg, plan, root, final_workers):
         result = scorer.score(
             skill,
             routes.groups[skill.skill_id],
-            f"final:{routes.fingerprint}:{skill.skill_id}",
+            f"test:{routes.fingerprint}:{skill.skill_id}",
         )
         per_skill[skill.skill_id] = {
             "tasks": result.n,
@@ -218,7 +218,7 @@ def _final_evaluate(cfg, plan, root, final_workers):
         }
         save(target / "skills" / (skill.skill_id + ".json"), per_skill[skill.skill_id])
     successes = sum(r["successes"] for r in per_skill.values())
-    n = len(plan.tasks_in(S.SPLIT_FINAL))
+    n = len(plan.tasks_in(S.SPLIT_TEST))
     summary = {
         "split": "test",
         "library_hash": VA.library_fingerprint(skills),
@@ -230,8 +230,8 @@ def _final_evaluate(cfg, plan, root, final_workers):
         "routing_failures": list(routes.failed_task_ids),
     }
     save(target / "summary.json", summary)
-    from skillexpand.evaluation.audit import audit_final
-    save(target / 'audit.json', audit_final(root, target))
+    from skillexpand.evaluation.audit import audit_test
+    save(target / 'audit.json', audit_test(root, target))
     return summary
 
 
@@ -241,11 +241,11 @@ def main(argv=None):
     if any(
         not 1 <= n <= 256
         for n in (args.cold_start_workers, args.family_discovery_workers,
-                  args.evolve_l1_workers, args.l2_review_workers, args.final_workers)
+                  args.evolve_l1_workers, args.l2_review_workers, args.test_workers)
     ):
         raise ValueError("Worker counts must be between 1 and 256")
     if args.cold_start_dir and args.phase == "cold-start":
-        raise ValueError("Use --phase l2, all or final with --cold-start-dir")
+        raise ValueError("Use --phase l2, all or test with --cold-start-dir")
     source = Path(args.cold_start_dir).resolve() if args.cold_start_dir else root
     completed = (source / "cold_start_complete.json").exists()
     if completed:
@@ -261,8 +261,8 @@ def main(argv=None):
             if requested.assignment != plan.assignment:
                 raise ValueError("Split differs from completed cold start")
     else:
-        if args.cold_start_dir or args.phase in ("l2", "evolve", "final"):
-            raise ValueError("L2/final requires a completed cold start")
+        if args.cold_start_dir or args.phase in ("l2", "evolve", "test"):
+            raise ValueError("L2/test requires a completed cold start")
         if args.task_file:
             os.environ["EXPE_TASK_FILE"] = str(Path(args.task_file).resolve())
         cfg = (
@@ -281,7 +281,7 @@ def main(argv=None):
                     "benchmark": plan.benchmark,
                     "completed_cold_start": completed,
                     "counts": {s: len(plan.tasks_in(s)) for s in S.SPLITS},
-                    "source_groups": {f: len(ids) for f, ids in plan.families.items()},
+                    "train_groups": {f: len(ids) for f, ids in plan.families.items()},
                 },
                 indent=2,
             )
@@ -331,10 +331,10 @@ def main(argv=None):
             # All evolution entry points execute Skill-aware L1 before L2.
             result = loop.run_evolutions()
             print(json.dumps(result, indent=2))
-        elif args.phase == "final":
+        elif args.phase == "test":
             print(
                 json.dumps(
-                    final_evaluate(cfg, plan, root, args.final_workers), indent=2
+                    test_evaluate(cfg, plan, root, args.test_workers), indent=2
                 )
             )
     finally:

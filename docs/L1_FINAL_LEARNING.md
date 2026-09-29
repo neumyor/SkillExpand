@@ -62,7 +62,7 @@ scoring feedback. No ALFWorld semantics are inserted into SearchQA prompts.
   complete execution result are byte-identical. A separate AST/file audit confirms
   unchanged SearchQA execution methods, retrieval/scoring implementation, execution
   prompt module, agent factory and model client.
-- Four real-model source units using qwen3.6-flash-distill: SearchQA 0 succeeds on its
+- Four real-model train units using qwen3.6-flash-distill: SearchQA 0 succeeds on its
   first attempt and 214 on its second; ALFWorld 0 and 19 both succeed on their first.
   Three final syntheses pass; SearchQA 214 is withheld because it labels scoring-only
   answer-format adaptation as a procedure. All four resume without new model requests.

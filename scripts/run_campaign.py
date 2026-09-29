@@ -23,14 +23,14 @@ CONCURRENCY = {
         'family_discovery_workers': 128,
         'evolve_l1_workers': 128,
         'l2_review_workers': 8,
-        'final_workers': 128,
+        'test_workers': 128,
     },
     'alfworld': {
         'cold_start_workers': 32,
         'family_discovery_workers': 32,
         'evolve_l1_workers': 32,
         'l2_review_workers': 8,
-        'final_workers': 32,
+        'test_workers': 32,
     },
 }
 REQUEST_INTERVAL_SECONDS = 0.5
@@ -134,11 +134,11 @@ def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted'
             destination.parent.mkdir(exist_ok=True)
             shutil.copyfile(source, destination)
         assignment = split.get('assignment', split)
-        # All smoke tasks come from full SOURCE. No final question is exposed
+        # All smoke tasks come from full TRAIN. No test question is exposed
         # during implementation checks or used to select the smoke sample.
         selected = sorted(int(t) for t, part in assignment.items() if part == 'train')[:4]
         if len(selected) < 4:
-            raise ValueError('Preflight needs four source tasks')
+            raise ValueError('Preflight needs four train tasks')
         save(root / 'inputs' / f'{benchmark}-preflight-tasks.json', [tasks[t] for t in selected])
         save(root / 'inputs' / f'{benchmark}-preflight-split.json',
              {'assignment': {'0': 'train', '1': 'train', '2': 'val', '3': 'test'}})
@@ -255,7 +255,7 @@ def stage_args(root, mode, benchmark, stage):
         '--family-discovery-workers', str(concurrency['family_discovery_workers']),
         '--evolve-l1-workers', str(concurrency['evolve_l1_workers']),
         '--l2-review-workers', str(concurrency['l2_review_workers']),
-        '--final-workers', str(concurrency['final_workers']),
+        '--test-workers', str(concurrency['test_workers']),
         '--autonomous-attempts', str(manifest['autonomous_attempts']),
         '--supervised-attempts', str(manifest.get('supervised_attempts', 1)),
         '--batch-size', str(manifest['batch_size']),
@@ -281,19 +281,19 @@ def audit_stage(root, mode, benchmark, stage):
     from skillexpand.l1.audit import audit_checkpoint, audit_usage
     from skillexpand.persistence.artifacts import load_cold_start
     from skillexpand.l2.audit import audit_round
-    from skillexpand.evaluation.audit import audit_final
+    from skillexpand.evaluation.audit import audit_test
     run = root / mode / benchmark / 'run'
     cfg, plan, initial, _ = load_cold_start(run)
     if cfg.agent.llm != role_models(read(root / 'manifest.json'))['l1_executor']:
         raise ValueError('Actual model differs from requested model')
-    if stage == 'final':
+    if stage == 'test':
         summary = read(run / 'summary.json')
         if summary['latest_evolution_round'] != 2:
-            raise ValueError('Final preceded the second evolve round')
-        finals = list((run / 'test').glob('*/summary.json'))
-        if len(finals) != 1:
-            raise ValueError('Final must contain exactly one evaluated library')
-        return audit_final(run, finals[0].parent)
+            raise ValueError('Test preceded the second evolve round')
+        tests = list((run / 'test').glob('*/summary.json'))
+        if len(tests) != 1:
+            raise ValueError('Test must contain exactly one evaluated library')
+        return audit_test(run, tests[0].parent)
     directory = run / ('discovery' if stage == 'cold-start' else 'evolution/round-' + stage.split('-')[1])
     adapter = resolve(OmegaConf.load(run / 'config.json'))
     rows = []

@@ -1,7 +1,7 @@
 # Checking existing rules before editing or judging
 
 The L2 prompts now require a current-rule check at three points, without changing the
-JSON schema, candidate count, acceptance formula or source-only evidence boundary:
+JSON schema, candidate count, acceptance formula or train-only evidence boundary:
 
 1. Hypothesis generation must read the whole current body, locate existing coverage,
    and preserve conditions, ordering and every AND/OR alternative. The change field
@@ -34,7 +34,7 @@ The checks used the same `qwen3.6-flash-distill` endpoint/settings as the earlie
 with one generation per case/version and the existing maximum one ID-format correction.
 They are prompt-development examples, not held-out benchmark evaluation.
 
-- The original ALFWorld source-card case had proposed deleting “Open the destination
+- The original ALFWorld train-card case had proposed deleting “Open the destination
   receptacle if it is closed” for placement on a table. The historical reviewer called
   that an improvement by ignoring the condition.
 - A first attempt adding only a stronger checklist still made that reviewer mistake.
@@ -58,3 +58,11 @@ They are prompt-development examples, not held-out benchmark evaluation.
 
 The targeted failure was blocked in these checks. Reliability across more cards and
 skills, and any effect on final success rates, remain unmeasured.
+
+## Predicted-val acceptance prompt
+
+默认 `predicted` reviewer 不读取经验卡 projection。它接收单个 task 和一个 Skill，回答：
+
+> 在一次自主尝试中，这个执行器使用该 Skill 是否能成功完成 task？不能观察 rejected answer，也不能反思重试。
+
+输出 `probability_true`、`predicted_success` 和简短理由。程序分别请求旧 Skill 与候选 Skill，固定使用同一 `routes/val/` task group，并以平均概率的严格提升决定候选是否通过。这个预测与 `train_cards` 的经验卡 Reviewer、`empirical` 的 val 实测和 JEV 服务相互独立；工件通过 `acceptance.scope` 记录实际路径。

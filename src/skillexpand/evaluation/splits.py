@@ -1,4 +1,4 @@
-"""Partition tasks before any experience collection; source clusters are attached later."""
+"""Partition tasks before any experience collection; train clusters are attached later."""
 import random
 from skillexpand import schema as S
 from typing import Dict
@@ -13,7 +13,7 @@ def allocate(n: int, ratios: Dict[str, float],
     Largest-remainder apportionment, then a floor of ``minimum`` per split
     (relaxed only when ``n`` is too small to honour it).  Starvation matters: a
     family with 17 tasks and a 0.5/0.25/0.25 split must not end up with a single
-    final task, because a 1-task evaluation set cannot distinguish anything.
+    test task, because a 1-task evaluation set cannot distinguish anything.
     """
     order = list(ratios.keys())
     if n <= 0:

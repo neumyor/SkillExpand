@@ -79,15 +79,15 @@ def parse_plan(raw, experiences, limit, structured=False, base_skill=None):
 class SkillPatchRunner:
     def __init__(self, editor, reviewer, audit_dir, read_only=False,
                  reviewer_factory=None, acceptance_mode="predicted",
-                 admission_scorer=None, jev_scorer=None,
+                 val_scorer=None, jev_scorer=None,
                  predicted_review_scope="val", predicted_scorer=None):
         self.editor, self.reviewer, self.audit_dir = editor, reviewer, Path(audit_dir)
         self.read_only = read_only
         self.reviewer_factory = reviewer_factory
         if acceptance_mode not in ("predicted", "empirical", "jev"):
             raise ValueError("Unknown acceptance mode")
-        if acceptance_mode == "empirical" and admission_scorer is None and not read_only:
-            raise ValueError("Empirical acceptance requires an admission scorer")
+        if acceptance_mode == "empirical" and val_scorer is None and not read_only:
+            raise ValueError("Empirical acceptance requires a val scorer")
         if acceptance_mode == "jev" and jev_scorer is None and not read_only:
             raise ValueError("JEV acceptance requires a JEV scorer")
         if predicted_review_scope not in ("val", "train_cards"):
@@ -97,7 +97,7 @@ class SkillPatchRunner:
             raise ValueError("Predicted val acceptance requires a predicted scorer")
         self.acceptance_mode = acceptance_mode
         self.predicted_review_scope = predicted_review_scope
-        self.admission_scorer = admission_scorer
+        self.val_scorer = val_scorer
         self.jev_scorer = jev_scorer
         self.predicted_scorer = predicted_scorer
 
@@ -111,12 +111,12 @@ class SkillPatchRunner:
             or any(not ED.accepts(base_skill, e) for e in experiences)
         ):
             raise ValueError(
-                "Expected a nonempty source batch assigned to this Skill and positive K"
+                "Expected a nonempty train batch assigned to this Skill and positive K"
             )
         if l2_review_workers < 1:
             raise ValueError("l2_review_workers must be positive")
         acceptance_protocol = getattr(
-            self.predicted_scorer or self.jev_scorer or self.admission_scorer,
+            self.predicted_scorer or self.jev_scorer or self.val_scorer,
             "protocol_hash", None)
         if acceptance_protocol is None and acceptance_record is not None:
             acceptance_protocol = acceptance_record.get("protocol_hash")
@@ -418,9 +418,9 @@ class SkillPatchRunner:
                 task_ids = tuple(acceptance_record.get("task_ids", ()))
                 panel_key = acceptance_record.get("panel", "")
             else:
-                scorer = self.jev_scorer if self.acceptance_mode == "jev" else self.admission_scorer
+                scorer = self.jev_scorer if self.acceptance_mode == "jev" else self.val_scorer
                 task_ids = tuple(scorer.routes.groups[base_skill.skill_id])
-                split_name = "val" if self.acceptance_mode == "jev" else "admission"
+                split_name = "val"
                 panel_key = f"{split_name}:{scorer.routes.fingerprint}:{base_skill.skill_id}"
             acceptance.update({"task_ids": list(task_ids), "panel": panel_key})
             validations = []
@@ -433,7 +433,7 @@ class SkillPatchRunner:
             elif task_ids:
                 alias_by_candidate = {v.candidate_id: k for k, v in aliases.items()}
                 for candidate in ordered:
-                    scorer = self.jev_scorer if self.acceptance_mode == "jev" else self.admission_scorer
+                    scorer = self.jev_scorer if self.acceptance_mode == "jev" else self.val_scorer
                     validation = scorer.validate(
                         base_skill.skill_id, base_skill, candidate.skill, task_ids, panel_key
                     )
@@ -452,7 +452,7 @@ class SkillPatchRunner:
                 if self.acceptance_mode == "jev":
                     # JEV is a predictive judge and never runs the benchmark
                     # environment.  Keep the historical ``executions`` field
-                    # reserved for empirical admission episodes.
+                    # reserved for empirical val episodes.
                     acceptance["jev_requests"] = request_count
                 else:
                     acceptance["executions"] = request_count
@@ -467,12 +467,12 @@ class SkillPatchRunner:
                     ),
                 )
                 reason_prefix = "jev_approved" if self.acceptance_mode == "jev" else "empirical_approved"
-                panel_name = "frozen val panel" if self.acceptance_mode == "jev" else "frozen admission panel"
+                panel_name = "frozen val panel" if self.acceptance_mode == "jev" else "frozen val panel"
                 selected, reason = winner["id"], f"{reason_prefix}: candidate beat the {panel_name}"
             elif not task_ids:
-                selected, reason = None, "hold: admission panel is empty"
+                selected, reason = None, "hold: val panel is empty"
             else:
-                selected, reason = None, "hold: no candidate beat the frozen admission panel"
+                selected, reason = None, "hold: no candidate beat the frozen val panel"
         record.update(
             reviews=results,
             acceptance=acceptance,

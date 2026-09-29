@@ -25,7 +25,7 @@ def main():
     parser.add_argument('--rounds', type=int, default=1)
     parser.add_argument('--stage', choices=(
         'cold_start_workers', 'family_discovery_workers', 'evolve_l1_workers',
-        'l2_review_workers', 'final_workers'), default='cold_start_workers')
+        'l2_review_workers', 'test_workers'), default='cold_start_workers')
     args = parser.parse_args()
     if args.interval < 0 or args.rounds < 1 or not args.name.replace('-', '').isalnum():
         parser.error('interval must be nonnegative, rounds positive, and name alphanumeric or hyphenated')

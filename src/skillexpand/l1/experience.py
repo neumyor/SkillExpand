@@ -53,7 +53,7 @@ def gather_task_experience(cfg: Any, task_id: int, family_id: str, split: str,
 class ExperienceLog:
     """Append-only store of gathered experiences, keyed by experience id.
 
-    Gathering is expensive -- up to four episodes per source task -- so a run that
+    Gathering is expensive -- up to four episodes per train task -- so a run that
     dies halfway must resume rather than restart.  Records are also the raw
     evidence behind every attribution, which means a re-analysis never needs the
     model again.

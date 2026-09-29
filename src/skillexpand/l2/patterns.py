@@ -35,7 +35,7 @@ def parse(raw, experiences):
             raise ValueError('Invalid pattern')
         card_ids = {x['card_id'] for x in support}
         if len(card_ids) < 2 or not card_ids <= cards.keys():
-            raise ValueError('Pattern needs two distinct source cards')
+            raise ValueError('Pattern needs two distinct train cards')
         for item in support:
             evidence = {r['id']: r for r in cards[item['card_id']].experience_card['evidence']}
             observation = evidence.get(item['evidence_id'])
