@@ -8,6 +8,7 @@ from skillexpand.l1.runner import save
 from skillexpand.persistence import store as ST
 from skillexpand.l2.editor import SkillEditor
 from skillexpand.l2.update import SkillPatchRunner
+from skillexpand.l2.card_review import OUTCOMES as CR_OUTCOMES
 from skillexpand.l2.patterns import validate_cache
 from skillexpand.l1.audit import audit_checkpoint
 from skillexpand.l1.adapters import resolve
@@ -48,6 +49,15 @@ def audit_batch(root, batch, base, cards):
             'L2 journal differs from cached proposal/review replay')
     require(batch.get('candidate') == (S.to_dict(result.candidate) if result.candidate else None),
             'committed candidate differs from replayed decision')
+    if acceptance_mode == 'predicted':
+        # v6 predicted review is a paired-outcome protocol.  Keep the derived
+        # effect for selection, but require the raw old/new outcomes to remain
+        # auditable in every card judgment.
+        for review in result.record.get('reviews', ()):
+            for judgment in review.get('judgments', ()):
+                require(judgment.get('old_outcome') in CR_OUTCOMES and
+                        judgment.get('new_outcome') in CR_OUTCOMES,
+                        'predicted review lacks canonical old/new outcomes')
     if mode == 'structured':
         candidates = []
         for proposal in batch.get('proposals', []):

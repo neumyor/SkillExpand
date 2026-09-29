@@ -153,7 +153,8 @@ bash scripts/run_tests.sh
   --evolve-rounds 2 --resume
 ```
 
-当前协议为 `serial-card-id-review-v5`。从本协议的全新运行目录开始。
+当前协议为 `serial-card-id-review-v6-relative-outcomes`。Reviewer 对每个候选分别输出
+`old_outcome` 与 `new_outcome`，程序再推导 `improve/regress/unchanged/unknown`；从本协议的全新运行目录开始。
 每批文件中的 `review_approved` 为预测评审通过，不能报告为实测提升。
 L3 与 description 已冻结，旧拒绝缓冲和 L3 阈值参数已移除。
 完整假设、候选、diff、逐卡证据和评审原始响应分别保存在 `l2_proposals/` 与 `l2_batches/`。

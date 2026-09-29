@@ -271,7 +271,13 @@ class SkillPatchRunner:
                     correction = {
                         "error": str(exc),
                         "previous_output": raw["raw"],
-                        "instruction": "Fix coverage and IDs only. Return every candidate once, citing supplied IDs.",
+                        "instruction": (
+                            "Fix coverage, IDs, and outcome fields only. Return every candidate "
+                            "once with old_outcome and new_outcome in {success,failure,unknown}; "
+                            "old_outcome must copy card.current_observed_outcome when known; "
+                            "otherwise infer CURRENT separately or use unknown. Do not "
+                            "return label/effect; the program derives the relative effect."
+                        ),
                     }
                     raw = cached(
                         "review-" + unit_id + "-repair",

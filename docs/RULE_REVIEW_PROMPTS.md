@@ -9,13 +9,22 @@ JSON schema, candidate count, acceptance formula or source-only evidence boundar
 2. Body generation rechecks the selected hypothesis. If it is already covered or
    unsupported, it returns `no_change`; it must not substitute an unrelated edit.
    Rules inactive on the current cards are not automatically redundant.
-3. Review outputs evidence and a short comparison before its label. The reason states
+3. Review outputs evidence and a short comparison before its paired outcomes. The reason states
    the current condition, whether the card supports it as true/false/unknown, the
    respective required actions and the expected success difference. A hypothetical
    executor mistake or saved action alone is not evidence of improvement.
 
 These are model instructions, not a new programmatic proof of their conclusions.
 The parser still validates coverage and references; it cannot prove semantic correctness.
+The current protocol is relative-outcomes: the reviewer returns `old_outcome` and
+`new_outcome` (`success|failure|unknown`) for each candidate. The program derives
+`improve` only for failure→success, `regress` only for success→failure, `unchanged`
+for equal known outcomes, and `unknown` otherwise. When the card was executed with
+the current Skill, `old_outcome` must match its first autonomous attempt; a card from
+another revision does not provide a baseline outcome and must be treated as unknown
+or independently inferred. Fresh prompts never emit a `label`; a compatibility parser
+branch can normalize an old label-only response when replaying legacy synthetic tests,
+but all persisted judgments contain the canonical old/new outcomes and derived effect.
 New prompts change the implementation fingerprint: start a fresh L2 import rather than
 resuming a previous prompt version's L2 directory.
 

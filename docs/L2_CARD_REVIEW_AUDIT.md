@@ -1,6 +1,6 @@
 # L2 经验卡评审重构与接口审计
 
-本文记录 v4 历史实验，不描述当前 fresh-start v5 协议。当前设计见 [架构](ARCHITECTURE.md)。
+本文记录 v4 历史实验，不描述当前 fresh-start v6 relative-outcomes 协议。当前设计见 [架构](ARCHITECTURE.md)。
 
 ## 当前协议
 

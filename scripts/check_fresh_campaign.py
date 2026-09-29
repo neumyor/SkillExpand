@@ -64,7 +64,8 @@ def main():
         corrected = False
         for attempt in range(3):
             try:
-                judgments = CR.parse_card_review(raw, base, candidates, card)
+                judgments = CR.parse_card_review(raw, base, candidates, card,
+                                                 allow_legacy=False)
                 break
             except (ValueError, KeyError, TypeError) as exc:
                 if attempt == 2:
@@ -72,11 +73,14 @@ def main():
                 correction = {'error': str(exc),
                     'instruction': ('Return exactly {"candidates":[{"id":"C1",'
                         '"evidence_ids":[],"rule_ids":[],"reason":"...",'
-                        '"label":"unknown"}, ...]} with C1, C2, C3 once each. '
-                        'The top-level keys must NOT be C1/C2/C3. '
-                        'Use only supplied IDs; do not use placeholders such as etc. '
-                        'For improve/regress provide at least one card evidence ID and '
-                        'one changed rule ID; otherwise use unchanged or unknown.')}
+                        '"old_outcome":"failure","new_outcome":"unknown"}, ...]} '
+                        'with C1, C2, C3 once each. The top-level keys must NOT be '
+                        'C1/C2/C3. Use only supplied IDs; do not use placeholders such '
+                        'as etc. Copy card.current_observed_outcome into old_outcome '
+                        'when known; otherwise infer CURRENT separately or use unknown. Do not '
+                        'return label or effect; the program derives the relative effect. '
+                        'For a directional outcome difference provide at least one card '
+                        'evidence ID and one changed rule ID.')}
                 repair = probe.with_name(probe.stem + f'-repair-{attempt + 1}.json')
                 if repair.exists():
                     raw = json.loads(repair.read_text())['raw']
