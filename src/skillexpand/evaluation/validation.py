@@ -415,7 +415,30 @@ class PredictedSkillScorer:
     the same route groups and paired comparison for direct calibration.
     """
 
-    PROTOCOL = "predicted-val-skill-success-v1"
+    PROTOCOL = "predicted-val-skill-success-v2-json-schema"
+    REASON_MAX_CHARS = 80
+    RESPONSE_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["probability_true", "predicted_success", "reason"],
+        "properties": {
+            "probability_true": {"type": "number", "minimum": 0, "maximum": 1},
+            "predicted_success": {"type": "boolean"},
+            "reason": {"type": "string", "minLength": 1, "maxLength": REASON_MAX_CHARS},
+        },
+    }
+
+    @classmethod
+    def response_format(cls):
+        """OpenAI-compatible strict response format for the reviewer only."""
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "predicted_skill_review",
+                "strict": True,
+                "schema": cls.RESPONSE_SCHEMA,
+            },
+        }
 
     def __init__(self, cfg, routes, cache, workers=8, judge_factory=None,
                  threshold=0.5):
@@ -429,47 +452,106 @@ class PredictedSkillScorer:
             raise ValueError("prediction threshold must be between 0 and 1")
         self.protocol_hash = S.content_hash({
             "protocol": self.PROTOCOL,
+            "response_schema": self.RESPONSE_SCHEMA,
             "benchmark": cfg.benchmark.name,
             "routes": routes.fingerprint,
             "threshold": self.threshold,
         })
 
-    @staticmethod
-    def prompt(task: str, skill: S.Skill) -> str:
-        return json.dumps({
+    def prompt(self, task: str, skill: S.Skill) -> str:
+        payload = {
             "task": task,
             "skill": {"description": skill.description, "body": skill.body},
-            "question": (
-                "Predict whether a fresh executor will complete this task successfully "
-                "with one autonomous attempt using this Skill. Do not assume rejected "
-                "answers can be retried and do not use any execution trace."
+            "instructions": (
+                "You are a strict validation reviewer. Predict whether a fresh "
+                "executor will complete this task successfully with one autonomous "
+                "attempt using this Skill. Do not assume rejected answers can be "
+                "retried and do not use any execution trace. You may reason internally "
+                "for as long as needed. Your visible final answer MUST be exactly one "
+                "JSON object with only probability_true, predicted_success, and reason. "
+                "Do not output markdown, analysis, a task/skill echo, or any other key. "
+                f"probability_true is a number in [0,1]; predicted_success is true "
+                f"exactly when probability_true >= {self.threshold:.6g}; reason is a "
+                "concise string of at most 80 characters."
             ),
-            "output": {
+            "output_schema": {
                 "probability_true": "number in [0,1]",
                 "predicted_success": "boolean",
-                "reason": "brief evidence-based explanation",
+                "reason": "string, <= 80 characters",
             },
-        }, ensure_ascii=False)
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
     def _parse(self, raw):
         from skillexpand.l1.family_discovery import _extract_json
-        value = _extract_json(raw)
-        probability = value.get("probability_true", value.get("probability"))
-        if probability is None and isinstance(value.get("predicted_success"), bool):
-            probability = 1.0 if value["predicted_success"] else 0.0
+        value = _extract_json(raw, required_keys=("probability_true", "predicted_success", "reason"))
+        if set(value) != {"probability_true", "predicted_success", "reason"}:
+            raise ValueError("Predicted reviewer must return exactly three required fields")
+        probability = value["probability_true"]
+        if isinstance(probability, bool) or not isinstance(probability, (int, float)):
+            raise ValueError("Predicted reviewer probability_true must be numeric")
         try:
             probability = float(probability)
         except (TypeError, ValueError) as exc:
             raise ValueError("Predicted reviewer must return probability_true") from exc
         if not 0.0 <= probability <= 1.0:
             raise ValueError("Predicted probability is outside [0, 1]")
+        predicted_success = value["predicted_success"]
+        if not isinstance(predicted_success, bool):
+            raise ValueError("Predicted reviewer predicted_success must be boolean")
+        elif predicted_success != (probability >= self.threshold):
+            raise ValueError("predicted_success disagrees with probability_true")
+        reason = value.get("reason")
+        if not isinstance(reason, str):
+            raise ValueError("Predicted reviewer reason must be a string")
+        if not reason.strip():
+            raise ValueError("Predicted reviewer reason must not be empty")
+        if len(reason) > self.REASON_MAX_CHARS:
+            raise ValueError("Predicted reviewer reason is too long")
         return {
             "probability_true": probability,
-            "predicted_success": probability >= self.threshold,
-            "reason": str(value.get("reason", "")),
+            "predicted_success": predicted_success,
+            "reason": reason,
             "raw": value,
             "threshold": self.threshold,
         }
+
+    def _call(self, host, prompt):
+        """Call a reviewer with schema + thinking overrides.
+
+        ``request_kwargs`` is understood by our GPT wrapper.  The fallback keeps
+        small test/offline hosts usable; their prompt still carries the same
+        contract and the result is validated by ``_parse``.
+        """
+        from langchain.schema import HumanMessage
+        messages = [HumanMessage(content=prompt)]
+        request_kwargs = {
+            "response_format": self.response_format(),
+            # Campaigns may disable thinking for executors.  The reviewer is a
+            # separate role and should retain its long internal reasoning budget.
+            "enable_thinking": True,
+        }
+        try:
+            return host.llm(messages, stop=[], replace_newline=False,
+                            request_kwargs=request_kwargs)
+        except TypeError as exc:
+            if "request_kwargs" not in str(exc):
+                raise
+            return host.llm(messages, stop=[], replace_newline=False)
+
+    def _review(self, host, prompt):
+        raw = self._call(host, prompt)
+        try:
+            return self._parse(raw), 1
+        except Exception as first_error:
+            correction = (
+                prompt + "\n\nFORMAT CORRECTION: your previous visible answer did not "
+                "match the required schema (" + str(first_error) + "). Return only "
+                "the single JSON object now; do not repeat the input or your analysis."
+            )
+            repaired = self._call(host, correction)
+            parsed = self._parse(repaired)
+            return parsed, 2
 
     def score(self, skill, task_ids, panel_key):
         task_ids = tuple(sorted(int(t) for t in task_ids))
@@ -496,14 +578,13 @@ class PredictedSkillScorer:
                 self.cache.path.parent / "usage" /
                 f"predicted-{skill.skill_id}-{task_id}-{S.content_hash(skill.body)}.json",
             )
-            from langchain.schema import HumanMessage
-            result = self._parse(host.llm(
-                [HumanMessage(content=self.prompt(F.task_text_of(self.cfg, task_id), skill))],
-                stop=[], replace_newline=False,
-            ))
+            result, format_attempts = self._review(
+                host, self.prompt(F.task_text_of(self.cfg, task_id), skill))
             return {"task_id": task_id, "skill_key": skill.key,
                     "cache_key": keys[task_id], "panel_key": panel_key,
-                    "protocol_hash": self.protocol_hash, **result}
+                    "protocol_hash": self.protocol_hash,
+                    "format_attempts": format_attempts,
+                    "response_format": "json_schema", **result}
 
         errors = []
         if pending:

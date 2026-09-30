@@ -92,3 +92,6 @@ flowchart LR
 改变 prompt、代码、模型、split 或并发协议必须使用新的运行目录。恢复只复用当前协议已落盘的逐单元结果。
 
 安装和 benchmark 环境配置见 [运行指南](docs/RUNNING.md) 与 [Benchmark/L1 接口](docs/BENCHMARKS.md)；系统设计见 [架构](docs/ARCHITECTURE.md)，L2 审计见 [L2 审计](docs/L2_CARD_REVIEW_AUDIT.md)。
+
+最近一次 SearchQA/ALFWorld campaign 的审计状态和历史 test 快照见
+[实验状态记录](docs/EXPERIMENT_STATUS_20260930.md)。

@@ -184,6 +184,7 @@ class SerialL2Tests(unittest.TestCase):
                 judge_calls.append(body)
                 return json.dumps({
                     "probability_true": 0.8 if body.startswith("NEW ") else 0.2,
+                    "predicted_success": body.startswith("NEW "),
                     "reason": "controlled test forecast",
                 })
 

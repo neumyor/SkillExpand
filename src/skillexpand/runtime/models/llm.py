@@ -4,6 +4,7 @@ import json
 import os
 import time
 import math
+import threading
 
 from langchain.chat_models import ChatOpenAI
 from langchain.schema import ChatMessage
@@ -156,8 +157,13 @@ class GPTWrapper:
             if extra:
                 kwargs['model_kwargs'] = extra
         self.llm = ChatOpenAI(**kwargs)
+        # LangChain 0.0.x exposes request fields through ``model_kwargs`` rather
+        # than per-call keyword arguments.  Keep temporary reviewer-specific
+        # fields isolated when a host is ever shared by worker threads.
+        self._request_kwargs_lock = threading.RLock()
 
-    def __call__(self, messages: List[ChatMessage], stop: List[str] = [], replace_newline: bool = True) -> str:
+    def __call__(self, messages: List[ChatMessage], stop: List[str] = [],
+                 replace_newline: bool = True, request_kwargs: dict = None) -> str:
         kwargs = {}
         if stop != []:
             kwargs['stop'] = stop
@@ -170,7 +176,23 @@ class GPTWrapper:
         for i in range(retries + 1):
             try:
                 wait_for_request_slot()
-                output = self.llm(messages, **kwargs).content.strip('\n').strip()
+                with self._request_kwargs_lock:
+                    existing_model_kwargs = getattr(self.llm, 'model_kwargs', {})
+                    # Test doubles and a few older LangChain clients do not
+                    # expose a real dict here.
+                    if not isinstance(existing_model_kwargs, dict):
+                        existing_model_kwargs = {}
+                    previous_model_kwargs = dict(existing_model_kwargs)
+                    if request_kwargs:
+                        merged = dict(previous_model_kwargs)
+                        merged.update(request_kwargs)
+                        self.llm.model_kwargs = merged
+                    try:
+                        message = self.llm(messages, **kwargs)
+                    finally:
+                        if request_kwargs:
+                            self.llm.model_kwargs = previous_model_kwargs
+                output = str(message.content or '').strip('\n').strip()
                 break
             except retryable:
                 if i == retries:

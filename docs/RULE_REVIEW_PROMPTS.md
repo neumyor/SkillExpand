@@ -54,7 +54,8 @@ They are prompt-development examples, not held-out benchmark evaluation.
   and a `hold: no_distinct_supported_candidate` decision. This remaining planner
   compliance defect is not claimed fixed. Artifacts are in
   `runs/prompt-rule-check-v3-20260923/`.
-- All 111 offline regression tests and static checks passed after the final prompt edits.
+- The current offline regression suite contains 202 tests; the reviewer-format
+  change was independently checked with the focused suite (45 tests passed).
 
 The targeted failure was blocked in these checks. Reliability across more cards and
 skills, and any effect on final success rates, remain unmeasured.

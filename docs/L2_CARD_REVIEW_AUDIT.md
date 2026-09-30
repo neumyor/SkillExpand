@@ -19,6 +19,13 @@
 
 程序将 base/candidate 预测缓存到 `val/predicted_scores.jsonl`，以候选平均 `probability_true` 严格高于 base 为 paired improvement。该模式不会执行 benchmark，`acceptance.executions=0`，请求数量记录在 `acceptance.predicted_requests`。
 
+Reviewer 的最终输出由 JSON Schema 约束为三个字段：`probability_true`（0 到
+1 的数字）、`predicted_success`（必须与阈值判断一致）和不超过 80 个字符的
+`reason`。Reviewer 请求单独启用 thinking；executor 的全局 thinking 开关不会
+覆盖它。若模型返回 fenced JSON、前后 commentary、尾随逗号或 Python 风格
+字面量，`_extract_json()` 会提取完整对象；截断对象会触发一次格式修复请求，
+仍然无效则该 task 失败并保留错误工件。
+
 ### predicted + train_cards
 
 这是兼容的卡片路径。每次 Reviewer 读取一张 train 经验卡、当前 Skill 和全部匿名候选；它为每个候选输出 `old_outcome` 与 `new_outcome`。程序推导：failure→success 为 improve，success→failure 为 regress，两个已知结果相同为 unchanged，其余为 unknown。Reviewer 预测不是实测成功率。
