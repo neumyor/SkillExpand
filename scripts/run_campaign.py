@@ -267,7 +267,11 @@ def environment(root):
     for key in ('EXPE_CONFIG_FILE', 'EXPE_TASK_FILE', 'EXPE_LLM_EXTRA_JSON', 'OPENAI_API_BASE'):
         env.pop(key, None)
     timeout = manifest['timeouts']
-    env.update(EXPE_LLM_MODEL=role_models(manifest)['l1_executor'], EXPE_LLM_DISABLE_THINKING='1', EXPE_SHOW_ADMISSIBLE='1',
+    models = role_models(manifest)
+    thinking_models = sorted(model for model in set(models.values())
+                             if model.startswith('glm-5.3'))
+    env.update(EXPE_LLM_MODEL=models['l1_executor'], EXPE_LLM_DISABLE_THINKING='1',
+        EXPE_LLM_ENABLE_THINKING_MODELS=','.join(thinking_models), EXPE_SHOW_ADMISSIBLE='1',
         PYTHONPATH=str(root / 'code/src') + os.pathsep + manifest['overlay'], PYTHONUNBUFFERED='1',
         ALFWORLD_DATA=manifest['alfworld_data'],
         ALFWORLD_CONFIG=manifest['alfworld_config'],
@@ -284,11 +288,17 @@ def environment(root):
 
 def health(root):
     env = environment(root)
+    # The probe uses the same per-model thinking policy as worker processes.
+    os.environ.update(env)
     models = role_models(read(root / 'manifest.json'))
     probes = []
     for model in sorted(set(models.values())):
+        from skillexpand.runtime.models.llm import (
+            accepted_reported_model_names, thinking_request_kwargs,
+        )
         payload = {'model': model, 'messages': [{'role': 'user', 'content': 'Reply with OK.'}],
-                   'max_tokens': 8, 'temperature': 0, 'enable_thinking': False}
+                   'max_tokens': 8, 'temperature': 0}
+        payload.update(thinking_request_kwargs(model))
         request = urllib.request.Request(env['EXPE_LLM_BASE_URL'].rstrip('/') + '/chat/completions',
             data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json',
                 'Authorization': 'Bearer ' + env['OPENAI_API_KEY']})
@@ -296,13 +306,15 @@ def health(root):
         with urllib.request.urlopen(request, timeout=60) as response:
             value = json.loads(response.read())
         reported_model = value.get('model')
-        if reported_model != model:
+        if reported_model not in accepted_reported_model_names(model):
             raise ValueError(
-                f'Health request served model {reported_model!r}, expected {model!r}')
+                f'Health request served model {reported_model!r}, expected {model!r} '
+                f'or a known canonical alias')
         content = value['choices'][0]['message'].get('content', '')
         if not content.strip():
             raise ValueError(f'Health request returned empty content for model {model}')
         probes.append({'requested_model': model, 'reported_model': reported_model,
+                       'thinking': payload.get('enable_thinking'),
                        'seconds': round(time.monotonic() - started, 3), 'content': content})
     result = {'models': models, 'probes': probes, 'time': time.time()}
     # Keep the old single-model fields for small tooling that reads health.json.

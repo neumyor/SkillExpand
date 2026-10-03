@@ -71,7 +71,37 @@ def _truthy(name: str) -> bool:
     return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def get_extra_model_kwargs() -> dict:
+def _model_list_env(name: str) -> set[str]:
+    return {item.strip() for item in os.environ.get(name, '').split(',') if item.strip()}
+
+
+def thinking_request_kwargs(model_name: str = None) -> dict:
+    """Return the provider thinking switch for one requested model.
+
+    The campaign endpoint exposes both a Qwen model that must receive
+    ``enable_thinking=false`` and a GLM model that rejects that value and
+    requires thinking to remain enabled.  The explicit allow-list keeps this
+    choice tied to the frozen model map instead of silently applying one
+    provider's setting to every role.
+    """
+    enabled = _model_list_env('EXPE_LLM_ENABLE_THINKING_MODELS')
+    if model_name and model_name in enabled:
+        return {'enable_thinking': True}
+    if _truthy(THINKING_ENV_VAR):
+        return {'enable_thinking': False}
+    return {}
+
+
+def accepted_reported_model_names(requested: str) -> set[str]:
+    """Return request/canonical names accepted by hosted OpenAI gateways."""
+    aliases = {requested}
+    for suffix in ('-distill', '-ali', '-tianyi', '-xunya', '-tencent'):
+        if requested.endswith(suffix):
+            aliases.add(requested[:-len(suffix)])
+    return aliases
+
+
+def get_extra_model_kwargs(model_name: str = None) -> dict:
     """Extra fields merged into every chat request.
 
     ``enable_thinking: false`` is not cosmetic for a reasoning model.  Measured on
@@ -96,9 +126,7 @@ def get_extra_model_kwargs() -> dict:
     forwards ``model_kwargs`` verbatim into the request body, which is the only
     supported way to reach provider-specific switches here.
     """
-    kwargs = {}
-    if _truthy(THINKING_ENV_VAR):
-        kwargs['enable_thinking'] = False
+    kwargs = thinking_request_kwargs(model_name)
     raw = os.environ.get(EXTRA_ENV_VAR)
     if raw:
         try:
@@ -153,7 +181,7 @@ class GPTWrapper:
             # dead endpoint fails loudly instead of hanging for minutes.
             # The wrapper owns the retry budget so a provider timeout cannot be
             # multiplied by both the client and wrapper retry loops.
-            extra = get_extra_model_kwargs()
+            extra = get_extra_model_kwargs(llm_name)
             if extra:
                 kwargs['model_kwargs'] = extra
         self.llm = ChatOpenAI(**kwargs)
