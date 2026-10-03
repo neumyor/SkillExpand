@@ -52,8 +52,11 @@ def main():
             {'id': 'C3', 'body': base.body + '\nUse the observed feedback to check progress.'},
         ]
         card = CR.card_payload([exp])[0]
-        host = F.build_reasoning_host(cfg, root / 'preflight/reviewer-probe' /
-                                      f'{benchmark}.usage.json')
+        host = F.build_reasoning_host(
+            cfg,
+            root / 'preflight/reviewer-probe' / f'{benchmark}.usage.json',
+            role='l2_reviewer',
+        )
         reviewer = CR.CardReviewer(host)
         probe = root / 'preflight/reviewer-probe' / f'{benchmark}-response-v2.json'
         if probe.exists():

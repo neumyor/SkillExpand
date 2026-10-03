@@ -42,7 +42,7 @@
 - test 只在所有演化结束后做独立评测，不参与 Skill 选择、Reviewer prompt 或模型选择。
 - 冷启动 + Evolve 2 轮；保留当前默认的 Skill 编辑模式、候选数量、batch 顺序、并发设置和 retry 规则。
 - SearchQA 使用 128/128/128，ALFWorld 使用 32/32/32；L2 reviewer worker pool 为 8。
-- 每个条件使用同一冻结 task/split、相同路由、相同代码提交和相同请求协议。若模型服务随机性不能完全关闭，至少使用固定 temperature/seed，并保存原始请求和响应。
+- 每个条件使用同一冻结 task/split、相同的 route 生成协议、相同代码提交和相同请求协议；route assignment 在条件内生成后冻结。由于 cold-start 和 selector 本身可能改变 task→Skill assignment，跨条件不强行复用不兼容的 route；assignment 差异、route failure 和其对 test paired 结果的影响必须单独报告。若模型服务随机性不能完全关闭，至少使用固定 temperature/seed，并保存原始请求和响应。
 
 基线条件为所有角色使用当前默认模型 `qwen3.6-flash-distill`。干预条件只改变一个角色为 `glm-5.3-ali`，其余角色保持基线模型。所有条件都使用新的独立 run 目录，不覆盖既有结果。
 
@@ -51,11 +51,11 @@
 第一阶段采用 one-factor-at-a-time，避免在样本不足时把多个角色收益混在一起：
 
 1. baseline：所有角色为默认模型；
-2. `l1_executor)-strong；
-3. `cold_start)-strong；
-4. `l2_planner)-strong；
-5. `l2_reviewer)-strong；
-6. 可选的 `l2_editor)-strong 和 `selector)-strong，作为边界条件；
+2. `l1_executor-strong`；
+3. `cold_start-strong`；
+4. `l2_planner-strong`；
+5. `l2_reviewer-strong`；
+6. 可选的 `l2_editor-strong` 和 `selector-strong`，作为边界条件；
 7. 根据第一阶段的最大边际收益，运行一个 all-selected 条件和最多两个有理论依据的二角色组合，检验交互。
 
 冷启动和 Evolve 的模型身份必须在同一条件内保持一致。不能先用一种模型产生冷启动，再无记录地换另一种模型继续 Evolve；若要研究只替换 Evolve 角色，应显式复用冻结冷启动工件，并在 manifest 中记录“冷启动来源条件”和“Evolve 条件”。
@@ -84,6 +84,7 @@
 
 - cold-start、Evolve-1、Evolve-2 在 test 上的成功率；
 - 逐 task paired 的对→错、错→对、保持正确、保持错误；
+- test route assignment 的差异、routing failure 数量及其 task IDs；
 - 相对 baseline 的配对差异，而不只比较均值；
 - 成本：各角色请求数、token、失败重试和 wall-clock。
 
@@ -104,6 +105,52 @@
 - 逐 task L1、card、proposal、review、acceptance、test 结果；
 - 每阶段 integrity/usage audit 和 token 累计。
 
+campaign manifest 会冻结 `EXPE_LLM_BASE_URL`；恢复或启动时若当前端点与 manifest 不同会直接拒绝。最终 paired 汇总同时给出端到端成功率、两边都成功路由后的结果，以及两边路由到同一 Skill family 的 execution-only 结果，避免把 selector failure 或 route assignment 改变误当成 executor failure。
+
 长任务启动前必须先做 1–2 task 的完整 smoke、不变量检查和真实模型健康检查；每个单元完成即落盘并支持 resume。任何审计失败、覆盖不完整或重复 writer 都使该条件失效，不能进入汇总表。
 
 只有在两个 benchmark 的 baseline 和至少四个主要单角色条件都完成审计后，才进行组合条件。若 `glm-5.3-ali` 服务不可用，不切换到其他模型冒充干预，保留条件为未完成并记录原因。
+
+## 8. 执行编排
+
+矩阵由 `scripts/model_role_matrix.py` 生成。默认只生成 baseline 和四个主要单角色条件；编辑器和 selector 条件必须显式使用 `--include-optional` 加入。每个条件都有独立的 campaign 根目录，不共享运行目录或可写状态。
+
+先生成并审阅矩阵文件：
+
+```bash
+.venv/bin/python scripts/model_role_matrix.py plan \
+  --root runs/model-role-matrix \
+  --default-model qwen3.6-flash-distill \
+  --strong-model glm-5.3-ali
+```
+
+再只准备各条件的冻结输入、代码、模型映射和 manifest，不启动长任务：
+
+```bash
+.venv/bin/python scripts/model_role_matrix.py prepare \
+  --root runs/model-role-matrix \
+  --matrix runs/model-role-matrix/matrix.json \
+  --inputs /absolute/path/to/frozen-inputs
+```
+
+确认矩阵后，加入 `--execute` 才会为每个条件调用现有的 `run_campaign.py prepare`。准备完成后，逐条件运行 preflight；每个 benchmark 的 cold-start、Evolve-1、Evolve-2 都必须通过 audit，并运行独立 resume/reviewer 检查，才能启动该条件的 full campaign。矩阵编排器只负责条件定义和准备，不自动启动长任务，也不根据中间结果选择“最好”条件。
+
+现有 full supervisor 只负责 cold-start 和两轮 Evolve。full 演化完成后，按生成的 `test-commands.json` 分别运行 SearchQA 和 ALFWorld 的 held-out test；这些命令调用冻结 campaign 自带的 wrapper，由 wrapper 重新检查 endpoint、发送真实 health request 并执行 test audit。test 结果必须各自生成 `summary.json` 与 `audit.json`，矩阵状态才会变为 `test_complete`。
+
+每个条件的状态由以下出口决定：
+
+1. `prepared`：manifest 和冻结输入已建立，尚未完成 preflight；
+2. `preflight_complete`：两个 benchmark 的小样本全链路、阶段审计和独立检查均通过；
+3. `full_evolution_complete`：两个 benchmark 的完整 cold-start、Evolve-1、Evolve-2 均通过审计；
+4. `test_complete`：在该条件的完整演化结果上，两个 benchmark 的 held-out test 都完成且通过 `audit.json`。
+
+只有 `test_complete` 条件进入汇总。汇总程序必须读取各条件的逐 task 原始结果，按预先固定的 test 指标和 paired task IDs 比较；不能从条件、轮次或指标候选中挑最大值。
+
+使用 `scripts/summarize_model_role_matrix.py` 生成汇总。它会拒绝任何未完成或审计失败的条件，重建 routing failure、逐 task 四格表、exact McNemar p-value 和相对 baseline 的 route assignment 变化：
+
+```bash
+.venv/bin/python scripts/summarize_model_role_matrix.py \
+  --matrix runs/model-role-matrix/matrix.json \
+  --root runs/model-role-matrix \
+  --output runs/model-role-matrix/summary.json
+```

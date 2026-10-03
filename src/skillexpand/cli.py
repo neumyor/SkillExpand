@@ -220,6 +220,7 @@ def _test_evaluate(cfg, plan, root, test_workers):
     successes = sum(r["successes"] for r in per_skill.values())
     n = len(plan.tasks_in(S.SPLIT_TEST))
     summary = {
+        "status": "complete",
         "split": "test",
         "library_hash": VA.library_fingerprint(skills),
         "routing_reference": "initial_skills",
