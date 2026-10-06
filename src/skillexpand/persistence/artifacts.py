@@ -41,8 +41,13 @@ def provider_signature():
     from skillexpand.runtime.models.llm import get_extra_model_kwargs
     from skillexpand.runtime.models.llm import request_policy
 
+    policy = request_policy()
+    # Retry scheduling does not change a completed generation. Retain the
+    # historical identity for frozen routes; the active recovery policy is
+    # recorded separately by the resume preparation report.
+    identity_policy = {key: policy[key] for key in ('timeout', 'retries')}
     return S.content_hash(
-        {"endpoint": get_llm_base_url(), "extra": get_extra_model_kwargs(), 'requests': request_policy(),
+        {"endpoint": get_llm_base_url(), "extra": get_extra_model_kwargs(), 'requests': identity_policy,
          'environment_timeout': os.environ.get('EXPE_ENV_TIMEOUT_SECONDS', '120'),
          'worker_timeout': os.environ.get('EXPE_WORKER_TIMEOUT_SECONDS', '3600')}
     )

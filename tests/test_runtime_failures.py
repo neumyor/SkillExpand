@@ -6,22 +6,30 @@ from unittest.mock import Mock, patch
 
 import pytest
 import openai
-from skillexpand.runtime.models.llm import GPTWrapper, request_policy, wait_for_request_slot
+from skillexpand.runtime.models.llm import GPTWrapper, request_policy, retry_delay, wait_for_request_slot
 from skillexpand.runtime.deadline import environment_call
 
 
-def test_model_retry_budget_preserves_original_error():
-    client = Mock(side_effect=openai.error.Timeout('offline'))
+def test_model_retries_transient_errors_until_success_with_capped_backoff():
+    client = Mock(side_effect=[openai.error.Timeout('offline'),
+                               openai.error.APIError('gateway'),
+                               openai.error.APIConnectionError('tunnel'),
+                               SimpleNamespace(content=' recovered ')])
     with patch('skillexpand.runtime.models.llm.ChatOpenAI', return_value=client) as factory, \
             patch('skillexpand.runtime.models.llm.time.sleep') as sleep, \
             patch.dict('os.environ', EXPE_LLM_RETRIES='2', EXPE_LLM_TIMEOUT_SECONDS='1'):
         wrapper = GPTWrapper('test', 'EMPTY', False)
-        with pytest.raises(openai.error.Timeout):
-            wrapper([])
-        assert client.call_count == 3
-        assert sleep.call_count == 2
+        assert wrapper([]) == 'recovered'
+        assert client.call_count == 4
+        assert sleep.call_args_list == [((1,),), ((2,),), ((4,),)]
         assert factory.call_args.kwargs['max_retries'] == 0
         assert factory.call_args.kwargs['request_timeout'] == 1
+
+
+def test_retry_delay_stays_at_one_minute():
+    assert [retry_delay(i) for i in range(8)] == [1, 2, 4, 8, 16, 32, 60, 60]
+    assert request_policy()['retry_forever'] is True
+    assert request_policy()['retry_backoff_max'] == 60
 
 
 def test_model_success_not_retried_and_invalid_timeout_rejected():
@@ -114,4 +122,28 @@ def test_usage_recovery_records_abandoned_request_without_inventing_tokens(tmp_p
     assert [r['event'] for r in rows] == ['start', 'abandoned']
     report = audit_usage(checkpoint)
     assert report['failed_requests'] == 1 and report['total_tokens'] == 0
+    assert not report['tokens_complete']
+    assert not report['audit_complete']
+
+
+def test_usage_audit_accepts_transient_error_followed_by_retry(tmp_path):
+    from skillexpand.l1.audit import audit_usage
+    checkpoint = tmp_path / 'task.json'
+    usage = checkpoint.with_suffix('.usage.json')
+    tokens = {'prompt_tokens': 2, 'completion_tokens': 3, 'total_tokens': 5}
+    usage.write_text(json.dumps({
+        'started_requests': 2, 'successful_requests': 1,
+        'failed_requests': 1, **tokens,
+    }))
+    usage.with_suffix('.requests.jsonl').write_text('\n'.join([
+        json.dumps({'event': 'start', 'run_id': 'failed'}),
+        json.dumps({'event': 'error', 'run_id': 'failed',
+                    'error_type': 'APIConnectionError'}),
+        json.dumps({'event': 'start', 'run_id': 'retried'}),
+        json.dumps({'event': 'end', 'run_id': 'retried',
+                    'provider': {'token_usage': tokens}}),
+    ]) + '\n')
+    report = audit_usage(checkpoint)
+    assert report['transient_errors'] == 1
+    assert report['audit_complete']
     assert not report['tokens_complete']

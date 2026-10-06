@@ -107,6 +107,11 @@ def test_validation_errors_do_not_retry_due_to_old_network_error(campaign):
     assert not C.retryable_failure(RuntimeError('L1 interrupted'), campaign / 'run', time.time() + 10)
 
 
+def test_predicted_validation_failure_is_retryable(campaign):
+    exc = RuntimeError('Incomplete predicted validation (1 failed task(s); task_ids=[7])')
+    assert C.retryable_failure(exc, campaign / 'run', 0)
+
+
 def test_input_validation_rejects_missing_tasks_and_unknown_roles():
     with pytest.raises(ValueError):
         C.validate_inputs([{}, {}, {}], {'assignment': {'0': 'train', '1': 'test'}})

@@ -43,7 +43,7 @@ def test_truncated_json_is_rejected_and_echo_cannot_become_review():
 
 @pytest.mark.parametrize("payload,error", [
     ({"probability_true": 0.8, "predicted_success": False, "reason": "ok"}, "disagrees"),
-    ({"probability_true": 0.8, "predicted_success": True, "reason": "x" * 81}, "too long"),
+    ({"probability_true": 0.8, "predicted_success": True, "reason": "x" * 513}, "too long"),
     ({"probability_true": 1.2, "predicted_success": True, "reason": "ok"}, "outside"),
     ({"probability_true": "0.8", "predicted_success": True, "reason": "ok"}, "numeric"),
     ({"probability_true": 0.8, "predicted_success": True, "reason": "ok", "task": "echo"}, "exactly three"),
@@ -51,6 +51,12 @@ def test_truncated_json_is_rejected_and_echo_cannot_become_review():
 def test_predicted_review_validates_schema_and_consistency(payload, error):
     with pytest.raises(ValueError, match=error):
         scorer()._parse(json.dumps(payload))
+
+
+def test_reason_at_new_limit_is_accepted():
+    payload = {"probability_true": 0.8, "predicted_success": True,
+               "reason": "x" * 512}
+    assert scorer()._parse(json.dumps(payload))["reason"] == payload["reason"]
 
 
 def test_format_retry_preserves_thinking_and_json_schema():
@@ -72,6 +78,27 @@ def test_format_retry_preserves_thinking_and_json_schema():
         assert kwargs["request_kwargs"]["enable_thinking"] is True
         assert kwargs["request_kwargs"]["response_format"]["type"] == "json_schema"
         assert kwargs["stop"] == []
+
+
+def test_second_overlong_reason_is_truncated_without_changing_prediction():
+    reviewer = scorer()
+    calls = []
+
+    def llm(messages, **kwargs):
+        calls.append((messages[-1].content, kwargs))
+        if len(calls) == 1:
+            return json.dumps({"probability_true": 0.8,
+                               "predicted_success": True, "reason": "x" * 513})
+        return json.dumps({"probability_true": 0.8,
+                           "predicted_success": True,
+                           "reason": "x" * (reviewer.REASON_MAX_CHARS + 40)})
+
+    result, attempts = reviewer._review(SimpleNamespace(llm=llm), "task prompt")
+    assert attempts == 2
+    assert result["probability_true"] == 0.8
+    assert result["predicted_success"] is True
+    assert len(result["reason"]) == reviewer.REASON_MAX_CHARS
+    assert result["reason_truncated"] is True
 
 
 def test_request_kwargs_are_reviewer_local_and_restored():

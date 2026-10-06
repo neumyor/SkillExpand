@@ -391,7 +391,10 @@ def audit_stage(root, mode, benchmark, stage):
         data = read(path)
         rows.append(dict(audit_checkpoint(data, adapter), usage=audit_usage(path, data)))
     result = {'integrity': 'passed', 'units': rows, 'skills': len(initial),
-              'usage_complete': all(row['usage']['tokens_complete'] for row in rows)}
+              # A transient provider failure is recorded in the usage report,
+              # but a successful retry still makes the checkpoint auditable.
+              'usage_complete': all(row['usage'].get('audit_complete', False)
+                                    for row in rows)}
     result['usage_ledger'] = audit_usage_ledgers(run)
     result['usage_complete'] = result['usage_complete'] and result['usage_ledger']['tokens_complete']
     if not result['usage_complete']:
@@ -403,7 +406,13 @@ def audit_stage(root, mode, benchmark, stage):
 
 def retryable_failure(exc, run, started):
     names = ('TimeoutError', 'Timeout', 'APIConnectionError', 'ConnectionError', 'RateLimitError',
-             'ServiceUnavailableError', 'APIError', 'RemoteDisconnected')
+             'ServiceUnavailableError', 'APIError', 'RemoteDisconnected',
+             'Incomplete predicted validation',
+             # The predicted scorer persists successful task records and emits
+             # this task-local aggregate when one or more tasks remain missing.
+             # Retrying the stage therefore resumes from its cache rather than
+             # discarding the completed tasks.
+             'PredictedValidationError')
     current = exc
     while current is not None:
         if type(current).__name__ in names:

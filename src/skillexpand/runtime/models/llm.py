@@ -25,7 +25,24 @@ def request_policy():
     timeout = float(os.environ.get('EXPE_LLM_TIMEOUT_SECONDS', '300'))
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('EXPE_LLM_TIMEOUT_SECONDS must be finite and positive')
-    return {'timeout': timeout, 'retries': _positive_int_env('EXPE_LLM_RETRIES', 2)}
+    # ``EXPE_LLM_RETRIES`` remains in the manifest for backwards-compatible
+    # environment validation, but transient provider failures are now retried
+    # until success by GPTWrapper.  The field is retained as metadata so old
+    # manifests can still be audited without silently changing their identity.
+    configured_retries = _positive_int_env('EXPE_LLM_RETRIES', 2)
+    return {
+        'timeout': timeout,
+        'retries': configured_retries,
+        'retry_forever': True,
+        'retry_backoff_max': 60,
+    }
+
+
+def retry_delay(attempt: int) -> int:
+    """Seconds before retry ``attempt`` (zero-based), capped at one minute."""
+    if attempt < 0:
+        raise ValueError('attempt must be non-negative')
+    return 60 if attempt >= 6 else 2 ** attempt
 
 
 def wait_for_request_slot():
@@ -200,8 +217,8 @@ class GPTWrapper:
         # a whole run on a single transient blip.
         retryable = (openai.error.RateLimitError, openai.error.APIError,
                      openai.error.Timeout, openai.error.APIConnectionError)
-        retries = self.request_policy['retries']
-        for i in range(retries + 1):
+        attempt = 0
+        while True:
             try:
                 wait_for_request_slot()
                 with self._request_kwargs_lock:
@@ -223,9 +240,11 @@ class GPTWrapper:
                 output = str(message.content or '').strip('\n').strip()
                 break
             except retryable:
-                if i == retries:
-                    raise
-                time.sleep(min(2 ** i, 8))
+                # Network/provider outages are transient at this layer.  Keep
+                # retrying forever so a scheduler restart is not required just
+                # because a tunnel or endpoint was unavailable for a few minutes.
+                time.sleep(retry_delay(attempt))
+                attempt += 1
 
         if replace_newline:
             output = output.replace('\n', '')
