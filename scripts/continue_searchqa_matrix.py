@@ -5,6 +5,7 @@ The repaired baseline has a separate root because its original cold-start
 ledger was incomplete.  ALFWorld is deliberately excluded from this runner.
 """
 import json
+import hashlib
 import os
 import signal
 import subprocess
@@ -34,6 +35,27 @@ def save(path, value):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
     os.replace(tmp, path)
+
+
+def content_hash(payload):
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def frozen_run_code_mismatches(root):
+    """Detect stale inner run signatures before launching a stage child."""
+    path = root / "full" / "searchqa" / "run" / "manifest.json"
+    if not path.exists():
+        return []
+    manifest = read(path)
+    source = root / "code" / "src" / "skillexpand"
+    mismatches = []
+    for relative, expected in manifest.get("code", {}).items():
+        actual_path = source / relative
+        actual = content_hash(actual_path.read_text()) if actual_path.exists() else None
+        if actual != expected:
+            mismatches.append(relative)
+    return mismatches
 
 
 def pid_command(pid):
@@ -196,6 +218,12 @@ def main():
                            env=process_env(root), check=True)
             state0 = read(root / "full" / "searchqa" / "status.json") if (
                 root / "full" / "searchqa" / "status.json").exists() else {}
+            mismatches = frozen_run_code_mismatches(root)
+            if state0.get("status") != "complete" and mismatches:
+                raise RuntimeError(
+                    "Frozen run manifest needs migration before resume: "
+                    + ", ".join(mismatches)
+                )
             evolution = run_evolution(root, state0)
             state["results"][name]["evolution"] = evolution
             state["results"][name]["status"] = "testing"
