@@ -112,18 +112,16 @@ def make_plan(cfg, args, root):
 
 def apply_model_overrides(cfg, args):
     """Freeze independent model names for executor and reasoning roles."""
+    base_model = str(cfg.agent.llm)
     defaults = {
-        'l1_executor': str(cfg.agent.llm),
-        'cold_start': str(cfg.agent.llm),
-        'l2_planner': str(cfg.agent.llm),
-        'l2_editor': str(cfg.agent.llm),
-        'l2_reviewer': str(cfg.agent.llm),
-        'selector': str(cfg.agent.llm),
+        'l1_executor': base_model,
+        'cold_start': base_model,
+        'l2_planner': base_model,
+        'l2_editor': base_model,
+        'l2_reviewer': base_model,
+        'selector': base_model,
     }
     existing = cfg.get('models', {})
-    for key in defaults:
-        if existing and existing.get(key):
-            defaults[key] = str(existing[key])
     overrides = {
         'l1_executor': args.l1_model,
         'cold_start': args.cold_start_model,
@@ -132,11 +130,22 @@ def apply_model_overrides(cfg, args):
         'l2_reviewer': args.l2_reviewer_model,
         'selector': args.selector_model,
     }
+    # An imported cold-start config already contains its frozen role map. Keep
+    # it intact when no stage-specific flags are supplied; changing the map
+    # would make the copied cold-start manifest/config pair inconsistent.
+    explicit = any(overrides.values())
+    if existing:
+        for key in defaults:
+            if existing.get(key):
+                defaults[key] = str(existing[key])
     for key, value in overrides.items():
         if value:
             defaults[key] = value
     cfg.models = OmegaConf.create(defaults)
-    cfg.agent.llm = defaults['l1_executor']
+    # Preserve the imported config's legacy executor field when no explicit
+    # role map was requested; role_model() still uses the frozen map above.
+    if explicit or not existing:
+        cfg.agent.llm = defaults['l1_executor']
     return cfg
 
 
@@ -220,6 +229,7 @@ def _test_evaluate(cfg, plan, root, test_workers):
     successes = sum(r["successes"] for r in per_skill.values())
     n = len(plan.tasks_in(S.SPLIT_TEST))
     summary = {
+        "status": "complete",
         "split": "test",
         "library_hash": VA.library_fingerprint(skills),
         "routing_reference": "initial_skills",

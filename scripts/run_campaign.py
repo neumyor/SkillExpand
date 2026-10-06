@@ -38,7 +38,7 @@ RETRY_DELAYS = (15, 60, 180)
 
 
 def configured_runtime():
-    names = ('EXPE_LLM_MODEL', 'ALFWORLD_PYTHON', 'EXPE_CAMPAIGN_OVERLAY',
+    names = ('EXPE_LLM_MODEL', 'EXPE_LLM_BASE_URL', 'ALFWORLD_PYTHON', 'EXPE_CAMPAIGN_OVERLAY',
              'ALFWORLD_DATA', 'ALFWORLD_CONFIG', 'ALFWORLD_BENCH_SRC')
     missing = [name for name in names if not os.environ.get(name)]
     if missing:
@@ -56,7 +56,7 @@ def configured_runtime():
     for key, kind in expected.items():
         if not (paths[key].is_file() if kind == 'file' else paths[key].is_dir()):
             raise FileNotFoundError(f'Configured {key} must be a {kind}: {paths[key]}')
-    return {'model': values['EXPE_LLM_MODEL'],
+    return {'model': values['EXPE_LLM_MODEL'], 'llm_base_url': values['EXPE_LLM_BASE_URL'],
             **{key: str(path) for key, path in paths.items()}}
 
 
@@ -86,6 +86,58 @@ def save(path, value):
 
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def audit_usage_ledgers(run):
+    """Read-only audit for every persistent request ledger below a run."""
+    totals = {
+        'files': 0, 'started_requests': 0, 'successful_requests': 0,
+        'failed_requests': 0, 'prompt_tokens': 0, 'completion_tokens': 0,
+        'total_tokens': 0, 'tokens_complete': True,
+    }
+    for path in sorted(Path(run).glob('**/*.requests.jsonl')):
+        totals['files'] += 1
+        pending = set()
+        finished = set()
+        for raw in path.read_text().splitlines():
+            row = json.loads(raw)
+            run_id = row.get('run_id')
+            event = row.get('event')
+            if event == 'start':
+                if not run_id or run_id in pending or run_id in finished:
+                    raise ValueError(f'Invalid usage ledger start: {path}')
+                pending.add(run_id)
+                totals['started_requests'] += 1
+                continue
+            if event not in ('end', 'error', 'abandoned') or run_id not in pending:
+                raise ValueError(f'Invalid usage ledger terminal event: {path}')
+            pending.remove(run_id)
+            finished.add(run_id)
+            if event == 'end':
+                usage = (row.get('provider') or {}).get('token_usage')
+                if not usage:
+                    totals['tokens_complete'] = False
+                    continue
+                totals['successful_requests'] += 1
+                for field in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
+                    totals[field] += int(usage.get(field, 0))
+            else:
+                totals['failed_requests'] += 1
+        if pending:
+            totals['tokens_complete'] = False
+    return totals
+
+
+def source_commit(repo):
+    """Record the source revision without making preparation depend on Git."""
+    try:
+        return subprocess.check_output(
+            ['git', '-C', str(repo), 'rev-parse', 'HEAD'],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
 
 
 @contextmanager
@@ -152,7 +204,7 @@ def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted'
     if models:
         role_models.update({k: v for k, v in models.items() if v})
     manifest = {
-        'schema': 1, 'repo': str(repo), **runtime,
+        'schema': 1, 'repo': str(repo), 'source_commit': source_commit(repo), **runtime,
         'models': role_models,
         'concurrency': CONCURRENCY, 'evolve_rounds': 2,
         'autonomous_attempts': autonomous_attempts, 'supervised_attempts': supervised_attempts,
@@ -163,9 +215,12 @@ def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted'
         'request_interval_seconds': REQUEST_INTERVAL_SECONDS,
         'files': files, 'created': time.time(),
         'metric': 'Train-task first-autonomous-attempt success at cold start, evolve-1, and evolve-2; paired by task.',
-        'comparison': 'Report each benchmark independently using the fixed three stages; no best-round selection or held-out execution.',
+        'comparison': 'Report each benchmark independently using fixed cold-start, Evolve-1, Evolve-2, and held-out test stages; no best-round selection and no test-based Skill selection.',
         'timeouts': {'request': 300, 'request_retries': 2, 'environment': 120, 'worker_progress': 3600},
     }
+    # Keep the legacy single-model field truthful for tools that predate the
+    # role map.  The executor is the model used by the environment-facing agent.
+    manifest['model'] = role_models['l1_executor']
     save(root / 'manifest.json', manifest)
     return verify(root)
 
@@ -206,10 +261,17 @@ def environment(root):
     missing = [name for name in ('EXPE_LLM_BASE_URL', 'OPENAI_API_KEY') if not env.get(name)]
     if missing:
         raise ValueError('Source scripts/env.sh and set: ' + ', '.join(missing))
+    expected_base_url = manifest.get('llm_base_url')
+    if expected_base_url and env['EXPE_LLM_BASE_URL'] != expected_base_url:
+        raise ValueError('LLM endpoint differs from the frozen campaign manifest')
     for key in ('EXPE_CONFIG_FILE', 'EXPE_TASK_FILE', 'EXPE_LLM_EXTRA_JSON', 'OPENAI_API_BASE'):
         env.pop(key, None)
     timeout = manifest['timeouts']
-    env.update(EXPE_LLM_MODEL=role_models(manifest)['l1_executor'], EXPE_LLM_DISABLE_THINKING='1', EXPE_SHOW_ADMISSIBLE='1',
+    models = role_models(manifest)
+    thinking_models = sorted(model for model in set(models.values())
+                             if model.startswith('glm-5.3'))
+    env.update(EXPE_LLM_MODEL=models['l1_executor'], EXPE_LLM_DISABLE_THINKING='1',
+        EXPE_LLM_ENABLE_THINKING_MODELS=','.join(thinking_models), EXPE_SHOW_ADMISSIBLE='1',
         PYTHONPATH=str(root / 'code/src') + os.pathsep + manifest['overlay'], PYTHONUNBUFFERED='1',
         ALFWORLD_DATA=manifest['alfworld_data'],
         ALFWORLD_CONFIG=manifest['alfworld_config'],
@@ -226,20 +288,38 @@ def environment(root):
 
 def health(root):
     env = environment(root)
-    model = role_models(read(root / 'manifest.json'))['l1_executor']
-    payload = {'model': model, 'messages': [{'role': 'user', 'content': 'Reply with OK.'}],
-               'max_tokens': 8, 'temperature': 0, 'enable_thinking': False}
-    request = urllib.request.Request(env['EXPE_LLM_BASE_URL'].rstrip('/') + '/chat/completions',
-        data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + env['OPENAI_API_KEY']})
-    started = time.monotonic()
-    with urllib.request.urlopen(request, timeout=60) as response:
-        value = json.loads(response.read())
-    content = value['choices'][0]['message'].get('content', '')
-    if not content.strip():
-        raise ValueError('Health request returned empty content')
-    result = {'requested_model': model, 'reported_model': value.get('model'),
-              'seconds': round(time.monotonic() - started, 3), 'content': content, 'time': time.time()}
+    # The probe uses the same per-model thinking policy as worker processes.
+    os.environ.update(env)
+    models = role_models(read(root / 'manifest.json'))
+    probes = []
+    for model in sorted(set(models.values())):
+        from skillexpand.runtime.models.llm import (
+            accepted_reported_model_names, thinking_request_kwargs,
+        )
+        payload = {'model': model, 'messages': [{'role': 'user', 'content': 'Reply with OK.'}],
+                   'max_tokens': 8, 'temperature': 0}
+        payload.update(thinking_request_kwargs(model))
+        request = urllib.request.Request(env['EXPE_LLM_BASE_URL'].rstrip('/') + '/chat/completions',
+            data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json',
+                'Authorization': 'Bearer ' + env['OPENAI_API_KEY']})
+        started = time.monotonic()
+        with urllib.request.urlopen(request, timeout=60) as response:
+            value = json.loads(response.read())
+        reported_model = value.get('model')
+        if reported_model not in accepted_reported_model_names(model):
+            raise ValueError(
+                f'Health request served model {reported_model!r}, expected {model!r} '
+                f'or a known canonical alias')
+        content = value['choices'][0]['message'].get('content', '')
+        if not content.strip():
+            raise ValueError(f'Health request returned empty content for model {model}')
+        probes.append({'requested_model': model, 'reported_model': reported_model,
+                       'thinking': payload.get('enable_thinking'),
+                       'seconds': round(time.monotonic() - started, 3), 'content': content})
+    result = {'models': models, 'probes': probes, 'time': time.time()}
+    # Keep the old single-model fields for small tooling that reads health.json.
+    if len(probes) == 1:
+        result.update(probes[0])
     save(root / 'health.json', result)
     return result
 
@@ -284,8 +364,13 @@ def audit_stage(root, mode, benchmark, stage):
     from skillexpand.evaluation.audit import audit_test
     run = root / mode / benchmark / 'run'
     cfg, plan, initial, _ = load_cold_start(run)
-    if cfg.agent.llm != role_models(read(root / 'manifest.json'))['l1_executor']:
-        raise ValueError('Actual model differs from requested model')
+    requested_models = role_models(read(root / 'manifest.json'))
+    configured_models = {
+        role: str(cfg.get('models', {}).get(role) or cfg.agent.llm)
+        for role in requested_models
+    }
+    if configured_models != requested_models:
+        raise ValueError('Actual role models differ from requested models')
     if stage == 'test':
         summary = read(run / 'summary.json')
         if summary['latest_evolution_round'] != 2:
@@ -293,7 +378,11 @@ def audit_stage(root, mode, benchmark, stage):
         tests = list((run / 'test').glob('*/summary.json'))
         if len(tests) != 1:
             raise ValueError('Test must contain exactly one evaluated library')
-        return audit_test(run, tests[0].parent)
+        result = audit_test(run, tests[0].parent)
+        result['usage_ledger'] = audit_usage_ledgers(run)
+        if not result['usage_ledger']['tokens_complete']:
+            raise ValueError('Test usage ledger is incomplete')
+        return result
     directory = run / ('discovery' if stage == 'cold-start' else 'evolution/round-' + stage.split('-')[1])
     adapter = resolve(OmegaConf.load(run / 'config.json'))
     rows = []
@@ -302,7 +391,14 @@ def audit_stage(root, mode, benchmark, stage):
         data = read(path)
         rows.append(dict(audit_checkpoint(data, adapter), usage=audit_usage(path, data)))
     result = {'integrity': 'passed', 'units': rows, 'skills': len(initial),
-              'usage_complete': all(row['usage']['tokens_complete'] for row in rows)}
+              # A transient provider failure is recorded in the usage report,
+              # but a successful retry still makes the checkpoint auditable.
+              'usage_complete': all(row['usage'].get('audit_complete', False)
+                                    for row in rows)}
+    result['usage_ledger'] = audit_usage_ledgers(run)
+    result['usage_complete'] = result['usage_complete'] and result['usage_ledger']['tokens_complete']
+    if not result['usage_complete']:
+        raise ValueError(f'{stage} usage audit is incomplete')
     if stage != 'cold-start':
         result['round'] = audit_round(run, int(stage.split('-')[1]))
     return result
@@ -310,7 +406,13 @@ def audit_stage(root, mode, benchmark, stage):
 
 def retryable_failure(exc, run, started):
     names = ('TimeoutError', 'Timeout', 'APIConnectionError', 'ConnectionError', 'RateLimitError',
-             'ServiceUnavailableError', 'APIError', 'RemoteDisconnected')
+             'ServiceUnavailableError', 'APIError', 'RemoteDisconnected',
+             'Incomplete predicted validation',
+             # The predicted scorer persists successful task records and emits
+             # this task-local aggregate when one or more tasks remain missing.
+             # Retrying the stage therefore resumes from its cache rather than
+             # discarding the completed tasks.
+             'PredictedValidationError')
     current = exc
     while current is not None:
         if type(current).__name__ in names:
@@ -420,6 +522,28 @@ def require_preflight(root):
         raise ValueError('Matching independent resume/reviewer checks required')
 
 
+def run_test(root, benchmark):
+    """Run and audit held-out test under the frozen campaign environment."""
+    if benchmark not in BENCHMARKS:
+        raise ValueError(f'Unknown benchmark: {benchmark}')
+    manifest = verify(root)
+    complete = root / 'full' / 'complete.json'
+    if not complete.exists():
+        raise ValueError('Full evolution must complete before held-out test')
+    record = read(complete)
+    if record.get('status') != 'complete' or record.get('manifest_hash') != digest(root / 'manifest.json'):
+        raise ValueError('Matching complete full campaign required before held-out test')
+    health(root)
+    subprocess.run(
+        [manifest['python'], '-m', 'skillexpand',
+         *stage_args(root, 'full', benchmark, 'test')],
+        cwd=manifest['repo'], env=environment(root), check=True,
+    )
+    audit = audit_stage(root, 'full', benchmark, 'test')
+    save(root / 'full' / benchmark / 'audits' / 'test.json', audit)
+    return audit
+
+
 def supervise(root, mode):
     verify(root)
     if mode == 'full':
@@ -502,7 +626,7 @@ def start(root, mode):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'check', 'health', 'start', '_supervise', '_job', '_stage'))
+    parser.add_argument('action', choices=('prepare', 'check', 'health', 'test', 'start', '_supervise', '_job', '_stage'))
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--inputs', type=Path)
     parser.add_argument('--mode', choices=('preflight', 'full'), default='preflight')
@@ -541,6 +665,10 @@ def main():
                           'benchmarks': result['benchmarks']}))
     elif args.action == 'health':
         print(json.dumps(health(root)))
+    elif args.action == 'test':
+        if not args.benchmark:
+            parser.error('test requires --benchmark')
+        print(json.dumps(run_test(root, args.benchmark)))
     elif args.action == 'start':
         print(json.dumps(start(root, args.mode)))
     elif args.action == '_supervise':

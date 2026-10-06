@@ -280,6 +280,7 @@ class ExperienceFirstTests(unittest.TestCase):
             "searchqa.one", "one", 0, "lookup", "Manufacturer lookup", "Use evidence."
         )
         models = []
+        selector_models = []
 
         def model(**kw):
             m = Model(
@@ -287,6 +288,12 @@ class ExperienceFirstTests(unittest.TestCase):
             )
             models.append(m)
             return m
+
+        def selector_host(cfg, usage_path=None, role=None):
+            self.assertEqual(role, "selector")
+            selector = Model(["SKILL: searchqa.one\nWHY: fits"])
+            selector_models.append(selector)
+            return SimpleNamespace(llm=selector)
 
         spec = PL.UnitSpec(
             "eval",
@@ -301,11 +308,18 @@ class ExperienceFirstTests(unittest.TestCase):
         with (
             patch.object(PL, "_config", return_value=self.cfg),
             patch.object(F, "LLM_CLS", side_effect=model),
+            patch.object(
+                F,
+                "build_reasoning_host",
+                side_effect=selector_host,
+            ),
         ):
             result = PL.execute(spec)
         self.assertTrue(result["success"], result)
         self.assertEqual(result["skill_key"], skill.key)
-        self.assertEqual(len(models[0].prompts), 2)
+        self.assertEqual(len(selector_models), 1)
+        self.assertEqual(len(selector_models[0].prompts), 1)
+        self.assertGreaterEqual(len(models), 1)
         self.assertNotIn("Reference answer:", "\n".join(models[0].prompts))
         self.assertIsNone(result["trajectory"])
 
@@ -340,6 +354,13 @@ class ExperienceFirstTests(unittest.TestCase):
                 F,
                 "LLM_CLS",
                 side_effect=lambda **kw: Model(["SKILL: invented\nWHY: none"]),
+            ),
+            patch.object(
+                F,
+                "build_reasoning_host",
+                return_value=SimpleNamespace(
+                    llm=Model(["SKILL: invented\nWHY: none"])
+                ),
             ),
         ):
             record = PL.execute(spec)

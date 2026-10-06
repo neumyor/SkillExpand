@@ -100,6 +100,28 @@ class ScoreCache:
                 self._by_key[key] = record
 
 
+class PredictedValidationError(RuntimeError):
+    """A predicted-validation panel with task-local failures.
+
+    Successful tasks are already durable in ``ScoreCache``.  Keeping the failed
+    task IDs on the exception lets the stage supervisor retry the missing work
+    instead of treating the whole panel as an opaque, non-resumable failure.
+    """
+
+    def __init__(self, errors: Sequence[Dict[str, Any]], expected_task_ids: Sequence[int]):
+        self.errors = tuple(dict(error) for error in errors)
+        self.failed_task_ids = tuple(sorted(int(error["task_id"]) for error in self.errors))
+        self.expected_task_ids = tuple(sorted(int(task_id) for task_id in expected_task_ids))
+        details = ", ".join(
+            f"{item['task_id']}:{item.get('error', 'unknown error')}"
+            for item in self.errors
+        )
+        super().__init__(
+            f"Incomplete predicted validation ({len(self.errors)} failed task(s)"
+            f"; task_ids={list(self.failed_task_ids)}): {details}"
+        )
+
+
 @dataclass
 class PanelScore:
     """One skill revision's measured score on one panel."""
@@ -416,7 +438,7 @@ class PredictedSkillScorer:
     """
 
     PROTOCOL = "predicted-val-skill-success-v2-json-schema"
-    REASON_MAX_CHARS = 80
+    REASON_MAX_CHARS = 512
     RESPONSE_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -450,9 +472,17 @@ class PredictedSkillScorer:
         self.threshold = float(threshold)
         if not 0.0 <= self.threshold <= 1.0:
             raise ValueError("prediction threshold must be between 0 and 1")
+        # The response-format relaxation from 80 to 512 characters does not
+        # change the scored fields. Keep the historical score-protocol identity
+        # so completed predictions remain reusable across this repair.
+        protocol_schema = dict(self.RESPONSE_SCHEMA)
+        protocol_schema["properties"] = dict(self.RESPONSE_SCHEMA["properties"])
+        protocol_schema["properties"]["reason"] = dict(
+            self.RESPONSE_SCHEMA["properties"]["reason"], maxLength=80
+        )
         self.protocol_hash = S.content_hash({
             "protocol": self.PROTOCOL,
-            "response_schema": self.RESPONSE_SCHEMA,
+            "response_schema": protocol_schema,
             "benchmark": cfg.benchmark.name,
             "routes": routes.fingerprint,
             "threshold": self.threshold,
@@ -472,17 +502,17 @@ class PredictedSkillScorer:
                 "Do not output markdown, analysis, a task/skill echo, or any other key. "
                 f"probability_true is a number in [0,1]; predicted_success is true "
                 f"exactly when probability_true >= {self.threshold:.6g}; reason is a "
-                "concise string of at most 80 characters."
+                "concise string of at most 512 characters."
             ),
             "output_schema": {
                 "probability_true": "number in [0,1]",
                 "predicted_success": "boolean",
-                "reason": "string, <= 80 characters",
+                "reason": "string, <= 512 characters",
             },
         }
         return json.dumps(payload, ensure_ascii=False)
 
-    def _parse(self, raw):
+    def _parse(self, raw, truncate_reason=False):
         from skillexpand.l1.family_discovery import _extract_json
         value = _extract_json(raw, required_keys=("probability_true", "predicted_success", "reason"))
         if set(value) != {"probability_true", "predicted_success", "reason"}:
@@ -506,14 +536,20 @@ class PredictedSkillScorer:
             raise ValueError("Predicted reviewer reason must be a string")
         if not reason.strip():
             raise ValueError("Predicted reviewer reason must not be empty")
+        reason_truncated = False
         if len(reason) > self.REASON_MAX_CHARS:
-            raise ValueError("Predicted reviewer reason is too long")
+            if not truncate_reason:
+                raise ValueError("Predicted reviewer reason is too long")
+            reason = reason[:self.REASON_MAX_CHARS]
+            reason_truncated = True
         return {
             "probability_true": probability,
             "predicted_success": predicted_success,
             "reason": reason,
             "raw": value,
+            "raw_text": raw,
             "threshold": self.threshold,
+            "reason_truncated": reason_truncated,
         }
 
     def _call(self, host, prompt):
@@ -547,10 +583,13 @@ class PredictedSkillScorer:
             correction = (
                 prompt + "\n\nFORMAT CORRECTION: your previous visible answer did not "
                 "match the required schema (" + str(first_error) + "). Return only "
-                "the single JSON object now; do not repeat the input or your analysis."
+                "the single JSON object now; do not repeat the input or your analysis. "
+                "The reason field must contain 1 to 512 characters."
             )
             repaired = self._call(host, correction)
-            parsed = self._parse(repaired)
+            # A second response that is otherwise valid but still too verbose is
+            # usable: preserve its prediction fields and bound only the audit text.
+            parsed = self._parse(repaired, truncate_reason=True)
             return parsed, 2
 
     def score(self, skill, task_ids, panel_key):
@@ -595,13 +634,31 @@ class PredictedSkillScorer:
                     try:
                         record = futures[task_id].result()
                     except Exception as exc:
-                        errors.append({"task_id": task_id,
-                                       "error": f"{type(exc).__name__}: {exc}"})
+                        error = {"task_id": task_id,
+                                 "error": f"{type(exc).__name__}: {exc}"}
+                        errors.append(error)
+                        from skillexpand.l1.runner import save
+                        save(
+                            self.cache.path.parent / "evaluation_errors" /
+                            f"predicted-{keys[task_id]}.json",
+                            {
+                                **error,
+                                "cache_key": keys[task_id],
+                                "panel_key": panel_key,
+                                "protocol_hash": self.protocol_hash,
+                            },
+                        )
                     else:
                         self.cache.put(keys[task_id], record)
                         records[task_id] = record
-        if errors or set(records) != set(task_ids):
-            raise RuntimeError(f"Incomplete predicted validation ({len(errors)} failed task(s))")
+        missing = sorted(set(task_ids) - set(records))
+        if missing:
+            known = {int(error["task_id"]) for error in errors}
+            for task_id in missing:
+                if task_id not in known:
+                    errors.append({"task_id": task_id, "error": "missing result"})
+        if errors:
+            raise PredictedValidationError(errors, task_ids)
         return PredictedPanelScore(
             skill.key, skill.body, task_ids,
             tuple(records[t] for t in task_ids),

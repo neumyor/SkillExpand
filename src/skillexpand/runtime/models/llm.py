@@ -25,7 +25,24 @@ def request_policy():
     timeout = float(os.environ.get('EXPE_LLM_TIMEOUT_SECONDS', '300'))
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError('EXPE_LLM_TIMEOUT_SECONDS must be finite and positive')
-    return {'timeout': timeout, 'retries': _positive_int_env('EXPE_LLM_RETRIES', 2)}
+    # ``EXPE_LLM_RETRIES`` remains in the manifest for backwards-compatible
+    # environment validation, but transient provider failures are now retried
+    # until success by GPTWrapper.  The field is retained as metadata so old
+    # manifests can still be audited without silently changing their identity.
+    configured_retries = _positive_int_env('EXPE_LLM_RETRIES', 2)
+    return {
+        'timeout': timeout,
+        'retries': configured_retries,
+        'retry_forever': True,
+        'retry_backoff_max': 60,
+    }
+
+
+def retry_delay(attempt: int) -> int:
+    """Seconds before retry ``attempt`` (zero-based), capped at one minute."""
+    if attempt < 0:
+        raise ValueError('attempt must be non-negative')
+    return 60 if attempt >= 6 else 2 ** attempt
 
 
 def wait_for_request_slot():
@@ -71,7 +88,37 @@ def _truthy(name: str) -> bool:
     return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def get_extra_model_kwargs() -> dict:
+def _model_list_env(name: str) -> set[str]:
+    return {item.strip() for item in os.environ.get(name, '').split(',') if item.strip()}
+
+
+def thinking_request_kwargs(model_name: str = None) -> dict:
+    """Return the provider thinking switch for one requested model.
+
+    The campaign endpoint exposes both a Qwen model that must receive
+    ``enable_thinking=false`` and a GLM model that rejects that value and
+    requires thinking to remain enabled.  The explicit allow-list keeps this
+    choice tied to the frozen model map instead of silently applying one
+    provider's setting to every role.
+    """
+    enabled = _model_list_env('EXPE_LLM_ENABLE_THINKING_MODELS')
+    if model_name and model_name in enabled:
+        return {'enable_thinking': True}
+    if _truthy(THINKING_ENV_VAR):
+        return {'enable_thinking': False}
+    return {}
+
+
+def accepted_reported_model_names(requested: str) -> set[str]:
+    """Return request/canonical names accepted by hosted OpenAI gateways."""
+    aliases = {requested}
+    for suffix in ('-distill', '-ali', '-tianyi', '-xunya', '-tencent'):
+        if requested.endswith(suffix):
+            aliases.add(requested[:-len(suffix)])
+    return aliases
+
+
+def get_extra_model_kwargs(model_name: str = None) -> dict:
     """Extra fields merged into every chat request.
 
     ``enable_thinking: false`` is not cosmetic for a reasoning model.  Measured on
@@ -96,9 +143,7 @@ def get_extra_model_kwargs() -> dict:
     forwards ``model_kwargs`` verbatim into the request body, which is the only
     supported way to reach provider-specific switches here.
     """
-    kwargs = {}
-    if _truthy(THINKING_ENV_VAR):
-        kwargs['enable_thinking'] = False
+    kwargs = thinking_request_kwargs(model_name)
     raw = os.environ.get(EXTRA_ENV_VAR)
     if raw:
         try:
@@ -153,7 +198,7 @@ class GPTWrapper:
             # dead endpoint fails loudly instead of hanging for minutes.
             # The wrapper owns the retry budget so a provider timeout cannot be
             # multiplied by both the client and wrapper retry loops.
-            extra = get_extra_model_kwargs()
+            extra = get_extra_model_kwargs(llm_name)
             if extra:
                 kwargs['model_kwargs'] = extra
         self.llm = ChatOpenAI(**kwargs)
@@ -172,8 +217,8 @@ class GPTWrapper:
         # a whole run on a single transient blip.
         retryable = (openai.error.RateLimitError, openai.error.APIError,
                      openai.error.Timeout, openai.error.APIConnectionError)
-        retries = self.request_policy['retries']
-        for i in range(retries + 1):
+        attempt = 0
+        while True:
             try:
                 wait_for_request_slot()
                 with self._request_kwargs_lock:
@@ -195,9 +240,11 @@ class GPTWrapper:
                 output = str(message.content or '').strip('\n').strip()
                 break
             except retryable:
-                if i == retries:
-                    raise
-                time.sleep(min(2 ** i, 8))
+                # Network/provider outages are transient at this layer.  Keep
+                # retrying forever so a scheduler restart is not required just
+                # because a tunnel or endpoint was unavailable for a few minutes.
+                time.sleep(retry_delay(attempt))
+                attempt += 1
 
         if replace_newline:
             output = output.replace('\n', '')
