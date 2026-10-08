@@ -147,7 +147,6 @@ class SkillPatchRunner:
         if self.claim_required:
             SM.validate_protocol(acceptance_mode, editor.skill_edit_mode)
 
-
     def _accept_sampled(self, record, base_skill, ordered, aliases, candidate_claims,
                         acceptance_record):
         """Paired delta corrected by a random val sample (see l2.sampled).
@@ -197,14 +196,13 @@ class SkillPatchRunner:
             }
         approved = [row for row in results if row["result"]["decision"]["accepted"]]
         if approved:
-            winner = max(
-                approved,
-                key=lambda row: (
-                    row["result"]["decision"]["lower"] or float("-inf"),
-                    row["result"]["decision"]["point"] or float("-inf"),
-                    row["id"],
-                ),
-            )
+            def rank(row):
+                decision = row["result"]["decision"]
+                return (decision["lower"] if decision["lower"] is not None else -1.0,
+                        decision["point"] if decision["point"] is not None else -1.0,
+                        row["id"])
+
+            winner = max(approved, key=rank)
             selected = winner["id"]
             reason = "sampled_approved: corrected delta clears zero"
         else:

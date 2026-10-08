@@ -421,6 +421,7 @@ class SerialEvolutionLoop:
                     self.paths.root / "usage" / f"reviewer-{skill.skill_id}-{card_key}.json")
                 return CardReviewer(host)
 
+        planner_memory = self._planner_memory(batch["round"])
         runner = UP.SkillPatchRunner(
             ED.SkillEditor(planner_host, self.config.skill_edit_mode,
                            editor_host=editor_host),
@@ -434,7 +435,7 @@ class SerialEvolutionLoop:
             predicted_scorer=self._ensure_predicted_scorer(),
             sampled_validator=self._ensure_sampled_validator(batch["round"]),
             single_candidate=self.config.single_candidate,
-            planner_memory=self._planner_memory(batch["round"]),
+            planner_memory=planner_memory,
         )
         pattern_path = self.paths.root / 'l2_patterns' / (batch['batch_id'] + '.json')
         if pattern_path.exists():
@@ -454,7 +455,7 @@ class SerialEvolutionLoop:
             candidate=S.to_dict(result.candidate) if result.candidate else None,
             # Recorded so the audit can recompute what each memory held rather
             # than take its absence of leaked task text on trust.
-            planner_memory=self._planner_memory(batch["round"]),
+            planner_memory=planner_memory,
             reviewer_memory_candidates=len({
                 change.candidate_id
                 for change in self._change_ledger(batch["round"])}),
