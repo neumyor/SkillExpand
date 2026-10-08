@@ -44,25 +44,39 @@ flowchart LR
 ```bash
 --acceptance-mode predicted --predicted-review-scope val
 --acceptance-mode predicted --predicted-review-scope train_cards
+--acceptance-mode sampled
 ```
 
 `empirical` 和 `jev` 也都使用冻结的 val route，但分别执行真实环境测量或调用 JEV 服务。所有 acceptance 结果、panel、task IDs、请求数和 protocol hash 都写入批次工件；`val` predicted 路径的 benchmark `executions` 固定为 0。
 
-## Reviewer 协同演化（单候选）
+## Planner–Reviewer 协同进化（`sampled`）
 
-当前默认协议：每 batch **1 个候选**（`--candidate-count 1`）、`--skill-edit-mode structured`、`--acceptance-mode predicted --predicted-review-scope val`、`--reviewer-update-mode rules`。`--single-candidate` 在此基础上强制 `--candidate-count 1`，把"提出修改 → 验收 → 接受或拒绝"变成可归因的单一因果链。`--reviewer-update-mode` 控制 Reviewer 是否从真实反馈中校准（默认 `rules`）：
+`--acceptance-mode sampled` 是当前的协同进化协议（要求 `--skill-edit-mode structured`）：
 
-| 模式 | 条件 | 行为 |
-|---|---|---|
-| `none` | C0 | 不收集反馈，Reviewer 始终使用初始 prompt |
-| `summary` | C2 | 每轮结束后在固定 train family panel 上执行旧 head 与候选各一次，写入 `reviewer_feedback.jsonl` 和 `reviewer_updates.jsonl`；update 只用于审计，不进入 Reviewer prompt |
-| `rules` | C3 | 同上，并把程序统计 + Reviewer 压缩出的有限校准规则放入下一轮 predicted-val Reviewer 的 prompt |
+- Planner 的每条改动必须附上可核实的**声明**（触发条件 + 动作变化）；
+- Reviewer 每题预测**配对增量** Δ，并单独报告该规则是否会触发；
+- 真实环境随机抽 `--acceptance-sample-size` 道 val 题执行两臂，用样本上的成对误差修正 panel 全体预测（PPI）；
+- 修正后的单侧置信下界（`--acceptance-confidence`，默认 0.9）大于 0 才接受。判定带 `1e-9` 舍入保护；
+- 独立**判定者**只在两条执行轨迹出现分歧时介入，判断这处差异是否由该规则引起、是否符合声明（`--claim-verification off` 可关闭，用于消融）；
+- 双方各有一份记忆：Planner 拿到改动层聚合（不含任何 val 题目），Reviewer 拿到检索式错判案例。分别由 `--planner-memory-mode`、`--reviewer-memory-mode` 控制。
 
-`--reviewer-feedback-size N` 把每个 family 的反馈 panel 固定为前 N 个 train task（0 表示全部）。反馈只来自 train，val 只用于当轮验收，test 只用于最终报告。设计与统计口径见 [实验计划](docs/EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)。
+设计与预注册指标见 [实验计划](docs/EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)。
+
+## Reviewer 协同演化（旧协议，单候选）
+
+`--acceptance-mode predicted --reviewer-update-mode rules` 是旧协议：每轮结束后在固定 train family panel 上执行旧 head 与候选各一次，把预测与实测写入 `reviewer_feedback.jsonl`，再由 Reviewer 压缩成有限校准规则放入下一轮 prompt。
+
+| 模式 | 行为 |
+|---|---|
+| `none` | 不收集反馈，Reviewer 始终使用初始 prompt |
+| `summary` | 收集反馈并生成 update，但 update 只用于审计 |
+| `rules` | 把程序统计 + Reviewer 压缩出的校准规则放入下一轮 predicted-val Reviewer 的 prompt |
+
+`--reviewer-feedback-size N` 把每个 family 的反馈 panel 固定为前 N 个 train task（0 表示全部）。该协议已由 sampled 取代，仅作为历史参照保留，见[旧实验计划](docs/EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)（deprecated）。
 
 ## 模型角色
 
-六个角色可以使用不同模型：`--l1-model`（执行 agent）、`--cold-start-model`、`--l2-planner-model`、`--l2-editor-model`、`--l2-reviewer-model`、`--selector-model`。未指定的角色沿用导入冷启动中冻结的映射，没有映射时使用配置中的执行模型（`EXPE_LLM_MODEL`）。导入冷启动时先恢复其冻结配置，再应用本次运行显式给出的角色，因此 L2 角色可以与冷启动时的执行模型不同。单因素替换实验的矩阵由 `scripts/model_role_matrix.py` 生成，见 [实验计划](docs/EXPERIMENT_PLAN_MODEL_ROLES.md)。
+七个角色可以使用不同模型：`--l1-model`（执行 agent）、`--cold-start-model`、`--l2-planner-model`、`--l2-editor-model`、`--l2-reviewer-model`、`--l2-verifier-model`（sampled 协议的判定者）、`--selector-model`。未指定的角色沿用导入冷启动中冻结的映射，没有映射时使用配置中的执行模型（`EXPE_LLM_MODEL`）。导入冷启动时先恢复其冻结配置，再应用本次运行显式给出的角色，因此 L2 角色可以与冷启动时的执行模型不同。单因素替换实验的矩阵由 `scripts/model_role_matrix.py` 生成，见 [实验计划](docs/EXPERIMENT_PLAN_MODEL_ROLES.md)。
 
 ## 运行示例
 

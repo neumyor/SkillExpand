@@ -36,7 +36,7 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 
 ## 4. L2 acceptance
 
-`EvolutionConfig.acceptance_mode` 支持 `predicted`、`empirical`、`jev`。
+`EvolutionConfig.acceptance_mode` 支持 `predicted`、`empirical`、`jev`、`sampled`。
 
 ### predicted + val（默认）
 
@@ -51,6 +51,20 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 ### empirical / jev
 
 两者使用同一套冻结 val route 和 paired task IDs。`empirical` 运行真实 executor；`jev` 调用 JEV endpoint。每个候选都与当前 head 在同一 task panel 上比较，严格提高才接受。
+
+### sampled（协同进化协议）
+
+`l2/sampled.py` 定义该协议，全部实现与旧路径分开：
+
+1. **声明**：Planner 在 structured edit 之外必须给出 `claim`（`trigger` 触发条件 + `action_change` 动作变化），两项单行、各不超过 400 字符。`claim_id` 由程序计算，写在 batch journal 的 hypothesis 行上，不进入 `Skill` 持久格式；audit 会按文本重算并比对。
+2. **配对 delta 预测**：`evaluation/delta_review.PairedDeltaReviewer` 每题一次调用，输入是"旧规则 → 新规则"这一条改动、改动后的 body 和声明，输出 `trigger_probability` 与 `delta_probability`（配对增量），不再对旧/新 Skill 各报一个绝对成功率再相减。声明、改动、改后 body 都进入缓存身份，换声明即换缓存。
+3. **抽样与修正**：`evaluation/ppi` 从冻结 val panel 中按 panel key + candidate 确定的种子抽取 `--acceptance-sample-size` 道题，两臂各真实执行一次（旧 head 的结果按 body 缓存复用），用样本上的成对误差修正 panel 全体预测：
+   `Δ̂ = mean_panel(Δ̂_i) + mean_sample(d_i − Δ̂_i)`。
+4. **判定规则**：修正后的单侧置信下界（Student-t，`--acceptance-confidence`，默认 0.9）必须大于 0；比对带 `1e-9` 的舍入保护，避免浮点残差把"零改进"判成改进。Reviewer 越准，样本误差的方差越小，同样置信度需要的执行次数越少。
+5. **独立判定者**：`evaluation/divergence.first_divergence` 在两条执行的动作序列上找首个分歧步；只有存在分歧时才调用 `evaluation/claim_check.TrajectoryVerifier`，它在四种结论中选择（`claim_confirmed` / `claim_not_confirmed` / `unrelated` / `indeterminate`）。判定者冻结、不看成绩、看不到 Reviewer 预测，输入里的 context observation 取自分歧点之前（两臂相同），分歧动作本身产生的 observation 不给出。`--claim-verification off` 关闭该步骤，用于单独度量其贡献。
+6. **两份记忆**：`l2/memory.py` 从 batch journal 派生。Planner 得到"改动层聚合"——各类改动的真实有效率、声明触发与兑现次数、Reviewer 预测与实测的差距；该记录类型只有数字和固定词表，**不含任何 val 题目文本或 task id**。Reviewer 得到检索式案例——被高估（看似有用实则无用）与被低估（看似无用实则有用的）val 题案例，每例附判定结论与实测差值，检索固定为一类一例且排除当前改动与当前题。`--planner-memory-mode`、`--reviewer-memory-mode` 可分别关闭。
+
+评审记忆只由**当前轮之前**的 batch journal 派生（`before_round`）。每个 batch 的 journal 记录当轮使用的 Planner 记忆文本与 Reviewer 记忆覆盖的候选数，`audit_round` 会重算：Planner 记忆必须逐字符等于账本聚合的结果，Reviewer 记忆必须恰好覆盖更早轮次的提案。
 
 ## 5. test 评测
 
@@ -71,9 +85,16 @@ CLI test 阶段和 `scripts/evaluate_snapshot.py`（评测第 N 轮结束时的�
 - `l2_batches/`：候选别名、acceptance scope、panel、task IDs、预测/实测结果和提交事务。
 - `routes/val/`、`routes/test/`：冻结的 selector 路由。
 - `val/predicted_scores.jsonl`：predicted-val 逐 task 缓存。
+- `val/delta_predictions.jsonl`、`val/sampled_scores.jsonl`、`val/verifications.jsonl`：sampled 协议的预测、实测与判定缓存。
 - `skills.jsonl`：Skill 版本链；`test/<library-hash>/`：独立 test 评测。
 
 ## 8. Reviewer 协同演化
+
+> `reviewer_feedback.jsonl` / `reviewer_updates.jsonl` 描述的 train-panel 校准属于旧协议，
+> 已由 [EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md](EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)（deprecated）
+> 取代；新的协同进化协议见第 4 节 `sampled` 与
+> [EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md](EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)。
+> 本条保留为 `predicted` + `rules` 组合的说明，该组合不再参与主比较。
 
 `--single-candidate` 把每个 batch 限制为一个候选。`--reviewer-update-mode` 为 `summary` 或 `rules` 时，每轮 L2 结束后 `SerialEvolutionLoop._collect_reviewer_feedback` 在固定的 train family panel（`--reviewer-feedback-size` 截取前 N 题）上，用同一路由各执行一次旧 head 和本轮候选，把预测与真实 paired outcome 写入 `reviewer_feedback.jsonl`。`l2/reviewer_coevolution.py` 据此计算 paired precision、false-positive regression、Brier、ECE，生成版本化的 `reviewer_updates.jsonl`。
 
@@ -85,7 +106,7 @@ CLI test 阶段和 `scripts/evaluate_snapshot.py`（评测第 N 轮结束时的�
 
 ## 9. 模型角色
 
-`cfg.models` 记录六个角色：`l1_executor`、`cold_start`、`l2_planner`、`l2_editor`、`l2_reviewer`、`selector`。`runtime/agent_factory.build_reasoning_host(cfg, usage_path, role=...)` 按角色选模型；执行 agent 使用 `cfg.agent.llm`。角色映射冻结在 `config.json` 中，因此进入 manifest 与 protocol hash；campaign 的 `audit_stage` 会核对冻结的 `config.json` 角色映射与 campaign manifest 请求的角色模型一致（不核对请求账本）。
+`cfg.models` 记录七个角色：`l1_executor`、`cold_start`、`l2_planner`、`l2_editor`、`l2_reviewer`、`l2_verifier`、`selector`。`runtime/agent_factory.build_reasoning_host(cfg, usage_path, role=...)` 按角色选模型；执行 agent 使用 `cfg.agent.llm`。角色映射冻结在 `config.json` 中，因此进入 manifest 与 protocol hash；campaign 的 `audit_stage` 会核对冻结的 `config.json` 角色映射与 campaign manifest 请求的角色模型一致（不核对请求账本）。
 
 ## 10. 代码分层
 
@@ -97,7 +118,7 @@ benchmarks                  SearchQA / ALFWorld 环境与任务表
 runtime                     ReAct 执行器、LLM 客户端、JSON 输出解析、通用任务池、prompt 注册表
 l1                          修复循环、经验卡、family 发现、冷启动、冷启动工件导入、L1 worker
 evaluation                  路由、val/test 打分、JEV、快照评测、fixed-Skill worker
-l2                          Planner/Editor/Reviewer、batch 事务、多轮闭环、审计、Reviewer 协同演化
+l2                          Planner/Editor/Reviewer、batch 事务、多轮闭环、审计、Reviewer 协同演化、sampled 协议与两份记忆
 campaign, cli               冻结 campaign 启动器；单次运行 CLI
 ```
 

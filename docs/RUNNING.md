@@ -46,13 +46,28 @@ SearchQA 需要 `--task-file`；ALFWorld 正式执行必须使用 `.env` 中的 
   --acceptance-mode predicted --predicted-review-scope train_cards
 ```
 
-`--acceptance-mode empirical` 使用 val 真实执行；`--acceptance-mode jev` 使用 val 上的 JEV 预测。structured Skill 编辑可在冷启动和 Evolve 中保持一致地启用：
+`--acceptance-mode empirical` 使用 val 真实执行；`--acceptance-mode jev` 使用 val 上的 JEV 预测。`--acceptance-mode sampled` 使用配对增量预测，并用随机 val 抽检修正（见 [协同进化实验计划](EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)）：
+
+```bash
+.venv/bin/python -m skillexpand \
+  --benchmark searchqa --run-dir runs/searchqa-sampled \
+  --phase evolve --evolve-rounds 2 --resume \
+  --acceptance-mode sampled --skill-edit-mode structured \
+  --candidate-count 1 --single-candidate \
+  --acceptance-sample-size 16 --acceptance-confidence 0.9 \
+  --claim-verification on \
+  --planner-memory-mode aggregate --reviewer-memory-mode cases
+```
+
+`--claim-verification off`、`--planner-memory-mode off`、`--reviewer-memory-mode off` 分别关闭判定者、Planner 记忆与 Reviewer 记忆，用于单因素消融；`--acceptance-sample-size` 小于 family 的 val panel 时抽检才会少于全量执行。
+
+structured Skill 编辑可在冷启动和 Evolve 中保持一致地启用：
 
 ```bash
 --skill-edit-mode structured
 ```
 
-单候选 Reviewer 协同演化（C3；`summary` 为 C2，`none` 为 C0）：
+旧协议的 Reviewer 校准（deprecated；协同进化的当前实现见上面的 `sampled`）：
 
 ```bash
 .venv/bin/python -m skillexpand \
