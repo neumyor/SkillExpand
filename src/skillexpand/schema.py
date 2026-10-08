@@ -313,6 +313,57 @@ class CandidateSkill:
         return True
 
 
+@dataclass(frozen=True)
+class Claim:
+    """The falsifiable part of a proposal: what the edit claims to do.
+
+    A rationale is unverifiable prose, and an unverifiable statement cannot be
+    held against the party who made it -- which is exactly what a reviewer needs
+    to be able to do.  The claim splits the rationale into the two things a third
+    party *can* check against a pair of execution traces: the situation in which
+    the new rule is supposed to fire, and the action it is supposed to change.
+    Both are single-line and bounded, so what gets verified is an observable
+    condition rather than an argument.
+
+    A claim describes one *proposal*, never the Skill: only the accepted body
+    enters the library, so this record lives in the batch journal.
+    """
+
+    trigger: str
+    action_change: str
+
+    #: Long enough for a conditional sentence, short enough to stay checkable.
+    MAX_CHARS = 400
+
+    def __post_init__(self) -> None:
+        for name in ('trigger', 'action_change'):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f'claim {name} is required')
+            value = value.strip()
+            if '\n' in value or '\r' in value:
+                raise ValueError(f'claim {name} must occupy one line')
+            if len(value) > self.MAX_CHARS:
+                raise ValueError(
+                    f'claim {name} exceeds {self.MAX_CHARS} characters')
+            object.__setattr__(self, name, value)
+        if self.trigger == self.action_change:
+            raise ValueError('claim trigger and action_change must differ')
+
+    @property
+    def claim_id(self) -> str:
+        return content_hash(self.payload())
+
+    def payload(self) -> Dict[str, str]:
+        return {'trigger': self.trigger, 'action_change': self.action_change}
+
+    def render(self) -> str:
+        return f'trigger: {self.trigger}\naction change: {self.action_change}'
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dict(self.payload(), claim_id=self.claim_id)
+
+
 # --------------------------------------------------------------------------
 # Task-level experience
 # --------------------------------------------------------------------------

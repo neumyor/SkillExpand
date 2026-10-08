@@ -20,6 +20,8 @@ import subprocess
 import time
 import urllib.request
 
+from skillexpand.evaluation.sampled_validation import MIN_SAMPLE_SIZE
+from skillexpand.l2 import sampled as SM
 from skillexpand.persistence import io as IO
 from skillexpand.reliability.errors import (
     DISPOSITIONS, AuditFailure, Category, FrozenProtocolChanged, Halt, InvalidInput, LedgerCorrupt,
@@ -208,11 +210,19 @@ def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predict
             autonomous_attempts=4, supervised_attempts=1,
             predicted_review_scope='val', candidate_count=1,
             single_candidate=False, reviewer_update_mode='rules',
-            reviewer_feedback_size=0):
+            reviewer_feedback_size=0, acceptance_sample_size=16,
+            acceptance_confidence=0.9):
     if skill_edit_mode not in ('rewrite', 'structured'):
         raise InvalidInput('Unknown Skill edit mode')
-    if acceptance_mode not in ('predicted', 'empirical', 'jev'):
+    if acceptance_mode not in ('predicted', 'empirical', 'jev', 'sampled'):
         raise InvalidInput('Unknown acceptance mode')
+    # The sampled protocol is defined over one structured rule change.
+    SM.validate_protocol(acceptance_mode, skill_edit_mode)
+    if acceptance_sample_size < MIN_SAMPLE_SIZE:
+        raise InvalidInput(
+            f'acceptance_sample_size must be at least {MIN_SAMPLE_SIZE}')
+    if not 0.0 < acceptance_confidence < 1.0:
+        raise InvalidInput('acceptance_confidence must lie strictly between 0 and 1')
     if predicted_review_scope not in ('val', 'train_cards'):
         raise InvalidInput('Unknown predicted review scope')
     if candidate_count < 1 or (single_candidate and candidate_count != 1):
@@ -264,6 +274,8 @@ def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predict
         'single_candidate': single_candidate,
         'reviewer_update_mode': reviewer_update_mode,
         'reviewer_feedback_size': reviewer_feedback_size,
+        'acceptance_sample_size': acceptance_sample_size,
+        'acceptance_confidence': acceptance_confidence,
         'skill_edit_mode': skill_edit_mode, 'acceptance_mode': acceptance_mode,
         'predicted_review_scope': predicted_review_scope,
         'benchmarks': details,
@@ -412,6 +424,9 @@ def stage_args(root, mode, benchmark, stage):
     args += ['--reviewer-update-mode', manifest['reviewer_update_mode']]
     if manifest['reviewer_feedback_size']:
         args += ['--reviewer-feedback-size', str(manifest['reviewer_feedback_size'])]
+    if manifest['acceptance_mode'] == 'sampled':
+        args += ['--acceptance-sample-size', str(manifest['acceptance_sample_size'])]
+        args += ['--acceptance-confidence', str(manifest['acceptance_confidence'])]
     models = manifest['models']
     for flag, key in (('--l1-model', 'l1_executor'), ('--cold-start-model', 'cold_start'),
                       ('--l2-planner-model', 'l2_planner'), ('--l2-editor-model', 'l2_editor'),
@@ -827,8 +842,14 @@ def main():
     parser.add_argument('--attempt', type=int)
     parser.add_argument('--skill-edit-mode', choices=('rewrite', 'structured'), default='structured',
                         help='Skill editing mode frozen when preparing a campaign')
-    parser.add_argument('--acceptance-mode', choices=('predicted', 'empirical', 'jev'), default='predicted',
+    parser.add_argument('--acceptance-mode',
+                        choices=('predicted', 'empirical', 'jev', 'sampled'),
+                        default='predicted',
                         help='Skill acceptance mode frozen when preparing a campaign')
+    parser.add_argument('--acceptance-sample-size', type=int, default=16,
+                        help='Executed val tasks per candidate under sampled acceptance')
+    parser.add_argument('--acceptance-confidence', type=float, default=0.9,
+                        help='One-sided confidence level of the sampled lower bound')
     parser.add_argument('--predicted-review-scope', choices=('val', 'train_cards'), default='val',
                         help='Evidence scope for predicted acceptance')
     parser.add_argument('--candidate-count', type=int, default=1)
@@ -856,7 +877,9 @@ def main():
                          candidate_count=args.candidate_count,
                          single_candidate=args.single_candidate,
                          reviewer_update_mode=args.reviewer_update_mode,
-                         reviewer_feedback_size=args.reviewer_feedback_size)
+                         reviewer_feedback_size=args.reviewer_feedback_size,
+                         acceptance_sample_size=args.acceptance_sample_size,
+                         acceptance_confidence=args.acceptance_confidence)
         print(json.dumps({'root': str(root), 'benchmarks': result['benchmarks'], 'models': result['models']}))
     elif args.action == 'check':
         result = verify(root)

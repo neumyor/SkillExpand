@@ -373,8 +373,9 @@ class SkillEditor:
         return EditOutcome(candidate, body, REASON_PROPOSED, operations=(operation,))
 
     def plan(self, base_skill, experiences, candidate_count, correction=None,
-             batch_patterns=()):
+             batch_patterns=(), claim_required=False):
         from skillexpand.l2.card_review import card_payload
+        from skillexpand.l2 import sampled as SM
 
         system = (
             "Propose up to K distinct behavioral change hypotheses for a reusable Skill. "
@@ -415,6 +416,12 @@ class SkillEditor:
                        "\"edit\":{\"op\":\"add|replace\",\"section\":\"procedure|conditions|completion_checks\","
                        "\"target_id\":\"P1|C1|V1|null\",\"text\":\"one concise rule\"}}]}. "
                        "For no supported change return {\"hypotheses\":[]}.")
+        if claim_required:
+            SM.validate_protocol('sampled', self.skill_edit_mode)
+            # The claim contract belongs to the sampled protocol, so it is
+            # appended only when that protocol is active: the older paths keep
+            # an unchanged prompt and therefore an unchanged protocol identity.
+            system += SM.CLAIM_CONTRACT
         return self.host.llm(
             [
                 SystemMessage(content=system),

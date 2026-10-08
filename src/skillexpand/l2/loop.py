@@ -26,6 +26,10 @@ from skillexpand.evaluation.routing import FrozenRoutes
 from skillexpand.evaluation import validation as VA
 from skillexpand.evaluation.jev import JevSkillScorer
 from skillexpand.l2 import reviewer_coevolution as RC
+from skillexpand.l2 import sampled as SM
+from skillexpand.evaluation.delta_review import PairedDeltaReviewer
+from skillexpand.evaluation.sampled_validation import (
+    MIN_SAMPLE_SIZE, SampledDeltaValidator)
 
 
 @dataclass
@@ -43,6 +47,8 @@ class EvolutionConfig:
     single_candidate: bool = False
     reviewer_update_mode: str = "rules"
     reviewer_feedback_size: int = 0
+    acceptance_sample_size: int = 16
+    acceptance_confidence: float = 0.9
 
     def __post_init__(self):
         if min(self.batch_size, self.candidate_count, self.evolve_l1_workers,
@@ -52,7 +58,7 @@ class EvolutionConfig:
             raise InvalidInput("supervised_attempts must be nonnegative")
         if self.skill_edit_mode not in ("rewrite", "structured"):
             raise InvalidInput("Unknown Skill edit mode")
-        if self.acceptance_mode not in ("predicted", "empirical", "jev"):
+        if self.acceptance_mode not in ("predicted", "empirical", "jev", "sampled"):
             raise InvalidInput("Unknown acceptance mode")
         if self.predicted_review_scope not in ("val", "train_cards"):
             raise InvalidInput("Unknown predicted review scope")
@@ -62,6 +68,13 @@ class EvolutionConfig:
             raise InvalidInput("Unknown reviewer update mode")
         if self.reviewer_feedback_size < 0:
             raise InvalidInput("reviewer_feedback_size must be nonnegative")
+        if self.acceptance_sample_size < MIN_SAMPLE_SIZE:
+            raise InvalidInput(
+                f"acceptance_sample_size must be at least {MIN_SAMPLE_SIZE}")
+        if not 0.0 < self.acceptance_confidence < 1.0:
+            raise InvalidInput("acceptance_confidence must lie strictly between 0 and 1")
+        # The sampled protocol is only checkable against one rule change.
+        SM.validate_protocol(self.acceptance_mode, self.skill_edit_mode)
 
     def to_dict(self):
         return S.to_dict(self)
@@ -160,6 +173,7 @@ class SerialEvolutionLoop:
         self.jev_scorer = None
         self.predicted_routes = None
         self.predicted_scorer = None
+        self.sampled_validator = None
         self.reviewer_update = self._load_reviewer_update()
 
     def _load_reviewer_update(self):
@@ -180,6 +194,42 @@ class SerialEvolutionLoop:
             return "", 0
         rules = update.rules if self.config.reviewer_update_mode == "rules" else ()
         return RC.render_calibration_block(update.summary, rules), update.reviewer_prompt_version
+
+
+    def _ensure_sampled_validator(self):
+        """Paired delta predictions corrected by a random val sample."""
+        if self.config.acceptance_mode != "sampled":
+            return None
+        if self.sampled_validator is not None:
+            return self.sampled_validator
+        self.sampled_routes = FrozenRoutes(
+            self.cfg, self.plan, self.initial, self.paths.root / "routes",
+            S.SPLIT_VAL, self.config.l2_review_workers
+        ).run()
+
+        def host_factory(task_id, usage_path):
+            # Ordinary configured L2 reviewer model, same as the older protocols.
+            return self._reasoning_host("l2_reviewer", usage_path)
+
+        reviewer = PairedDeltaReviewer(
+            self.cfg,
+            self.sampled_routes,
+            VA.ScoreCache(self.paths.root / "val" / "delta_predictions.jsonl"),
+            self.config.l2_review_workers,
+            host_factory=host_factory,
+        )
+        executor = VA.FixedSkillScorer(
+            self.cfg,
+            VA.ScoreCache(self.paths.root / "val" / "sampled_scores.jsonl"),
+            self.sampled_routes,
+            self.config.l2_review_workers,
+        )
+        self.sampled_validator = SampledDeltaValidator(
+            self.cfg, self.sampled_routes, reviewer, executor,
+            sample_size=self.config.acceptance_sample_size,
+            confidence=self.config.acceptance_confidence,
+        )
+        return self.sampled_validator
 
     def _ensure_val_scorer(self):
         if self.config.acceptance_mode != "empirical":
@@ -302,8 +352,14 @@ class SerialEvolutionLoop:
             editor_host = self._reasoning_host(
                 'l2_editor', self.paths.root / "usage" / f"editor-{skill.skill_id}.json")
         reviewer_factory = None
-        if not (self.config.acceptance_mode == "predicted" and
-                self.config.predicted_review_scope == "val"):
+        # Only the card-review protocols read per-card judgments.  The predicted
+        # and sampled val protocols never call this factory, and building it
+        # anyway would spend a reviewer call on every train card for nothing.
+        uses_card_review = (
+            self.config.acceptance_mode in ("empirical", "jev")
+            or (self.config.acceptance_mode == "predicted"
+                and self.config.predicted_review_scope == "train_cards"))
+        if uses_card_review:
             def reviewer_factory(card):
                 card_key = S.content_hash(card)
                 host = self._reasoning_host(
@@ -322,6 +378,7 @@ class SerialEvolutionLoop:
             val_scorer=self._ensure_val_scorer(),
             jev_scorer=self._ensure_jev_scorer(),
             predicted_scorer=self._ensure_predicted_scorer(),
+            sampled_validator=self._ensure_sampled_validator(),
             single_candidate=self.config.single_candidate,
         )
         pattern_path = self.paths.root / 'l2_patterns' / (batch['batch_id'] + '.json')
@@ -719,6 +776,16 @@ class SerialEvolutionLoop:
             ),
             "jev_requests": sum(
                 int(r.get("acceptance", {}).get("jev_requests", 0)) for r in records
+            ),
+            "sampled_candidates": sum(
+                len(r.get("acceptance", {}).get("candidates", ()))
+                for r in records
+                if r.get("acceptance", {}).get("mode") == "sampled"
+            ),
+            "sampled_executions": sum(
+                int(r.get("acceptance", {}).get("executions", 0))
+                for r in records
+                if r.get("acceptance", {}).get("mode") == "sampled"
             ),
             "predicted_val_requests": sum(
                 int(r.get("acceptance", {}).get("predicted_requests", 0))

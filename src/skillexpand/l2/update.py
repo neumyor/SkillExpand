@@ -13,6 +13,7 @@ from skillexpand.l2.card_review import parse_card_review
 from skillexpand.l2.card_review import aggregate
 from skillexpand.l2.card_review import choose
 from skillexpand.runtime.json_output import extract_json
+from skillexpand.l2 import sampled as SM
 from skillexpand.persistence.io import save
 from skillexpand.reliability.errors import InvalidInput, JournalConflict
 from skillexpand.reliability.policies import repair_policy
@@ -40,7 +41,8 @@ class UpdateResult:
     candidate: object = None
 
 
-def parse_plan(raw, experiences, limit, structured=False, base_skill=None):
+def parse_plan(raw, experiences, limit, structured=False, base_skill=None,
+               require_claim=False):
     rows = extract_json(raw).get("hypotheses")
     if not isinstance(rows, list) or len(rows) > limit:
         raise ValueError("Hypotheses must be a list no larger than K")
@@ -77,6 +79,20 @@ def parse_plan(raw, experiences, limit, structured=False, base_skill=None):
                 raise ValueError(
                     f"Evidence {ref!r} must reference a supplied card_id and evidence_id."
                 )
+        raw_claim = row.get('claim')
+        if raw_claim is None and require_claim:
+            raise ValueError('Hypothesis needs a falsifiable claim')
+        if raw_claim is not None:
+            # The claim id is assigned here, never accepted from the model: an
+            # id the model could choose would not bind the text it accompanies.
+            if (not isinstance(raw_claim, dict)
+                    or set(raw_claim) != {'trigger', 'action_change'}):
+                raise ValueError('claim must contain exactly trigger and action_change')
+            try:
+                claim = S.Claim(raw_claim['trigger'], raw_claim['action_change'])
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f'Invalid claim: {exc}') from exc
+            row['claim'] = claim.to_dict()
         if structured:
             edit = row.get('edit')
             if not isinstance(edit, dict):
@@ -99,11 +115,11 @@ class SkillPatchRunner:
                  reviewer_factory=None, acceptance_mode="predicted",
                  val_scorer=None, jev_scorer=None,
                  predicted_review_scope="val", predicted_scorer=None,
-                 single_candidate=False):
+                 single_candidate=False, sampled_validator=None):
         self.editor, self.reviewer, self.audit_dir = editor, reviewer, Path(audit_dir)
         self.read_only = read_only
         self.reviewer_factory = reviewer_factory
-        if acceptance_mode not in ("predicted", "empirical", "jev"):
+        if acceptance_mode not in ("predicted", "empirical", "jev", "sampled"):
             raise InvalidInput("Unknown acceptance mode")
         if acceptance_mode == "empirical" and val_scorer is None and not read_only:
             raise InvalidInput("Empirical acceptance requires a val scorer")
@@ -114,12 +130,96 @@ class SkillPatchRunner:
         if (acceptance_mode == "predicted" and predicted_review_scope == "val"
                 and predicted_scorer is None and not read_only):
             raise InvalidInput("Predicted val acceptance requires a predicted scorer")
+        if acceptance_mode == "sampled" and sampled_validator is None and not read_only:
+            raise InvalidInput("Sampled acceptance requires a sampled validator")
         self.acceptance_mode = acceptance_mode
         self.predicted_review_scope = predicted_review_scope
         self.val_scorer = val_scorer
         self.jev_scorer = jev_scorer
         self.predicted_scorer = predicted_scorer
+        self.sampled_validator = sampled_validator
         self.single_candidate = bool(single_candidate)
+        # The claim is part of the sampled protocol, so the requirement follows
+        # from the mode rather than from a separate switch.
+        self.claim_required = SM.claim_required(acceptance_mode)
+        if self.claim_required:
+            SM.validate_protocol(acceptance_mode, editor.skill_edit_mode)
+
+
+    def _accept_sampled(self, record, base_skill, ordered, aliases, candidate_claims,
+                        identity, acceptance_record):
+        """Paired delta corrected by a random val sample (see l2.sampled).
+
+        Every proposed candidate is sampled whether or not it is later accepted,
+        so the measurements are not conditioned on the decision.
+        """
+        alias_by_candidate = {v.candidate_id: k for k, v in aliases.items()}
+        if acceptance_record is not None:
+            acceptance = dict(acceptance_record)
+            results = list(acceptance.get("candidates", ()))
+        else:
+            validator = self.sampled_validator
+            panel_key = f"val:{validator.routes.fingerprint}:{base_skill.skill_id}"
+            results = []
+            for candidate in ordered:
+                claim = candidate_claims[candidate.candidate_id]
+                results.append({
+                    "id": alias_by_candidate[candidate.candidate_id],
+                    "candidate_id": candidate.candidate_id,
+                    "claim_id": claim.claim_id,
+                    "result": validator.validate(
+                        base_skill, candidate.skill, claim, panel_key,
+                        sample_key=f"sampled:{identity}:{candidate.candidate_id}",
+                    ).to_dict(),
+                })
+            acceptance = {
+                "mode": "sampled",
+                "scope": "val",
+                "panel": panel_key,
+                "protocol_hash": validator.protocol_hash,
+                "reviewer_protocol_hash": validator.reviewer.protocol_hash,
+                "executor_protocol_hash": validator.executor.protocol_hash,
+                "sample_size": validator.sample_size,
+                "confidence": validator.confidence,
+                "task_ids": list(sorted(validator.routes.groups[base_skill.skill_id])),
+                "candidate_ids": [c.candidate_id for c in ordered],
+                "candidates": results,
+                "executions": sum(
+                    int(row["result"]["decision"]["n_sample"]) for row in results),
+                "predicted_requests": sum(
+                    sum(1 for r in row["result"]["rows"] if not r["from_cache"])
+                    for row in results),
+                "jev_requests": 0,
+            }
+        approved = [row for row in results if row["result"]["decision"]["accepted"]]
+        if approved:
+            winner = max(
+                approved,
+                key=lambda row: (
+                    row["result"]["decision"]["lower"] or float("-inf"),
+                    row["result"]["decision"]["point"] or float("-inf"),
+                    row["id"],
+                ),
+            )
+            selected = winner["id"]
+            reason = "sampled_approved: corrected delta clears zero"
+        else:
+            selected = None
+            reason = ("hold: " + (results[0]["result"]["decision"]["reason"]
+                                  if results else "no candidate"))
+        record.update(
+            selection_method="sampled_paired_delta",
+            reviews=[],
+            review_errors=[],
+            reviewed_card_count=0,
+            acceptance=acceptance,
+            reason=reason,
+            selected_candidate_id=(aliases[selected].candidate_id if selected else None),
+            outcome="review_approved" if selected else "hold",
+            empirically_validated=False,
+            jev_validated=False,
+        )
+        return UpdateResult(record, aliases[selected] if selected else None)
 
     def run(self, base_skill, experiences, candidate_count=3, batch_patterns=(),
             l2_review_workers=1, acceptance_record=None):
@@ -177,12 +277,14 @@ class SkillPatchRunner:
             def generate():
                 if previous is None:
                     return {"raw": self.editor.plan(base_skill, experiences, candidate_count,
-                                                    batch_patterns=batch_patterns)}
+                                                    batch_patterns=batch_patterns,
+                                                    claim_required=self.claim_required)}
                 correction = {"error": str(previous.error), "previous_output": previous.raw,
                               "instruction": PLANNER_CORRECTION}
                 return {"raw": self.editor.plan(base_skill, experiences, candidate_count,
                                                 correction=correction,
-                                                batch_patterns=batch_patterns)}
+                                                batch_patterns=batch_patterns,
+                                                claim_required=self.claim_required)}
             value, fresh = cached_attempt(attempt_name("hypotheses", attempt), generate)
             return value["raw"], fresh
         record = {
@@ -219,9 +321,10 @@ class SkillPatchRunner:
             repair_policy("planner.hypotheses"), plan_request,
             lambda raw: parse_plan(raw, experiences, candidate_count,
                                    structured=self.editor.skill_edit_mode == 'structured',
-                                   base_skill=base_skill)).value
+                                   base_skill=base_skill,
+                                   require_claim=self.claim_required)).value
         record["hypotheses"] = hypotheses
-        candidates, previous = [], []
+        candidates, previous, candidate_claims = [], [], {}
         seen_bodies = {" ".join(base_skill.body.split())}
         for index, hypothesis in enumerate(hypotheses):
             edit = cached(
@@ -243,6 +346,8 @@ class SkillPatchRunner:
                 else None
             )
             row = {"hypothesis_index": index, "edit": edit, "status": edit["reason"]}
+            if hypothesis.get('claim') is not None:
+                row["claim"] = hypothesis['claim']
             if candidate:
                 if candidate.skill.description != base_skill.description:
                     raise JournalConflict("Candidate changed frozen description")
@@ -261,6 +366,10 @@ class SkillPatchRunner:
                         )
                     )
                     candidates.append(candidate)
+                    if hypothesis.get('claim') is not None:
+                        candidate_claims[candidate.candidate_id] = S.Claim(
+                            hypothesis['claim']['trigger'],
+                            hypothesis['claim']['action_change'])
                     previous.append(
                         {"mechanism": hypothesis["mechanism"], "diff": row["diff"]}
                     )
@@ -277,6 +386,14 @@ class SkillPatchRunner:
         record["candidate_aliases"] = {
             key: c.candidate_id for key, c in aliases.items()
         }
+
+        # The sampled protocol predicts a paired delta over the whole val panel
+        # and corrects it with a random sample that is actually executed.  It is
+        # deliberately a separate branch rather than a variation of the older
+        # paths: it executes, predicts, and records a different result shape.
+        if self.acceptance_mode == "sampled":
+            return self._accept_sampled(record, base_skill, ordered, aliases,
+                                        candidate_claims, identity, acceptance_record)
 
         # The default predicted protocol is an independent validation-panel
         # forecast.  It deliberately does not expose L1 cards or trajectories

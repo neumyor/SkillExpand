@@ -68,6 +68,8 @@ REPAIR: Dict[str, RepairPolicy] = {p.name: p for p in (
     RepairPolicy('reviewer.predicted_val', 32, _REVIEWER_BACKOFF),
     # Compression of program-computed calibration statistics into rules.
     RepairPolicy('reviewer.calibration_rules', 32, _REVIEWER_BACKOFF),
+    # Paired per-task delta prediction for one rule change on the val panel.
+    RepairPolicy('reviewer.delta_review', 32, _REVIEWER_BACKOFF),
     # L2 Planner hypotheses and per-card Reviewer judgments.
     RepairPolicy('planner.hypotheses', 2),
     RepairPolicy('reviewer.card', 2),
@@ -88,6 +90,7 @@ REPAIR: Dict[str, RepairPolicy] = {p.name: p for p in (
 ATTEMPT_OVERRIDES = {
     'reviewer.predicted_val': 'EXPE_REVIEWER_ATTEMPTS',
     'reviewer.calibration_rules': 'EXPE_REVIEWER_ATTEMPTS',
+    'reviewer.delta_review': 'EXPE_REVIEWER_ATTEMPTS',
 }
 
 

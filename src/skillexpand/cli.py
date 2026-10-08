@@ -74,10 +74,17 @@ def build_parser():
         help="Number of Skill-aware L1 -> L2 evolution rounds")
     p.add_argument("--skill-edit-mode", choices=("rewrite", "structured"),
         default="structured", help="Rewrite complete Skill bodies or apply one structured rule edit")
-    p.add_argument("--acceptance-mode", choices=("predicted", "empirical", "jev"),
-        default="predicted", help="Accept by card review, paired execution, or JEV validation")
+    p.add_argument("--acceptance-mode",
+        choices=("predicted", "empirical", "jev", "sampled"),
+        default="predicted",
+        help="Accept by card review, paired execution, JEV validation, or a "
+             "paired delta corrected by a random val sample")
     p.add_argument("--predicted-review-scope", choices=("val", "train_cards"),
         default="val", help="Evidence scope for predicted acceptance")
+    p.add_argument("--acceptance-sample-size", type=int, default=16,
+        help="Executed val tasks per candidate under sampled acceptance")
+    p.add_argument("--acceptance-confidence", type=float, default=0.9,
+        help="One-sided confidence level of the sampled lower bound")
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent train tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,
@@ -311,6 +318,8 @@ def main(argv=None):
                 single_candidate=args.single_candidate,
                 reviewer_update_mode=args.reviewer_update_mode,
                 reviewer_feedback_size=args.reviewer_feedback_size,
+                acceptance_sample_size=args.acceptance_sample_size,
+                acceptance_confidence=args.acceptance_confidence,
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config,
                                          allow_code_change=args.allow_code_change)

@@ -21,6 +21,95 @@ from skillexpand.l2 import reviewer_coevolution as RC
 
 
 
+def audit_sampled_batch(batch):
+    """Replay a sampled-acceptance batch from its journal alone.
+
+    Three things must hold, and each of them is a way the protocol could quietly
+    stop being the protocol: the claim must still bind the proposal, the executed
+    subset must be the one the frozen key selects out of the frozen panel, and
+    the recorded decision must be recomputable from the recorded per-task rows.
+    """
+    from skillexpand.evaluation import ppi as PPI
+
+    hypotheses = batch.get('hypotheses', ())
+    require(hypotheses, 'sampled batch recorded no hypotheses')
+    for row in hypotheses:
+        # The claim binds the proposal to what the verifier will check, and its
+        # id is assigned by the program.  A journal that lost or rewrote the
+        # claim cannot be replayed, so the mismatch is fatal here.
+        claim = row.get('claim')
+        require(isinstance(claim, dict), 'sampled hypothesis has no claim')
+        require(set(claim) == {'trigger', 'action_change', 'claim_id'},
+                'sampled claim has an unexpected shape')
+        try:
+            rebuilt = S.Claim(claim['trigger'], claim['action_change'])
+        except (ValueError, TypeError) as exc:
+            require(False, f'sampled claim is invalid: {exc}')
+        require(claim['claim_id'] == rebuilt.claim_id,
+                'claim id does not match the claim text it accompanies')
+    materialized = [row for row in batch.get('proposals', ())
+                    if row.get('edit', {}).get('candidate')]
+    require(all(row.get('claim') is not None for row in materialized),
+            'sampled proposal materialized a candidate without a claim')
+
+    acceptance = batch.get('acceptance') or {}
+    if not materialized:
+        require(not acceptance.get('candidates'),
+                'sampled acceptance scored candidates that were never proposed')
+        return
+    require(acceptance.get('mode') == 'sampled', 'sampled acceptance mode is missing')
+    require(acceptance.get('scope') == 'val', 'sampled acceptance scope is missing')
+    panel = tuple(int(t) for t in acceptance.get('task_ids', ()))
+    require(panel, 'sampled acceptance recorded an empty val panel')
+    require(tuple(sorted(panel)) == panel, 'sampled acceptance panel is not in fixed order')
+    confidence = acceptance.get('confidence')
+    require(isinstance(confidence, (int, float)) and 0.0 < float(confidence) < 1.0,
+            'sampled acceptance recorded an invalid confidence level')
+    sample_size = int(acceptance.get('sample_size', 0))
+    require(sample_size >= 2, 'sampled acceptance recorded an unusable sample size')
+    require(int(acceptance.get('executions', 0)) > 0,
+            'sampled acceptance recorded no executed episode')
+    require(int(acceptance.get('predicted_requests', 0)) > 0,
+            'sampled acceptance recorded no reviewer request')
+
+    proposed = {row['edit']['candidate']['candidate_id'] for row in materialized}
+    results = list(acceptance.get('candidates', ()))
+    require({row.get('candidate_id') for row in results} == proposed,
+            'sampled acceptance does not cover every proposed candidate')
+    for row in results:
+        result = row.get('result') or {}
+        require(tuple(int(t) for t in result.get('panel_task_ids', ())) == panel,
+                'sampled candidate panel differs from the acceptance panel')
+        require(result.get('base_skill_key') == batch['base_skill_key'],
+                'sampled base Skill differs from the batch head')
+        require(result.get('claim_id'),
+                'sampled candidate is not bound to a claim')
+        sample = tuple(int(t) for t in result.get('sample_task_ids', ()))
+        require(sample, 'sampled candidate recorded no executed sample')
+        require(len(set(sample)) == len(sample), 'sampled candidate repeated a task')
+        require(set(sample) <= set(panel),
+                'sampled candidate executed a task outside the frozen panel')
+        expected = PPI.select_sample(panel, sample_size, result.get('sample_key', ''))
+        require(sample == expected,
+                'executed sample is not the one the recorded key selects')
+
+        rows = list(result.get('rows', ()))
+        require([int(r['task_id']) for r in rows] == list(panel),
+                'sampled per-task rows do not cover the panel in fixed order')
+        measured = {int(r['task_id']): float(r['measured_delta'])
+                    for r in rows if r.get('sampled')}
+        require(set(measured) == set(sample),
+                'sampled rows disagree with the executed sample')
+        predictions = {int(r['task_id']): float(r['delta_probability'])
+                       for r in rows}
+        decision = PPI.estimate(predictions, measured, confidence=float(confidence))
+        recorded = result.get('decision') or {}
+        require(bool(recorded.get('accepted')) == decision.accepted,
+                'recorded sampled decision is not the one the rows imply')
+        for key, value in (('point', decision.point), ('lower', decision.lower)):
+            require(abs(float(recorded.get(key, 0.0)) - float(value)) < 1e-9,
+                    f'recorded sampled {key} does not match the recomputed estimate')
+
 def audit_batch(root, batch, base, cards):
     """Replay cached decisions without any model, environment, or file writes."""
     root = Path(root)
@@ -43,7 +132,7 @@ def audit_batch(root, batch, base, cards):
     result = runner.run(base, cards, batch['requested_candidates'],
                         batch_patterns=patterns['patterns'],
                         acceptance_record=batch.get('acceptance')
-                        if acceptance_mode in ('empirical', 'jev') or
+                        if acceptance_mode in ('empirical', 'jev', 'sampled') or
                         (acceptance_mode == 'predicted' and predicted_scope == 'val')
                         else None)
     require(all(batch.get(k) == v for k, v in result.record.items()),
@@ -96,6 +185,8 @@ def audit_batch(root, batch, base, cards):
                     'predicted val base Skill differs from batch head')
             require(isinstance(result_value.get('metrics', {}).get('success_delta'), (int, float)),
                     'predicted val candidate lacks success delta')
+    if acceptance_mode == 'sampled':
+        audit_sampled_batch(batch)
     if mode == 'structured':
         candidates = []
         for proposal in batch.get('proposals', []):
