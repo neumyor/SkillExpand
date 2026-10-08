@@ -4,9 +4,11 @@ import json
 from dataclasses import dataclass
 from langchain.schema import HumanMessage, SystemMessage
 from skillexpand import schema as S
-from skillexpand.l1.family_discovery import _extract_json
+from skillexpand.reliability.policies import repair_policy
+from skillexpand.reliability.retry import call_with_repair, fresh
+from skillexpand.runtime.json_output import extract_json
 from skillexpand.l1.protocol import projection
-from skillexpand.l2 import structured_skill as SS
+from skillexpand import structured_skill as SS
 
 REASON_PROPOSED = "proposed"
 REASON_NO_OPERATIONS = "invalid_proposal"
@@ -41,6 +43,24 @@ choose the minimal complete answer), or return no_change if that conversion is
 unsupported. Every proposed behavioral difference must be executable before the
 first Finish within the one-attempt action budget. A supervised answer is never
 evidence of an autonomous repair procedure.
+"""
+
+
+#: Fixed instructions for every Planner/Editor request.
+EDITING_STRATEGY = """\
+When updating a skill:
+
+- Distinguish task-specific failures from structural ones. An individual entity, answer,
+  or task instance is task-specific and must never enter the skill.
+- Prefer the minimal edit that explains the observed failure. Do not restate
+  procedures that already worked.
+- Only generalise a mechanism that the experience card actually supports.
+- Keep the routing description unchanged; edit only execution rules.
+- Cold-start cards ran without a Skill; their outcomes do not measure the current body.
+- Preserve behaviour that previously succeeded; an edit that trades one
+  capability for another must say so explicitly.
+- State each rule so it can be checked against a single trajectory. Avoid
+  compound rules that hide which clause did the work.
 """
 
 
@@ -121,12 +141,11 @@ class EditOutcome:
 
 
 class SkillEditor:
-    def __init__(self, host_agent, meta_skill, skill_edit_mode="rewrite", editor_host=None):
+    def __init__(self, host_agent, skill_edit_mode="rewrite", editor_host=None):
         if skill_edit_mode not in ("rewrite", "structured"):
             raise ValueError("Unknown Skill edit mode")
         self.host = host_agent
         self.editor_host = editor_host or host_agent
-        self.meta_skill = meta_skill
         self.skill_edit_mode = skill_edit_mode
 
     def build_prompt(self, base_skill, working_body, experiences, feedback=None):
@@ -205,28 +224,16 @@ class SkillEditor:
         }
         prompt = [
             SystemMessage(content=contract),
-            SystemMessage(content="EDITING STRATEGY:\n" + self.meta_skill.body),
+            SystemMessage(content="EDITING STRATEGY:\n" + EDITING_STRATEGY),
             HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
         ]
         stats["buffer_chars"] = len(json.dumps(rejected)) if rejected else 0
         return prompt, "task_evidence", stats
 
-    def propose(
-        self,
-        base_skill,
-        experiences,
-        reject_buffer=(),
-        *,
-        candidate_index=0,
-        candidate_count=1,
-        hypothesis=None,
-        previous_changes=(),
-    ):
+    def propose(self, base_skill, experiences, *, hypothesis=None, previous_changes=()):
         if any(not accepts(base_skill, e) for e in experiences):
             raise ValueError("Cards must belong to this train Skill")
-        prompt, kind, stats = self.build_prompt(
-            base_skill, base_skill.body, experiences, reject_buffer
-        )
+        prompt, kind, stats = self.build_prompt(base_skill, base_skill.body, experiences, ())
         if hypothesis is not None:
             from skillexpand.l2.card_review import card_payload
 
@@ -257,25 +264,17 @@ class SkillEditor:
                     )
                 )
             )
-        if candidate_count > 1:
-            prompt.insert(
-                1,
-                SystemMessage(
-                    content=(
-                        f"Draft candidate {candidate_index + 1} of {candidate_count} independently from the current Skill. "
-                        "Explore a plausible revision supported by the evidence. Do not assume another candidate's "
-                        "content or use val questions or results."
-                    )
-                ),
-            )
-        raw = self.editor_host.llm(prompt, replace_newline=False)
         size = sum(len(m.content) for m in prompt)
-        try:
-            value = _extract_json(raw)
+        responses = []
+
+        def request():
+            responses.append(self.editor_host.llm(prompt, replace_newline=False))
+            return responses[-1]
+
+        def parse(raw):
+            value = extract_json(raw)
             if value.get("no_change") is True:
-                return EditOutcome(
-                    None, base_skill.body, REASON_NO_CHANGE, raw, prompt_chars=size
-                )
+                return None
             description = value.get("description", base_skill.description)
             if description != base_skill.description:
                 raise ValueError("Routing description is frozen")
@@ -285,14 +284,25 @@ class SkillEditor:
                 operation = value["edit"]
                 body = SS.render(SS.apply_edit(SS.from_legacy(base_skill.body), operation))
             else:
+                operation = None
                 body = value["body"]
                 if not isinstance(body, str) or not body.strip():
                     raise ValueError("Skill body is required")
                 body = body.strip()
-        except (ValueError, KeyError, TypeError):
+            return description, body, operation
+
+        # An invalid Editor response is a protocol outcome (no candidate), per policy.
+        result = call_with_repair(repair_policy("editor.candidate"), fresh(request), parse)
+        raw = responses[-1]
+        if result.degraded:
             return EditOutcome(
                 None, base_skill.body, REASON_NO_OPERATIONS, raw, prompt_chars=size
             )
+        if result.value is None:
+            return EditOutcome(
+                None, base_skill.body, REASON_NO_CHANGE, raw, prompt_chars=size
+            )
+        description, body, operation = result.value
         if (description, body) == (
             base_skill.description.strip(),
             base_skill.body.strip(),
@@ -317,7 +327,6 @@ class SkillEditor:
                 ),
             ),
             raw_llm_output=raw,
-            meta_skill_version=self.meta_skill.version,
             proposed_from_experience_id=experiences[0].experience_id,
             edits=((S.SkillEdit(op="ADD" if operation["op"] == "add" else "EDIT",
                                 text=operation["text"], section=operation["section"],
@@ -356,7 +365,6 @@ class SkillEditor:
                                        source_experience_ids=tuple(e.experience_id for e in experiences),
                                        source_task_ids=tuple(e.task_id for e in experiences))),
             raw_llm_output="",
-            meta_skill_version=self.meta_skill.version,
             proposed_from_experience_id=experiences[0].experience_id,
             edits=(S.SkillEdit(op="ADD" if operation["op"] == "add" else "EDIT",
                                text=operation["text"], section=operation["section"],

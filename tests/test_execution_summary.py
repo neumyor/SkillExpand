@@ -2,9 +2,9 @@ import unittest,tempfile,json
 from pathlib import Path
 from skillexpand.l1 import learning as L
 from unittest.mock import patch
-from types import SimpleNamespace
 from skillexpand.l1 import protocol as P
 from skillexpand.runtime import parallel as PL
+from skillexpand.l1 import workers as LW
 from skillexpand.runtime import agent_factory as F
 from tests.test_l1_repair import Model
 
@@ -45,9 +45,9 @@ class ExecutionSummaryTests(unittest.TestCase):
             root=Path(temp);tasks=root/'tasks.json'
             tasks.write_text(json.dumps([{'question':f'Find maker {i}','answers':['Toyota'],'context':'Toyota makes this.'} for i in range(16)]))
             cfg=F.load_config('searchqa');cfg.benchmark.task_file=str(tasks)
-            specs=[PL.ExperienceSpec(unit_id=f't{i}',benchmark='searchqa',task_id=i,family_id='unassigned',split='train',skill_aware=False,max_trials=1,supervised_repair=False,l1_checkpoint_path=str(root/f'{i}.json')) for i in range(16)]
+            specs=[LW.ExperienceSpec(unit_id=f't{i}',benchmark='searchqa',task_id=i,family_id='unassigned',split='train',skill_aware=False,max_trials=1,supervised_repair=False,l1_checkpoint_path=str(root/f'{i}.json')) for i in range(16)]
             with patch.object(PL,'_config',return_value=cfg),patch.object(F,'LLM_CLS',side_effect=lambda **kw:Model(['Action 1: Finish[Toyota]'])):
-                results=PL.run_generic(specs,PL.execute_experience,workers=16)
+                results=PL.run_generic(specs,LW.execute_experience,workers=16)
             self.assertEqual(len(results),16)
             for r in results:
                 self.assertTrue(r['ok'],r)

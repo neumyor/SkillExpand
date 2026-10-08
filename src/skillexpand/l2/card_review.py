@@ -3,12 +3,12 @@
 import json
 import re
 from langchain.schema import HumanMessage, SystemMessage
-from skillexpand.l1.family_discovery import _extract_json
+from skillexpand.runtime.json_output import extract_json
 from skillexpand.l1.protocol import projection
-from skillexpand.l2 import structured_skill as SS
+from skillexpand import structured_skill as SS
 
 PROTOCOL = "serial-card-id-review-v6-relative-outcomes"
-LABELS = ("improve", "regress", "unchanged", "unknown")
+EFFECTS = ("improve", "regress", "unchanged", "unknown")
 OUTCOMES = ("success", "failure", "unknown")
 SYSTEM = """Independently compare CURRENT rules with ALL anonymous candidates on this ONE card.
 Check execution.skill_key: null means execution WITHOUT a Skill;
@@ -204,9 +204,9 @@ def id_list(value, allowed, field):
     return value
 
 
-def parse_card_review(raw, base, candidates, card, allow_legacy=True):
+def parse_card_review(raw, base, candidates, card):
     payload = review_payload(base, candidates, card)
-    entries = _extract_json(raw).get("candidates")
+    entries = extract_json(raw).get("candidates")
     if not isinstance(entries, list) or len(entries) != len(candidates):
         raise ValueError("Reviewer must cover every candidate exactly once")
     expected = {c["id"]: c for c in payload["candidates"]}
@@ -222,34 +222,14 @@ def parse_card_review(raw, base, candidates, card, allow_legacy=True):
                 or not entry["reason"].strip()):
             raise ValueError("Judgment needs a reason")
         old_outcome, new_outcome = entry.get("old_outcome"), entry.get("new_outcome")
-        legacy_label = entry.get("label")
-        if allow_legacy and old_outcome is None and new_outcome is None and legacy_label in LABELS:
-            # Compatibility for pre-v6 synthetic journals.  Fresh v6 reviewer calls
-            # are instructed and audited to use the two explicit outcomes above;
-            # this branch only lets old test fixtures replay while exposing the
-            # canonical fields in the parsed journal.
-            effect = legacy_label
-            current_outcome = observed_outcome(card, base.key)
-            old_outcome = current_outcome if current_outcome != "unknown" else (
-                "failure" if effect == "improve" else
-                "success" if effect == "regress" else "unknown")
-            new_outcome = (
-                "success" if effect == "improve" else
-                "failure" if effect == "regress" else
-                old_outcome if effect == "unchanged" and old_outcome in OUTCOMES else
-                "unknown"
-            )
-            legacy = True
-        else:
-            if old_outcome not in OUTCOMES or new_outcome not in OUTCOMES:
-                raise ValueError("Judgment needs valid old_outcome and new_outcome")
-            current_outcome = observed_outcome(card, base.key)
-            if current_outcome != "unknown" and old_outcome != current_outcome:
-                raise ValueError("old_outcome disagrees with the observed current outcome")
-            effect = outcome_effect(old_outcome, new_outcome)
-            if "label" in entry or "effect" in entry:
-                raise ValueError("Reviewer must leave effect derivation to the program")
-            legacy = False
+        if old_outcome not in OUTCOMES or new_outcome not in OUTCOMES:
+            raise ValueError("Judgment needs valid old_outcome and new_outcome")
+        current_outcome = observed_outcome(card, base.key)
+        if current_outcome != "unknown" and old_outcome != current_outcome:
+            raise ValueError("old_outcome disagrees with the observed current outcome")
+        if "label" in entry or "effect" in entry:
+            raise ValueError("Reviewer must leave effect derivation to the program")
+        effect = outcome_effect(old_outcome, new_outcome)
         evidence = id_list(
             entry.get("evidence_ids"),
             {r["id"] for r in card["evidence"]},
@@ -271,15 +251,10 @@ def parse_card_review(raw, base, candidates, card, allow_legacy=True):
             "old_outcome": old_outcome,
             "new_outcome": new_outcome,
             "effect": effect,
-            # ``label`` remains as a read-only alias for existing aggregation and
-            # offline journals; new records always contain the canonical fields too.
-            "label": effect,
             "evidence_ids": evidence,
             "rule_ids": rules,
             "reason": entry["reason"],
         }
-        if legacy:
-            parsed[cid]["legacy_label_compatibility"] = True
     return parsed
 
 
@@ -295,7 +270,7 @@ def aggregate(candidates, cards, units):
         raise ValueError("Every card must cover all candidates")
     if any(
         j.get("card_id") != cid
-        or (j.get("effect", j.get("label")) not in LABELS)
+        or j.get("effect") not in EFFECTS
         for cid, unit in units.items()
         for j in unit.values()
     ):
@@ -304,8 +279,8 @@ def aggregate(candidates, cards, units):
     for candidate in candidates:
         judgments = [units[c["card_id"]][candidate["id"]] for c in cards]
         counts = {
-            label: sum(j.get("effect", j.get("label")) == label for j in judgments)
-            for label in LABELS
+            effect: sum(j["effect"] == effect for j in judgments)
+            for effect in EFFECTS
         }
         results.append(
             {

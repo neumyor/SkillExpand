@@ -12,12 +12,12 @@ from skillexpand.l2 import loop as L
 from skillexpand.l1 import cold_start as C
 from skillexpand.persistence import store as ST
 from skillexpand.evaluation import validation as VA
-from skillexpand.persistence.artifacts import load_cold_start
-from skillexpand.persistence.artifacts import import_cold_start
-from skillexpand.persistence.artifacts import code_signature
-from skillexpand.persistence.artifacts import provider_signature
+from skillexpand.l1.artifacts import load_cold_start
+from skillexpand.l1.artifacts import import_cold_start
+from skillexpand.persistence import io as IO
+from skillexpand.reliability.errors import FrozenProtocolChanged, InvalidInput, JournalConflict
 from skillexpand.evaluation.routing import FrozenRoutes
-from skillexpand.l1.runner import save
+from skillexpand.evaluation.snapshots import evaluate_library, freeze_protocol
 
 
 def build_parser():
@@ -95,6 +95,11 @@ def build_parser():
     p.add_argument('--l2-reviewer-model', help='LLM used by per-card L2 reviewers')
     p.add_argument('--selector-model', help='LLM used to route validation/test tasks')
     p.add_argument("--resume", action="store_true")
+    p.add_argument(
+        "--allow-code-change", action="store_true",
+        help="Resume although the source fingerprint differs from the frozen run; "
+             "the drift is appended to code_changes.jsonl beside each frozen manifest",
+    )
     p.add_argument("--show-plan", action="store_true")
     return p
 
@@ -106,7 +111,7 @@ def make_plan(cfg, args, root):
         assignment = {int(k): v for k, v in raw.get("assignment", raw).items()}
         plan = S.SplitPlan.make(assignment, cfg.benchmark.name, args.seed)
     elif (root / "split.json").exists():
-        plan = C.read_split(root / "split.json")
+        plan = IO.read_split(root / "split.json")
     else:
         generated = SP.build_split_plan(
             {"tasks": list(range(count))}, benchmark=cfg.benchmark.name, seed=args.seed
@@ -116,9 +121,9 @@ def make_plan(cfg, args, root):
         set(plan.assignment) != set(range(count))
         or plan.benchmark != cfg.benchmark.name
     ):
-        raise ValueError("Split must cover exactly this benchmark task table")
+        raise InvalidInput("Split must cover exactly this benchmark task table")
     if any(not plan.tasks_in(split) for split in S.SPLITS):
-        raise ValueError("train, val and test must all be nonempty")
+        raise InvalidInput("train, val and test must all be nonempty")
     return plan
 
 
@@ -142,10 +147,8 @@ def apply_model_overrides(cfg, args):
         'l2_reviewer': args.l2_reviewer_model,
         'selector': args.selector_model,
     }
-    # An imported cold-start config already contains its frozen role map. Keep
-    # it intact when no stage-specific flags are supplied; changing the map
-    # would make the copied cold-start manifest/config pair inconsistent.
-    explicit = any(overrides.values())
+    # An imported cold-start config already contains its frozen role map; flags
+    # override individual roles.
     if existing:
         for key in defaults:
             if existing.get(key):
@@ -154,10 +157,7 @@ def apply_model_overrides(cfg, args):
         if value:
             defaults[key] = value
     cfg.models = OmegaConf.create(defaults)
-    # Preserve the imported config's legacy executor field when no explicit
-    # role map was requested; role_model() still uses the frozen map above.
-    if explicit or not existing:
-        cfg.agent.llm = defaults['l1_executor']
+    cfg.agent.llm = defaults['l1_executor']
     return cfg
 
 
@@ -165,7 +165,7 @@ def load_clustered_plan(root, plan):
     from skillexpand.l1.family_discovery import load_family_plan
 
     if not (root / "cold_start_complete.json").exists():
-        raise ValueError("Cold start is incomplete")
+        raise InvalidInput("Cold start is incomplete")
     clusters = load_family_plan(root / "clusters.json", benchmark=plan.benchmark)
     mapping = json.loads((root / "task_skill_map.json").read_text())
     expected = {
@@ -174,87 +174,46 @@ def load_clustered_plan(root, plan):
     if mapping != expected or set(clusters.task_to_family) != set(
         plan.tasks_in(S.SPLIT_TRAIN)
     ):
-        raise ValueError("Train mapping integrity failure")
+        raise JournalConflict("Train mapping integrity failure")
     initial = json.loads((root / "initial_skills.json").read_text())
     complete = json.loads((root / "cold_start_complete.json").read_text())
     if complete["mapping_hash"] != S.content_hash(mapping) or complete[
         "initial_skills_hash"
     ] != S.content_hash(initial):
-        raise ValueError("Cold-start artifact hash mismatch")
+        raise JournalConflict("Cold-start artifact hash mismatch")
     return S.SplitPlan.make(
         plan.assignment, plan.benchmark, plan.seed, clusters.families_index
     )
 
 
-def test_evaluate(cfg, plan, root, test_workers):
-    with L.RunLock(root / 'run.pid'):
-        return _test_evaluate(cfg, plan, root, test_workers)
+def test_evaluate(cfg, plan, root, test_workers, allow_code_change=False):
+    with IO.RunLock(root / 'run.pid'):
+        return _test_evaluate(cfg, plan, root, test_workers, allow_code_change)
 
 
-def _test_evaluate(cfg, plan, root, test_workers):
-    if any((root / 'evolution').glob('round-*/input.json')):
+def _test_evaluate(cfg, plan, root, test_workers, allow_code_change=False):
+    evolved = any((root / 'evolution').glob('round-*/input.json'))
+    if evolved:
         from skillexpand.l2.audit import audit_round
         status = json.loads((root / 'summary.json').read_text())
         if status.get('status') != 'complete' or not status.get('latest_evolution_round'):
-            raise ValueError('Complete and audit evolution before test evaluation')
+            raise InvalidInput('Complete and audit evolution before test evaluation')
         for index in range(1, status['latest_evolution_round'] + 1):
             audit_round(root, index)
     _, _, initial, _ = load_cold_start(root)
     library = ST.SkillLibrary(root / "skills.jsonl", benchmark=plan.benchmark)
     skills = tuple(library.head(f) for f in sorted(library.families))
-    if any((root / 'evolution').glob('round-*/input.json')) and (
-            {s.skill_id: s.key for s in skills} != status['skills']):
-        raise ValueError('Skill library differs from completed evolution output')
+    if evolved and {s.skill_id: s.key for s in skills} != status['skills']:
+        raise JournalConflict('Skill library differs from completed evolution output')
     target = root / "test" / VA.library_fingerprint(skills)
-    C.freeze(target / "library.json", [S.to_dict(s) for s in skills])
-    C.freeze(
-        target / "protocol.json",
-        {
-            "code": code_signature(),
-            "provider": provider_signature(),
-            "config": OmegaConf.to_container(cfg, resolve=True),
-            "routing_reference": [S.to_dict(s) for s in initial],
-        },
-    )
+    freeze_protocol(cfg, skills, initial, target, allow_code_change=allow_code_change)
     # Test questions/results are first accessed here. The initial descriptions are
     # the immutable routing reference; L2 never executes val or test tasks.
     routes = FrozenRoutes(
         cfg, plan, initial, root / "routes", S.SPLIT_TEST, test_workers
     ).run()
-    scorer = VA.FixedSkillScorer(
-        cfg, VA.ScoreCache(target / "scores.jsonl"), routes, test_workers
-    )
-    C.freeze(target / 'score_protocol.json', {'hash': scorer.protocol_hash})
-    per_skill = {}
-    for skill in skills:
-        result = scorer.score(
-            skill,
-            routes.groups[skill.skill_id],
-            f"test:{routes.fingerprint}:{skill.skill_id}",
-        )
-        per_skill[skill.skill_id] = {
-            "tasks": result.n,
-            "successes": result.successes,
-            "score": result.score,
-        }
-        save(target / "skills" / (skill.skill_id + ".json"), per_skill[skill.skill_id])
-    successes = sum(r["successes"] for r in per_skill.values())
-    n = len(plan.tasks_in(S.SPLIT_TEST))
-    summary = {
-        "status": "complete",
-        "split": "test",
-        "library_hash": VA.library_fingerprint(skills),
-        "routing_reference": "initial_skills",
-        "tasks": n,
-        "successes": successes,
-        "score": successes / n if n else None,
-        "per_skill": per_skill,
-        "routing_failures": list(routes.failed_task_ids),
-    }
-    save(target / "summary.json", summary)
-    from skillexpand.evaluation.audit import audit_test
-    save(target / 'audit.json', audit_test(root, target))
-    return summary
+    return evaluate_library(cfg, plan, root, skills, initial, routes, target, test_workers,
+                            allow_code_change=allow_code_change)
 
 
 def main(argv=None):
@@ -265,9 +224,9 @@ def main(argv=None):
         for n in (args.cold_start_workers, args.family_discovery_workers,
                   args.evolve_l1_workers, args.l2_review_workers, args.test_workers)
     ):
-        raise ValueError("Worker counts must be between 1 and 256")
+        raise InvalidInput("Worker counts must be between 1 and 256")
     if args.cold_start_dir and args.phase == "cold-start":
-        raise ValueError("Use --phase l2, all or test with --cold-start-dir")
+        raise InvalidInput("Use --phase l2, all or test with --cold-start-dir")
     source = Path(args.cold_start_dir).resolve() if args.cold_start_dir else root
     completed = (source / "cold_start_complete.json").exists()
     if completed:
@@ -277,14 +236,14 @@ def main(argv=None):
             and Path(args.task_file).resolve()
             != Path(cfg.benchmark.task_file).resolve()
         ):
-            raise ValueError("Task file differs from completed cold start")
+            raise FrozenProtocolChanged("Task file differs from completed cold start")
         if args.split_file:
             requested = make_plan(cfg, args, source)
             if requested.assignment != plan.assignment:
-                raise ValueError("Split differs from completed cold start")
+                raise FrozenProtocolChanged("Split differs from completed cold start")
     else:
         if args.cold_start_dir or args.phase in ("l2", "evolve", "test"):
-            raise ValueError("L2/test requires a completed cold start")
+            raise InvalidInput("L2/test requires a completed cold start")
         if args.task_file:
             os.environ["EXPE_TASK_FILE"] = str(Path(args.task_file).resolve())
         cfg = (
@@ -295,7 +254,7 @@ def main(argv=None):
         cfg.benchmark.task_file = str(Path(cfg.benchmark.task_file).resolve())
         plan = make_plan(cfg, args, root)
     if cfg.benchmark.name != args.benchmark:
-        raise ValueError("Benchmark differs from input run")
+        raise FrozenProtocolChanged("Benchmark differs from input run")
     if args.show_plan:
         print(
             json.dumps(
@@ -310,9 +269,9 @@ def main(argv=None):
         )
         return 0
     if root.exists() and any(root.iterdir()) and not args.resume:
-        raise ValueError("Existing run requires --resume")
+        raise InvalidInput("Existing run requires --resume")
     root.mkdir(parents=True, exist_ok=True)
-    lock = L.RunLock(root / "campaign.lock")
+    lock = IO.RunLock(root / "campaign.lock")
     lock.acquire()
     try:
         if args.cold_start_dir:
@@ -321,7 +280,7 @@ def main(argv=None):
         # the stage's role map afterwards so Planner/Editor/Reviewer/selector
         # can intentionally differ from the L1 executor in the new run.
         cfg = apply_model_overrides(cfg, args)
-        C.freeze(root / "config.json", OmegaConf.to_container(cfg, resolve=True))
+        IO.freeze(root / "config.json", OmegaConf.to_container(cfg, resolve=True))
         os.environ["EXPE_CONFIG_FILE"] = str(root / "config.json")
         os.environ["EXPE_TASK_FILE"] = cfg.benchmark.task_file
         if not completed:
@@ -335,6 +294,7 @@ def main(argv=None):
                 supervised=not args.no_supervised_repair,
                 family_discovery_workers=args.family_discovery_workers,
                 skill_edit_mode=args.skill_edit_mode,
+                allow_code_change=args.allow_code_change,
             ).run()
         if args.phase in ("l2", "evolve", "all"):
             config = L.EvolutionConfig(
@@ -352,14 +312,16 @@ def main(argv=None):
                 reviewer_update_mode=args.reviewer_update_mode,
                 reviewer_feedback_size=args.reviewer_feedback_size,
             )
-            loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config)
+            loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config,
+                                         allow_code_change=args.allow_code_change)
             # All evolution entry points execute Skill-aware L1 before L2.
             result = loop.run_evolutions()
             print(json.dumps(result, indent=2))
         elif args.phase == "test":
             print(
                 json.dumps(
-                    test_evaluate(cfg, plan, root, args.test_workers), indent=2
+                    test_evaluate(cfg, plan, root, args.test_workers,
+                                  args.allow_code_change), indent=2
                 )
             )
     finally:

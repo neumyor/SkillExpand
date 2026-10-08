@@ -12,8 +12,26 @@ from skillexpand.l2.card_review import card_payload
 from skillexpand.l2.card_review import parse_card_review
 from skillexpand.l2.card_review import aggregate
 from skillexpand.l2.card_review import choose
-from skillexpand.l1.family_discovery import _extract_json
-from skillexpand.l1.runner import save
+from skillexpand.runtime.json_output import extract_json
+from skillexpand.persistence.io import save
+from skillexpand.reliability.errors import InvalidInput, JournalConflict
+from skillexpand.reliability.policies import repair_policy
+from skillexpand.reliability.retry import call_with_repair
+
+PLANNER_CORRECTION = ("Fix structure and IDs only. Use supplied card_id/evidence_id pairs; "
+                      "drop unsupported hypotheses.")
+REVIEW_CORRECTION = (
+    "Fix coverage, IDs, and outcome fields only. Return every candidate "
+    "once with old_outcome and new_outcome in {success,failure,unknown}; "
+    "old_outcome must copy card.current_observed_outcome when known; "
+    "otherwise infer CURRENT separately or use unknown. Do not "
+    "return label/effect; the program derives the relative effect."
+)
+
+
+def attempt_name(base, attempt):
+    """Cache file of one model response; repair attempts are numbered from 0."""
+    return f"{base}-{attempt}"
 
 
 @dataclass
@@ -23,7 +41,7 @@ class UpdateResult:
 
 
 def parse_plan(raw, experiences, limit, structured=False, base_skill=None):
-    rows = _extract_json(raw).get("hypotheses")
+    rows = extract_json(raw).get("hypotheses")
     if not isinstance(rows, list) or len(rows) > limit:
         raise ValueError("Hypotheses must be a list no larger than K")
     cards = {
@@ -86,16 +104,16 @@ class SkillPatchRunner:
         self.read_only = read_only
         self.reviewer_factory = reviewer_factory
         if acceptance_mode not in ("predicted", "empirical", "jev"):
-            raise ValueError("Unknown acceptance mode")
+            raise InvalidInput("Unknown acceptance mode")
         if acceptance_mode == "empirical" and val_scorer is None and not read_only:
-            raise ValueError("Empirical acceptance requires a val scorer")
+            raise InvalidInput("Empirical acceptance requires a val scorer")
         if acceptance_mode == "jev" and jev_scorer is None and not read_only:
-            raise ValueError("JEV acceptance requires a JEV scorer")
+            raise InvalidInput("JEV acceptance requires a JEV scorer")
         if predicted_review_scope not in ("val", "train_cards"):
-            raise ValueError("Unknown predicted review scope")
+            raise InvalidInput("Unknown predicted review scope")
         if (acceptance_mode == "predicted" and predicted_review_scope == "val"
                 and predicted_scorer is None and not read_only):
-            raise ValueError("Predicted val acceptance requires a predicted scorer")
+            raise InvalidInput("Predicted val acceptance requires a predicted scorer")
         self.acceptance_mode = acceptance_mode
         self.predicted_review_scope = predicted_review_scope
         self.val_scorer = val_scorer
@@ -106,7 +124,7 @@ class SkillPatchRunner:
     def run(self, base_skill, experiences, candidate_count=3, batch_patterns=(),
             l2_review_workers=1, acceptance_record=None):
         if self.single_candidate and candidate_count != 1:
-            raise ValueError("single_candidate protocol requires candidate_count=1")
+            raise InvalidInput("single_candidate protocol requires candidate_count=1")
         experiences = tuple(experiences)
         if (
             candidate_count < 1
@@ -114,11 +132,11 @@ class SkillPatchRunner:
             or len({e.experience_id for e in experiences}) != len(experiences)
             or any(not ED.accepts(base_skill, e) for e in experiences)
         ):
-            raise ValueError(
+            raise InvalidInput(
                 "Expected a nonempty train batch assigned to this Skill and positive K"
             )
         if l2_review_workers < 1:
-            raise ValueError("l2_review_workers must be positive")
+            raise InvalidInput("l2_review_workers must be positive")
         acceptance_protocol = getattr(
             self.predicted_scorer or self.jev_scorer or self.val_scorer,
             "protocol_hash", None)
@@ -130,7 +148,7 @@ class SkillPatchRunner:
                 "base": S.to_dict(base_skill),
                 "cards": [S.to_dict(e) for e in experiences],
                 "K": candidate_count,
-                "meta": S.to_dict(self.editor.meta_skill),
+                "editing_strategy": ED.EDITING_STRATEGY,
                 "patterns": list(batch_patterns),
                 "skill_edit_mode": self.editor.skill_edit_mode,
                 "acceptance_mode": self.acceptance_mode,
@@ -141,21 +159,32 @@ class SkillPatchRunner:
         )
         directory = self.audit_dir / identity
 
-        def cached(name, generate):
+        def cached_attempt(name, generate):
+            """Return ``(value, fresh)``; every model response is durable before use."""
             path = directory / (name + ".json")
             if path.exists():
-                return json.loads(path.read_text())
+                return json.loads(path.read_text()), False
             if self.read_only:
-                raise ValueError(f'Missing cached L2 response: {path.name}')
+                raise JournalConflict(f'Missing cached L2 response: {path.name}')
             value = generate()
             save(path, value)
-            return value
+            return value, True
 
-        plan = cached(
-            "hypotheses",
-            lambda: {"raw": self.editor.plan(base_skill, experiences, candidate_count,
-                                               batch_patterns=batch_patterns)},
-        )
+        def cached(name, generate):
+            return cached_attempt(name, generate)[0]
+
+        def plan_request(attempt, previous):
+            def generate():
+                if previous is None:
+                    return {"raw": self.editor.plan(base_skill, experiences, candidate_count,
+                                                    batch_patterns=batch_patterns)}
+                correction = {"error": str(previous.error), "previous_output": previous.raw,
+                              "instruction": PLANNER_CORRECTION}
+                return {"raw": self.editor.plan(base_skill, experiences, candidate_count,
+                                                correction=correction,
+                                                batch_patterns=batch_patterns)}
+            value, fresh = cached_attempt(attempt_name("hypotheses", attempt), generate)
+            return value["raw"], fresh
         record = {
             "proposal_id": identity,
             "base_skill_key": base_skill.key,
@@ -184,34 +213,13 @@ class SkillPatchRunner:
                 "candidates": [],
             },
         }
-        for repair in range(2):
-            try:
-                hypotheses = parse_plan(
-                    plan["raw"], experiences, candidate_count,
-                    structured=self.editor.skill_edit_mode == 'structured',
-                    base_skill=base_skill)
-                break
-            except (ValueError, KeyError, TypeError) as exc:
-                if repair:
-                    record["reason"] = "invalid_hypotheses: " + str(exc)
-                    return UpdateResult(record)
-                correction = {
-                    "error": str(exc),
-                    "previous_output": plan["raw"],
-                    "instruction": "Fix structure and IDs only. Use supplied card_id/evidence_id pairs; drop unsupported hypotheses.",
-                }
-                plan = cached(
-                    "hypotheses-repair",
-                    lambda: {
-                        "raw": self.editor.plan(
-                            base_skill,
-                            experiences,
-                            candidate_count,
-                            correction=correction,
-                            batch_patterns=batch_patterns,
-                        )
-                    },
-                )
+        # An exhausted budget raises RepairExhausted: the batch is not journaled,
+        # and a resumed stage replays these attempts before resampling.
+        hypotheses = call_with_repair(
+            repair_policy("planner.hypotheses"), plan_request,
+            lambda raw: parse_plan(raw, experiences, candidate_count,
+                                   structured=self.editor.skill_edit_mode == 'structured',
+                                   base_skill=base_skill)).value
         record["hypotheses"] = hypotheses
         candidates, previous = [], []
         seen_bodies = {" ".join(base_skill.body.split())}
@@ -237,7 +245,7 @@ class SkillPatchRunner:
             row = {"hypothesis_index": index, "edit": edit, "status": edit["reason"]}
             if candidate:
                 if candidate.skill.description != base_skill.description:
-                    raise ValueError("Candidate changed frozen description")
+                    raise JournalConflict("Candidate changed frozen description")
                 canonical = " ".join(candidate.skill.body.split())
                 if canonical in seen_bodies:
                     row["status"] = "duplicate_or_unchanged_body"
@@ -331,7 +339,6 @@ class SkillPatchRunner:
             record.update(
                 selection_method="predicted_val_skill_success",
                 reviews=[],
-                review_errors=[],
                 reviewed_card_count=0,
                 acceptance=acceptance,
                 reason=reason,
@@ -348,42 +355,21 @@ class SkillPatchRunner:
             unit_id = S.content_hash(card)
             reviewer = (self.reviewer_factory(card) if self.reviewer_factory is not None
                         else self.reviewer)
-            raw = cached(
-                "review-" + unit_id,
-                lambda: {"raw": reviewer.review(base_skill, payload, card)},
-            )
-            parsed = None
-            error = None
-            for repair in range(2):
-                try:
-                    parsed = parse_card_review(
-                        raw["raw"], base_skill, payload, card
-                    )
-                    break
-                except (ValueError, KeyError, TypeError) as exc:
-                    if repair:
-                        error = {"card_id": card["card_id"], "error": str(exc)}
-                        break
-                    correction = {
-                        "error": str(exc),
-                        "previous_output": raw["raw"],
-                        "instruction": (
-                            "Fix coverage, IDs, and outcome fields only. Return every candidate "
-                            "once with old_outcome and new_outcome in {success,failure,unknown}; "
-                            "old_outcome must copy card.current_observed_outcome when known; "
-                            "otherwise infer CURRENT separately or use unknown. Do not "
-                            "return label/effect; the program derives the relative effect."
-                        ),
-                    }
-                    raw = cached(
-                        "review-" + unit_id + "-repair",
-                        lambda: {
-                            "raw": reviewer.review(
-                                base_skill, payload, card, correction=correction
-                            )
-                        },
-                    )
-            return card["card_id"], parsed if error is None else None, error
+            def review_request(attempt, previous):
+                def generate():
+                    if previous is None:
+                        return {"raw": reviewer.review(base_skill, payload, card)}
+                    correction = {"error": str(previous.error), "previous_output": previous.raw,
+                                  "instruction": REVIEW_CORRECTION}
+                    return {"raw": reviewer.review(base_skill, payload, card,
+                                                   correction=correction)}
+                value, fresh = cached_attempt(attempt_name("review-" + unit_id, attempt), generate)
+                return value["raw"], fresh
+
+            parsed = call_with_repair(
+                repair_policy("reviewer.card"), review_request,
+                lambda raw: parse_card_review(raw, base_skill, payload, card)).value
+            return card["card_id"], parsed
 
         pool_workers = min(int(l2_review_workers), len(cards))
         if pool_workers == 1:
@@ -396,14 +382,8 @@ class SkillPatchRunner:
                 # requests themselves overlap inside the bounded pool.
                 futures = [pool.submit(review_one, card) for card in cards]
                 reviewed = [future.result() for future in futures]
-        units = {card_id: parsed for card_id, parsed, error in reviewed if error is None}
-        errors = [error for _, _, error in reviewed if error is not None]
-        record["review_errors"] = errors
+        units = dict(reviewed)
         record["reviewed_card_count"] = len(units)
-        if errors:
-            record["reason"] = "invalid_review: incomplete card judgments"
-            record["partial_review_units"] = units
-            return UpdateResult(record)
         results = aggregate(payload, cards, units)
         acceptance = {
             "mode": self.acceptance_mode,
@@ -456,9 +436,8 @@ class SkillPatchRunner:
                     for v in validations
                 )
                 if self.acceptance_mode == "jev":
-                    # JEV is a predictive judge and never runs the benchmark
-                    # environment.  Keep the historical ``executions`` field
-                    # reserved for empirical val episodes.
+                    # JEV never runs the environment: ``executions`` counts only
+                    # empirical val episodes.
                     acceptance["jev_requests"] = request_count
                 else:
                     acceptance["executions"] = request_count

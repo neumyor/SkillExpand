@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import pytest
 import openai
 from skillexpand.runtime.models.llm import GPTWrapper, request_policy, retry_delay, wait_for_request_slot
-from skillexpand.runtime.deadline import environment_call
+from skillexpand.benchmarks.base import environment_call
 
 
 def test_model_retries_transient_errors_until_success_with_capped_backoff():
@@ -17,8 +17,8 @@ def test_model_retries_transient_errors_until_success_with_capped_backoff():
                                SimpleNamespace(content=' recovered ')])
     with patch('skillexpand.runtime.models.llm.ChatOpenAI', return_value=client) as factory, \
             patch('skillexpand.runtime.models.llm.time.sleep') as sleep, \
-            patch.dict('os.environ', EXPE_LLM_RETRIES='2', EXPE_LLM_TIMEOUT_SECONDS='1'):
-        wrapper = GPTWrapper('test', 'EMPTY', False)
+            patch.dict('os.environ', EXPE_LLM_TIMEOUT_SECONDS='1'):
+        wrapper = GPTWrapper('test', 'EMPTY')
         assert wrapper([]) == 'recovered'
         assert client.call_count == 4
         assert sleep.call_args_list == [((1,),), ((2,),), ((4,),)]
@@ -35,7 +35,7 @@ def test_retry_delay_stays_at_one_minute():
 def test_model_success_not_retried_and_invalid_timeout_rejected():
     client = Mock(return_value=SimpleNamespace(content=' answer '))
     with patch('skillexpand.runtime.models.llm.ChatOpenAI', return_value=client):
-        assert GPTWrapper('test', 'EMPTY', False)([]) == 'answer'
+        assert GPTWrapper('test', 'EMPTY')([]) == 'answer'
         assert client.call_count == 1
     for value in ('0', '-1', 'nan', 'inf'):
         with patch.dict('os.environ', EXPE_LLM_TIMEOUT_SECONDS=value), pytest.raises(ValueError):
@@ -122,8 +122,9 @@ def test_usage_recovery_records_abandoned_request_without_inventing_tokens(tmp_p
     assert [r['event'] for r in rows] == ['start', 'abandoned']
     report = audit_usage(checkpoint)
     assert report['failed_requests'] == 1 and report['total_tokens'] == 0
-    assert not report['tokens_complete']
-    assert not report['audit_complete']
+    assert not report['tokens_complete'] and report['abandoned_requests'] == 1
+    # An interruption is not an integrity failure: its response is never used.
+    assert report['audit_complete']
 
 
 def test_usage_audit_accepts_transient_error_followed_by_retry(tmp_path):

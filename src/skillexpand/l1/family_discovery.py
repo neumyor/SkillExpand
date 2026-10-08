@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import hashlib
-import ast
 import json
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Sequence
 
+from skillexpand.reliability.errors import JournalConflict
+from skillexpand.reliability.policies import repair_policy
+from skillexpand.reliability.retry import call_with_repair
+from skillexpand.runtime.json_output import extract_json
 
-class DiscoveryError(ValueError):
+
+class DiscoveryError(JournalConflict):
     """Raised when a discovery artifact is malformed or incomplete."""
 
 
@@ -278,138 +281,21 @@ def select_representatives(tags: Sequence[TaskTag], limit: int = 128) -> tuple[T
     return tuple(candidates[index] for index in indexes)
 
 
-def _balanced_json_objects(text: str) -> list[str]:
-    """Return complete JSON-like object spans, respecting quoted braces.
+JSON_RETRY_SUFFIX = ('\nPrevious response was invalid. Return exactly one valid JSON object '
+                     'and no markdown or commentary.')
 
-    A model often puts a valid object after a short explanation, or emits two
-    objects while correcting itself.  ``find('{')``/``rfind('}')`` joins those
-    objects together and makes an otherwise recoverable response unparsable.
-    This small scanner deliberately does *not* try to repair an unterminated
-    object: accepting a truncated response would turn a format error into data.
+
+def ask_json(llm: Callable[[str], str], prompt: str, policy: str,
+             parse: Callable[[dict[str, Any]], Any] = lambda value: value,
+             retry_suffix: str = JSON_RETRY_SUFFIX) -> Any:
+    """Ask for one JSON object and validate it under the named repair policy.
+
+    Only invalid output is retried; request failures propagate.
     """
-    objects = []
-    start = None
-    depth = 0
-    quoted = False
-    escaped = False
-    for index, char in enumerate(text):
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif char == '"':
-                quoted = False
-            continue
-        if char == '"':
-            quoted = True
-        elif char == '{':
-            if depth == 0:
-                start = index
-            depth += 1
-        elif char == '}' and depth:
-            depth -= 1
-            if depth == 0 and start is not None:
-                objects.append(text[start:index + 1])
-                start = None
-    return objects
-
-
-def _json_candidates(text: str) -> list[str]:
-    text = str(text or '').replace('\ufeff', '').strip()
-    candidates = []
-    # Prefer fenced blocks, while still scanning the whole response below.  The
-    # latter handles reasoning text before/after an unfenced answer.
-    for match in re.finditer(r'```(?:json|javascript|js)?\s*(.*?)\s*```', text, re.S | re.I):
-        candidates.extend(_balanced_json_objects(match.group(1)))
-        candidates.append(match.group(1).strip())
-    candidates.extend(_balanced_json_objects(text))
-    candidates.append(text)
-    # Preserve order but avoid repeatedly parsing the same large response.
-    return list(dict.fromkeys(item for item in candidates if item))
-
-
-def _load_json_candidate(candidate: str) -> dict[str, Any] | None:
-    candidate = candidate.strip()
-    attempts = [candidate]
-    # Trailing commas are a common harmless generation error.  Do this only
-    # outside strings so a reason containing `,}` is left untouched.
-    repaired = []
-    quoted = False
-    escaped = False
-    for index, char in enumerate(candidate):
-        if quoted:
-            repaired.append(char)
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif char == '"':
-                quoted = False
-            continue
-        if char == '"':
-            quoted = True
-        if char == ',' and index + 1 < len(candidate) and candidate[index + 1:].lstrip().startswith(('}', ']')):
-            continue
-        repaired.append(char)
-    attempts.append(''.join(repaired))
-    # Some gateways prepend ``json`` to an otherwise valid object.
-    if candidate.lower().startswith('json'):
-        attempts.append(candidate[4:].lstrip(': \n'))
-    for item in list(attempts):
-        try:
-            value = json.loads(item)
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if isinstance(value, dict):
-            return value
-    # A few local models use Python quotes/booleans despite being asked for JSON.
-    # literal_eval is intentionally the last resort and the result still has to
-    # be a dictionary; arbitrary code is never evaluated.
-    try:
-        value = ast.literal_eval(attempts[1])
-    except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
-        return None
-    return value if isinstance(value, dict) else None
-
-
-def _extract_json(text: str, required_keys: Sequence[str] | None = None) -> dict[str, Any]:
-    """Extract one complete object from model output.
-
-    ``required_keys`` is used by callers with a small response contract to pick
-    the right object when the model includes an input echo or multiple attempts.
-    It does not weaken validation: callers still validate types and ranges after
-    extraction.  Incomplete/truncated JSON is intentionally rejected.
-    """
-    required = set(required_keys or ())
-    parsed = []
-    for candidate in _json_candidates(text):
-        value = _load_json_candidate(candidate)
-        if value is not None:
-            parsed.append(value)
-    if required:
-        for value in parsed:
-            if required <= set(value):
-                return value
-    if parsed:
-        return parsed[0]
-    raise DiscoveryError('LLM response did not contain a complete JSON object')
-
-
-def _ask_json(llm: Callable[[str], str], prompt: str, stage: str,
-              attempts: int = 3) -> dict[str, Any]:
-    last_error: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            suffix = '' if attempt == 0 else (
-                '\nPrevious response was invalid. Return exactly one valid JSON object '
-                'and no markdown or commentary.')
-            return _extract_json(llm(prompt + suffix))
-        except Exception as exc:
-            last_error = exc
-            if attempt + 1 < attempts:
-                time.sleep(1.0 * (attempt + 1))
-    raise DiscoveryError(f'{stage} failed after {attempts} attempts: {last_error}') from last_error
+    def request(attempt, previous):
+        return llm(prompt if attempt == 0 else prompt + retry_suffix), True
+    return call_with_repair(repair_policy(policy), request,
+                            lambda raw: parse(extract_json(raw))).value
 
 
 FAMILY_CONTRACT = """Classify stable task requirements and operation semantics, not solver performance.
@@ -435,9 +321,9 @@ def tag_tasks(tasks: Mapping[int, str], llm: Callable[[str], str],
             'Return JSON only: {"capability_tags":["..."],"capability_summary":"..."}.\n\n'
             + FAMILY_CONTRACT + f'\nTASK_ID: {task_id}\nTASK:\n{tasks[task_id]}'
         )
-        value = _ask_json(llm, prompt, f'tagging task {task_id}')
-        return TaskTag(task_id, _string_list(value.get('capability_tags'), 'capability_tags'),
-                       _text(value.get('capability_summary'), 'capability_summary'))
+        return ask_json(llm, prompt, 'discovery.tags', parse=lambda value: TaskTag(
+            task_id, _string_list(value.get('capability_tags'), 'capability_tags'),
+            _text(value.get('capability_summary'), 'capability_summary')))
 
     out: dict[int, TaskTag] = {}
     task_ids = sorted(tasks)
@@ -469,20 +355,14 @@ def propose_families(tags: Sequence[TaskTag], llm: Callable[[str], str],
         'exclusion criteria or task IDs. Return JSON only with a families list.\n\n' +
         FAMILY_CONTRACT + '\n' + payload
     )
-    last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            value = _extract_json(llm(prompt if attempt == 0 else
-                prompt + '\nPrevious output was invalid. Return only the requested family taxonomy.'))
-            proposals = parse_proposals(_repair_proposal_ids(value))
-            if target_family_count is not None and len(proposals) != target_family_count:
-                raise DiscoveryError(f'expected exactly {target_family_count} families, got {len(proposals)}')
-            return proposals
-        except Exception as exc:
-            last_error = exc
-            if attempt < 2:
-                time.sleep(1.0 * (attempt + 1))
-    raise DiscoveryError(f'family proposal failed after 3 attempts: {last_error}') from last_error
+    def parse(value):
+        proposals = parse_proposals(_repair_proposal_ids(value))
+        if target_family_count is not None and len(proposals) != target_family_count:
+            raise DiscoveryError(f'expected exactly {target_family_count} families, got {len(proposals)}')
+        return proposals
+
+    return ask_json(llm, prompt, 'discovery.proposals', parse=parse,
+                    retry_suffix='\nPrevious output was invalid. Return only the requested family taxonomy.')
 
 
 def assign_families(tags: Sequence[TaskTag], proposals: Sequence[FamilyProposal],
@@ -518,19 +398,11 @@ def assign_families(tags: Sequence[TaskTag], proposals: Sequence[FamilyProposal]
             '{"task_id":123,"family_id":"family-p001","match_type":"direct|best_fit",'
             '"rationale":"..."}.\n\n' + FAMILY_CONTRACT + '\n' + payload
         )
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                retry_prompt = prompt if attempt == 0 else (
-                    prompt + '\nPrevious output was invalid. Choose one supplied family_id '
-                    'and return the exact JSON schema.')
-                value = _extract_json(llm(retry_prompt))
-                return parse_assignments({'assignments': [value]}, [tag.task_id], proposals)[0]
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2:
-                    time.sleep(1.0 * (attempt + 1))
-        raise DiscoveryError(f'family assignment failed for task {tag.task_id}: {last_error}') from last_error
+        return ask_json(
+            llm, prompt, 'discovery.assignment',
+            parse=lambda value: parse_assignments({'assignments': [value]}, [tag.task_id], proposals)[0],
+            retry_suffix=('\nPrevious output was invalid. Choose one supplied family_id '
+                          'and return the exact JSON schema.'))
 
     pending = tuple(tag for tag in tags if tag.task_id not in completed)
     assignments: list[FamilyAssignment] = list(existing)
@@ -588,7 +460,7 @@ def load_family_plan(path: Path, benchmark: str | None = None) -> FamilyPlan:
     proposals = parse_proposals({'families': value.get('proposals', [])})
     assignments = parse_assignments({'assignments': value.get('assignments', [])}, mapping, proposals)
     plan = make_family_plan(plan_benchmark, tags, proposals, assignments,
-                            mode=_text(value.get('mode', 'forced_choice_assignment'), 'mode'))
+                            mode=_text(value.get('mode'), 'mode'))
     if plan.task_to_family != mapping or plan.families != families or plan.mapping_hash != value.get('mapping_hash'):
         raise DiscoveryError('family plan metadata differs from assignments')
     return plan

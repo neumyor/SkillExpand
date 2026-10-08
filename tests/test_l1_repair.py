@@ -15,7 +15,7 @@ from skillexpand.l1.adapters import register
 from skillexpand.l1.runner import run
 from skillexpand.l1 import protocol as P
 from skillexpand.l2 import editor as ED
-from skillexpand.runtime import parallel as PL
+from skillexpand.l1 import workers as LW
 
 SUPERVISED_DIAGNOSIS = json.dumps({
     'diagnosis': {'kind': 'knowledge_or_interpretation_gap', 'reason': 'Missing maker information.'},
@@ -64,12 +64,10 @@ class L1RepairTests(unittest.TestCase):
         model = Model(outputs)
         with patch.object(F, 'LLM_CLS', lambda **kwargs: model):
             a = F.build_agent(self.cfg, task_idx=0, rules=self.skill.body,
-                              agent_cls=RepairAgent, fewshot_strategy='none',
-                              openai_api_key='EMPTY')
-        a.train()
+                              agent_cls=RepairAgent, openai_api_key='EMPTY')
         return a, model
     def gather(self, agent, k=1, supervised=True, path=None):
-        return run(agent, self.cfg, 0, 'family-p001', S.SPLIT_TRAIN, self.skill, 0,
+        return run(agent, self.cfg, 0, 'family-p001', S.SPLIT_TRAIN, self.skill,
                    self.skill.skill_id, S.SELECTION_AGENT, 'agent_choice', '',
                    k=k, supervised=supervised, checkpoint_path=path)[0]
     def test_experience_public_entrypoint(self):
@@ -295,10 +293,10 @@ class L1RepairTests(unittest.TestCase):
         self.assertTrue(card['over_budget'])
         self.assertEqual(card['task']['text'],'task '*100)
     def test_reconstruct_selected_skill_identity(self):
-        spec=PL.ExperienceSpec(unit_id='x',benchmark='searchqa',task_id=0,family_id='family-p001',
+        spec=LW.ExperienceSpec(unit_id='x',benchmark='searchqa',task_id=0,family_id='family-p001',
             split='train',skill_key=self.skill.key,skill_body=self.skill.body,skill_description=self.skill.description,
             selected_skill_id=self.skill.skill_id)
-        self.assertEqual(PL._reconstruct_skill(spec).key,self.skill.key)
+        self.assertEqual(LW._reconstruct_skill(spec).key,self.skill.key)
 
 if __name__ == '__main__':
     unittest.main()

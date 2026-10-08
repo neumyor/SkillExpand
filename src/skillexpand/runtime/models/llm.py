@@ -10,39 +10,52 @@ from langchain.chat_models import ChatOpenAI
 from langchain.schema import ChatMessage
 import openai
 
+from skillexpand.reliability.errors import (
+    InvalidInput, ProviderRejected, ProviderUnavailable, register_translation,
+)
+from skillexpand.reliability.policies import PROVIDER
+from skillexpand.reliability.retry import retry_transient
 
-def _positive_int_env(name: str, default: int) -> int:
-    try:
-        value = int(os.environ.get(name, default))
-        if not 0 <= value <= 10:
-            raise ValueError()
-        return value
-    except ValueError as exc:
-        raise ValueError(f'{name} must be an integer from 0 to 10') from exc
+# Congestion and outages are transient; a refused request is not.
+for _error in (openai.error.Timeout, openai.error.APIConnectionError, openai.error.RateLimitError,
+               openai.error.ServiceUnavailableError, openai.error.TryAgain):
+    register_translation(_error, ProviderUnavailable)
+
+#: HTTP statuses that mean "try again later" rather than "this request is wrong".
+TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 429})
+
+
+def _api_error_kind(exc):
+    """openai 0.27 raises APIError for any unparsed error body, including 4xx."""
+    status = getattr(exc, 'http_status', None)
+    if status is not None and 400 <= status < 500 and status not in TRANSIENT_HTTP_STATUSES:
+        return ProviderRejected
+    return ProviderUnavailable
+
+
+register_translation(openai.error.APIError, _api_error_kind, transient=True)
+for _error in (openai.error.AuthenticationError, openai.error.PermissionError,
+               openai.error.InvalidRequestError, openai.error.InvalidAPIType,
+               openai.error.SignatureVerificationError):
+    register_translation(_error, ProviderRejected)
 
 
 def request_policy():
     timeout = float(os.environ.get('EXPE_LLM_TIMEOUT_SECONDS', '300'))
     if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError('EXPE_LLM_TIMEOUT_SECONDS must be finite and positive')
-    # ``EXPE_LLM_RETRIES`` remains in the manifest for backwards-compatible
-    # environment validation, but transient provider failures are now retried
-    # until success by GPTWrapper.  The field is retained as metadata so old
-    # manifests can still be audited without silently changing their identity.
-    configured_retries = _positive_int_env('EXPE_LLM_RETRIES', 2)
+        raise InvalidInput('EXPE_LLM_TIMEOUT_SECONDS must be finite and positive')
     return {
         'timeout': timeout,
-        'retries': configured_retries,
-        'retry_forever': True,
-        'retry_backoff_max': 60,
+        'retry_forever': PROVIDER.attempts is None,
+        'retry_backoff_max': max(PROVIDER.delays),
     }
 
 
 def retry_delay(attempt: int) -> int:
-    """Seconds before retry ``attempt`` (zero-based), capped at one minute."""
+    """Seconds before provider retry ``attempt`` (zero-based)."""
     if attempt < 0:
         raise ValueError('attempt must be non-negative')
-    return 60 if attempt >= 6 else 2 ** attempt
+    return PROVIDER.delay(attempt)
 
 
 def wait_for_request_slot():
@@ -51,7 +64,7 @@ def wait_for_request_slot():
         return
     interval = float(os.environ.get('EXPE_LLM_REQUEST_INTERVAL_SECONDS', '0'))
     if not math.isfinite(interval) or interval <= 0:
-        raise ValueError('EXPE_LLM_REQUEST_INTERVAL_SECONDS must be finite and positive')
+        raise InvalidInput('EXPE_LLM_REQUEST_INTERVAL_SECONDS must be finite and positive')
     with open(path, 'a+') as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         stream.seek(0)
@@ -149,7 +162,7 @@ def get_extra_model_kwargs(model_name: str = None) -> dict:
         try:
             kwargs.update(json.loads(raw))
         except json.JSONDecodeError as exc:
-            raise ValueError(f'{EXTRA_ENV_VAR} is not valid JSON: {exc}') from exc
+            raise InvalidInput(f'{EXTRA_ENV_VAR} is not valid JSON: {exc}') from exc
     return kwargs
 
 
@@ -175,16 +188,10 @@ class GPTWrapper:
     configured it talks to any OpenAI-compatible server (vLLM, a hosted gateway).
     """
 
-    def __init__(self, llm_name: str, openai_api_key: str, long_ver: bool,
-                 base_url: str = None):
+    def __init__(self, llm_name: str, openai_api_key: str, base_url: str = None):
         self.model_name = llm_name
         self.base_url = base_url
         self.request_policy = request_policy()
-        if long_ver and base_url is None:
-            # Upstream's long-context fallback only exists for legacy OpenAI
-            # models. A self-hosted or proxied deployment serves a single model
-            # with its own context window, so rewriting the model name would 404.
-            llm_name = 'gpt-3.5-turbo-16k'
         kwargs = dict(
             model=llm_name,
             temperature=0.0,
@@ -212,53 +219,55 @@ class GPTWrapper:
         kwargs = {}
         if stop != []:
             kwargs['stop'] = stop
-        # Upstream retried only on RateLimitError. A locally-served model behind
-        # a tunnel can also raise connection/timeout errors, which used to abort
-        # a whole run on a single transient blip.
-        retryable = (openai.error.RateLimitError, openai.error.APIError,
-                     openai.error.Timeout, openai.error.APIConnectionError)
-        attempt = 0
-        while True:
-            try:
-                wait_for_request_slot()
-                with self._request_kwargs_lock:
-                    existing_model_kwargs = getattr(self.llm, 'model_kwargs', {})
-                    # Test doubles and a few older LangChain clients do not
-                    # expose a real dict here.
-                    if not isinstance(existing_model_kwargs, dict):
-                        existing_model_kwargs = {}
-                    previous_model_kwargs = dict(existing_model_kwargs)
+        def request():
+            wait_for_request_slot()
+            with self._request_kwargs_lock:
+                existing_model_kwargs = getattr(self.llm, 'model_kwargs', {})
+                # Test doubles and a few older LangChain clients do not
+                # expose a real dict here.
+                if not isinstance(existing_model_kwargs, dict):
+                    existing_model_kwargs = {}
+                previous_model_kwargs = dict(existing_model_kwargs)
+                if request_kwargs:
+                    merged = dict(previous_model_kwargs)
+                    merged.update(request_kwargs)
+                    self.llm.model_kwargs = merged
+                try:
+                    return self.llm(messages, **kwargs)
+                finally:
                     if request_kwargs:
-                        merged = dict(previous_model_kwargs)
-                        merged.update(request_kwargs)
-                        self.llm.model_kwargs = merged
-                    try:
-                        message = self.llm(messages, **kwargs)
-                    finally:
-                        if request_kwargs:
-                            self.llm.model_kwargs = previous_model_kwargs
-                output = str(message.content or '').strip('\n').strip()
-                break
-            except retryable:
-                # Network/provider outages are transient at this layer.  Keep
-                # retrying forever so a scheduler restart is not required just
-                # because a tunnel or endpoint was unavailable for a few minutes.
-                time.sleep(retry_delay(attempt))
-                attempt += 1
+                        self.llm.model_kwargs = previous_model_kwargs
+
+        # Congestion and outages are retried until the endpoint answers; a
+        # refused request propagates as ProviderRejected.
+        message = retry_transient(request, PROVIDER, sleep=time.sleep)
+        output = str(message.content or '').strip('\n').strip()
 
         if replace_newline:
             output = output.replace('\n', '')
         return output
 
 
-def LLM_CLS(llm_name: str, openai_api_key: str, long_ver: bool) -> Callable:
+def provider_signature():
+    """Hash runtime provider switches rather than persisting endpoint URLs or extras."""
+    from skillexpand import schema as S
+
+    return S.content_hash(
+        {"endpoint": get_llm_base_url(), "extra": get_extra_model_kwargs(),
+         'request_timeout': request_policy()['timeout'],
+         'environment_timeout': os.environ.get('EXPE_ENV_TIMEOUT_SECONDS', '120'),
+         'worker_timeout': os.environ.get('EXPE_WORKER_TIMEOUT_SECONDS', '3600')}
+    )
+
+
+def LLM_CLS(llm_name: str, openai_api_key: str) -> Callable:
     base_url = get_llm_base_url()
     if base_url is not None:
         warn_if_reasoning_trap()
         # Any model name is accepted: it is whatever the endpoint advertises. An
         # API key is still required by the OpenAI client library.
-        return GPTWrapper(llm_name, openai_api_key or 'EMPTY', False, base_url=base_url)
+        return GPTWrapper(llm_name, openai_api_key or 'EMPTY', base_url=base_url)
     if 'gpt' in llm_name:
-        return GPTWrapper(llm_name, openai_api_key, long_ver)
+        return GPTWrapper(llm_name, openai_api_key)
     else:
-        raise ValueError(f"Unknown LLM model name: {llm_name}")
+        raise InvalidInput(f"Unknown LLM model name: {llm_name}")

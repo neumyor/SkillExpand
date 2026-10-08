@@ -56,6 +56,8 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 
 显式 `--phase test` 时，selector 只根据初始 Skill description 固定 test task→Skill 路由，随后每道 test task 使用当前 Skill body 独立执行一次。test 不提供 train 卡、反思、答案或指导，也不写回 L2。每题结果、轨迹、route、score cache 和 `audit.json` 都落盘；路由失败保留在总体分母中。
 
+CLI test 阶段和 `scripts/evaluate_snapshot.py`（评测第 N 轮结束时的快照，N=0 为冷启动库）共用 `evaluation/snapshots.py:evaluate_library`。同一 run 的所有快照复用同一组冻结 test 路由；某个 Skill 路由组执行失败时，其他组照常评测，失败单元不入缓存，结束后抛错，`--resume` 只补跑缺失单元。
+
 ## 6. 并发与持久化
 
 冷启动 train L1、family 请求、每轮 train L1 和 val/test task evaluation 可并发。Planner、Editor、batch commit 和 round transition 保持串行；train-card Reviewer 与 predicted-val judge 使用受限 `l2_review_workers` pool。每个请求和每个 task 都先落盘再汇总，目录锁防止重复 writer，恢复依赖 manifest、job lock 和逐单元缓存。
@@ -70,3 +72,53 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 - `routes/val/`、`routes/test/`：冻结的 selector 路由。
 - `val/predicted_scores.jsonl`：predicted-val 逐 task 缓存。
 - `skills.jsonl`：Skill 版本链；`test/<library-hash>/`：独立 test 评测。
+
+## 8. Reviewer 协同演化
+
+`--single-candidate` 把每个 batch 限制为一个候选。`--reviewer-update-mode` 为 `summary` 或 `rules` 时，每轮 L2 结束后 `SerialEvolutionLoop._collect_reviewer_feedback` 在固定的 train family panel（`--reviewer-feedback-size` 截取前 N 题）上，用同一路由各执行一次旧 head 和本轮候选，把预测与真实 paired outcome 写入 `reviewer_feedback.jsonl`。`l2/reviewer_coevolution.py` 据此计算 paired precision、false-positive regression、Brier、ECE，生成版本化的 `reviewer_updates.jsonl`。
+
+- `none`：不收集反馈；
+- `summary`：反馈和 update 只用于审计，Reviewer prompt 保持初始版本；
+- `rules`：Reviewer LLM 把带 feedback ID 的统计压缩成有限规则，作为 calibration block 进入下一轮 predicted-val Reviewer 的 prompt，并计入其 protocol hash。
+
+反馈只来自 train；val 只用于当轮验收，test 只用于报告。`audit_round` 校验反馈只引用冻结 train split 中、属于同一 family 的 task，feedback ID 不重复，update 只引用已存在的 feedback，且 version/parent 版本链连续。
+
+## 9. 模型角色
+
+`cfg.models` 记录六个角色：`l1_executor`、`cold_start`、`l2_planner`、`l2_editor`、`l2_reviewer`、`selector`。`runtime/agent_factory.build_reasoning_host(cfg, usage_path, role=...)` 按角色选模型；执行 agent 使用 `cfg.agent.llm`。角色映射冻结在 `config.json` 中，因此进入 manifest 与 protocol hash；campaign 的 `audit_stage` 会核对冻结的 `config.json` 角色映射与 campaign manifest 请求的角色模型一致（不核对请求账本）。
+
+## 10. 代码分层
+
+```text
+schema, structured_skill    记录类型、序列化、结构化 Skill 格式（仅标准库）
+persistence                 io.py：原子写、freeze、JSONL、锁、源码指纹；store.py；usage.py
+reliability                 异常分类与处置、重试/修复策略、单元失败记录（与 persistence 同层）
+benchmarks                  SearchQA / ALFWorld 环境与任务表
+runtime                     ReAct 执行器、LLM 客户端、JSON 输出解析、通用任务池、prompt 注册表
+l1                          修复循环、经验卡、family 发现、冷启动、冷启动工件导入、L1 worker
+evaluation                  路由、val/test 打分、JEV、快照评测、fixed-Skill worker
+l2                          Planner/Editor/Reviewer、batch 事务、多轮闭环、审计、Reviewer 协同演化
+campaign, cli               冻结 campaign 启动器；单次运行 CLI
+```
+
+依赖只能向下（包括函数内导入），由 `tests/test_layering.py` 检查。每个 worker 函数放在拥有该单元的层：L1 单元在 `l1/workers.py`，val/test 执行在 `evaluation/workers.py`；`runtime/parallel.py` 只提供与业务无关的进程池/线程池。
+
+执行器继承自 ExpeL，但只保留 L1 修复循环实际使用的部分：静态 few-shot、Skill 以 rules 形式注入、逐步 prompt 构建。ExpeL 的轨迹检索、critique/规则学习和它自己的 reflection 循环已删除；`RepairAgent`（`l1/agent.py`）直接继承 `ReactAgent`。
+
+## 11. 冻结与来源
+
+`persistence/io.freeze` 对冻结身份逐字段比较，`code` 源码指纹除外：
+
+- 协议字段（split、config、prompt、模型、预算、验收模式等）任一变化都拒绝续跑，必须新建运行目录；
+- 只有源码指纹变化时默认拒绝；显式 `--allow-code-change` 后继续，并在冻结文件旁的 `code_changes.jsonl` 追加一条漂移记录（变更/新增/删除的文件、前后指纹），原 manifest 不改写。每次切换到与上一条记录不同的版本都会追加一条。
+
+**注意**：L2 的 Planner/Editor/Reviewer prompt、family discovery 与初始 Skill 合成 prompt、验收逻辑都只体现在源码指纹里，不在 manifest 的协议字段中。改动这些内容属于协议变更，必须新建运行目录；`--allow-code-change` 只用于不改变模型输入与判定的修复（崩溃、日志、性能）。当前代码不读取旧版本的工件格式；2026-10-08 之前产生的 run（包括 campaign）只能用产生它的代码续跑或审计。
+
+campaign（`skillexpand.campaign`）在 prepare 时把源码复制到 `<root>/code/src` 并写入冻结启动器 `<root>/code/run_campaign.py`；之后所有动作都经由冻结启动器运行冻结代码。`verify` 只以 `code/` 与 `inputs/` 的摘要为准；源码仓库的 Git 状态在 prepare 时记录，漂移只在 `check` 中报告，不再导致校验失败。
+
+修复只允许两种形式：在新的运行目录中重建，或通过 `--resume` / `--allow-code-change` 留下可审计的记录。
+
+## 12. 异常处理与断点恢复
+
+失败按类别处置：基础设施、模型输出、provider 拒绝、审校、配置、代码 bug。分类、处置表、重试与修复策略、单元失败记录统一在 `reliability/` 中定义。基础设施故障和模型输出修复用尽属于可重试失败；审校和配置问题会停止当前阶段；代码 bug 会立即停止整个流程。详见 [ERROR_HANDLING.md](ERROR_HANDLING.md)，其中包括新增异常类型时的扩展方法。
+

@@ -5,6 +5,8 @@ import time
 from pathlib import Path
 from langchain.callbacks.openai_info import OpenAICallbackHandler
 
+from skillexpand.reliability.errors import LedgerCorrupt
+
 class PersistentUsage(OpenAICallbackHandler):
     raise_error=True
     fields=('prompt_tokens','completion_tokens','total_tokens','successful_requests')
@@ -14,19 +16,19 @@ class PersistentUsage(OpenAICallbackHandler):
         self.previous=json.loads(self.path.read_text()) if self.path.exists() else {}
         request_path = self.path.with_suffix('.requests.jsonl')
         if request_path.exists():
-            from skillexpand.persistence.store import read_jsonl
+            from skillexpand.persistence.io import read_jsonl
             rows = read_jsonl(request_path)
             pending, finished = {}, set()
             totals = dict.fromkeys((*self.fields, 'started_requests', 'failed_requests'), 0)
             for row in rows:
                 if row['event'] == 'start':
                     if not row['run_id'] or row['run_id'] in pending or row['run_id'] in finished:
-                        raise ValueError('Duplicate or missing request ID in usage log')
+                        raise LedgerCorrupt('Duplicate or missing request ID in usage log')
                     pending[row['run_id']] = row
                     totals['started_requests'] += 1
                 else:
                     if row['event'] not in ('end', 'error', 'abandoned') or row['run_id'] not in pending:
-                        raise ValueError('Unmatched terminal event in usage log')
+                        raise LedgerCorrupt('Unmatched terminal event in usage log')
                     pending.pop(row['run_id'])
                     finished.add(row['run_id'])
                     if row['event'] in ('error', 'abandoned'):
@@ -49,7 +51,7 @@ class PersistentUsage(OpenAICallbackHandler):
             self.persist()
 
     def persist(self):
-        from skillexpand.l1.runner import save
+        from skillexpand.persistence.io import save
         values={k:self.previous.get(k,0)+getattr(self,k) for k in self.fields}
         values.update(started_requests=self.started,failed_requests=self.failed,
             usage_note='Provider-reported successful-response usage; failed or in-flight tokens may be unknown')

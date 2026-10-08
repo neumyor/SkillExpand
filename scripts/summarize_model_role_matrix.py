@@ -38,7 +38,7 @@ def test_artifact(condition_root, benchmark):
         task_id = int(row["task_id"])
         if task_id in scores:
             raise ValueError(f"{benchmark}: duplicate score for task {task_id}")
-        if type(row.get("success")) is not bool or row.get("error"):
+        if type(row.get("success")) is not bool or row.get("failure"):
             raise ValueError(f"{benchmark}: invalid score for task {task_id}")
         scores[task_id] = row["success"]
     failures = {int(task_id) for task_id in summary.get("routing_failures", [])}

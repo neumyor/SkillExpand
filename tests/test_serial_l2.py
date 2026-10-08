@@ -1,3 +1,4 @@
+from pathlib import Path
 """Offline integration checks of serial L2, real local SearchQA execution and resume."""
 
 import json
@@ -11,12 +12,18 @@ from unittest.mock import patch
 from omegaconf import OmegaConf
 from tests import test_experience_first as fixtures
 from tests.test_l1_repair import Model
-from skillexpand.persistence import artifacts as A
+from skillexpand.l1 import artifacts as A
 from skillexpand.l1 import cold_start as C
 from skillexpand import cli as evolve
 from skillexpand.l2 import loop as L
 from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
+from skillexpand.l1 import workers as LW
+from skillexpand.evaluation import workers as EW
+from skillexpand.reliability.errors import (
+    EnvironmentTimeout, ProviderUnavailable, RepairExhausted, StageIncomplete, UnitFailed,
+)
+from skillexpand.reliability.units import failure_record
 from skillexpand import schema as S
 from skillexpand.evaluation import validation as V
 from skillexpand.evaluation import routing as R
@@ -30,7 +37,21 @@ class SerialL2Tests(unittest.TestCase):
     setUp = fixtures.ExperienceFirstTests.setUp
     tearDown = fixtures.ExperienceFirstTests.tearDown
     ask = fixtures.ExperienceFirstTests.ask
-    units = fixtures.ExperienceFirstTests.units
+
+    def units(self, specs, worker, workers, on_result, **kw):
+        """Run L1 offline; a Skill-aware first attempt fails so v6 review can see a gap."""
+        output = []
+        for spec in specs:
+            self.executed.append(spec)
+            answers = (["Action 1: Finish[Honda]"] if spec.skill_aware else []) + \
+                ["Action 1: Finish[Toyota]"] * 8
+            with patch.object(PL, "_config", return_value=self.cfg), patch.object(
+                F, "LLM_CLS", side_effect=lambda **kw: Model(answers)
+            ):
+                item = worker(spec)
+            output.append(item)
+            on_result(item)
+        return output
     cold = fixtures.ExperienceFirstTests.cold
 
     def prepared(self, batch_size=1, **config):
@@ -38,9 +59,8 @@ class SerialL2Tests(unittest.TestCase):
         C.freeze(
             self.root / "config.json", OmegaConf.to_container(self.cfg, resolve=True)
         )
-        # These legacy integration tests exercise the card-review protocol.  The
-        # product default is the independent val-panel protocol; select the
-        # compatibility scope explicitly for this fixture.
+        # These integration tests exercise the card-review protocol; the product
+        # default is the independent val-panel protocol.
         config.setdefault("predicted_review_scope", "train_cards")
         return L.SerialEvolutionLoop(
             self.cfg,
@@ -107,12 +127,18 @@ class SerialL2Tests(unittest.TestCase):
             payload = json.loads(messages[-1].content)
             self.assertEqual(set(payload), {"current_skill_key", "current_rules", "candidates", "card"})
             entries = []
+            observed = payload["card"]["current_observed_outcome"]
             for c in payload["candidates"]:
                 good = tie or any("inspect" in r["text"] for r in c["rules"])
+                # An improving candidate succeeds where CURRENT did; otherwise both
+                # policies share CURRENT's observed outcome.
+                old = observed if observed != "unknown" else ("failure" if good else "unknown")
+                new = "success" if good else old
                 entries.append(
                     {
                         "id": c["id"],
-                        "label": "improve" if good else "unchanged",
+                        "old_outcome": old,
+                        "new_outcome": new,
                         "evidence_ids": [payload["card"]["evidence"][0]["id"]],
                         "rule_ids": c["changed_rule_ids"][:1],
                         "reason": "Inspection supplies the missing evidence check.",
@@ -128,7 +154,7 @@ class SerialL2Tests(unittest.TestCase):
     def run_offline(self, driver, **kwargs):
         editor, reviewer = self.hosts(driver, **kwargs)
 
-        def factory(cfg, path):
+        def factory(cfg, path, role=None):
             return reviewer if "reviewer-" in str(path) else editor
 
         with patch.object(F, "build_reasoning_host", side_effect=factory), patch.object(
@@ -145,7 +171,6 @@ class SerialL2Tests(unittest.TestCase):
         self.assertEqual(summary["review_approved_updates"], 1)
         self.assertFalse(summary["empirically_validated"])
         self.assertEqual(summary["val_executions"], 0)
-        self.assertEqual(driver.meta.head().version, 0)
         self.assertEqual(
             driver.skill_heads()[0].description, driver.initial[0].description
         )
@@ -188,7 +213,7 @@ class SerialL2Tests(unittest.TestCase):
                     "reason": "controlled test forecast",
                 })
 
-        def factory(cfg, path):
+        def factory(cfg, path, role=None):
             return Judge() if "predicted-" in str(path) else editor
 
         fake_routes = Routes()
@@ -239,7 +264,7 @@ class SerialL2Tests(unittest.TestCase):
                     "reason": "controlled coevolution forecast",
                 })
 
-        def factory(cfg, path):
+        def factory(cfg, path, role=None):
             if "predicted-" in str(path):
                 return Judge()
             if "reviewer-update-" in str(path):
@@ -247,7 +272,7 @@ class SerialL2Tests(unittest.TestCase):
             return editor
 
         def feedback_units(specs, worker, workers, on_result, **kwargs):
-            if worker is PL.execute_experience:
+            if worker is LW.execute_experience:
                 return self.units(specs, worker, workers, on_result, **kwargs)
             return self.fake_units(specs, worker, workers, on_result, **kwargs)
 
@@ -268,7 +293,7 @@ class SerialL2Tests(unittest.TestCase):
         self.assertEqual(update["rules"], [])
         self.assertIn("observed_rules", update["input_prompt"])
         self.assertEqual(update["raw_output"], "")
-        from scripts.check_fresh_campaign import evidence_hashes
+        from skillexpand.campaign import evidence_hashes
         before = evidence_hashes(self.root)
         restored = L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root), driver.config)
         with patch.object(F, "build_reasoning_host", side_effect=AssertionError("resume model")):
@@ -304,7 +329,7 @@ class SerialL2Tests(unittest.TestCase):
                     active -= 1
 
         reviewer.llm = overlapping
-        def factory(cfg, path):
+        def factory(cfg, path, role=None):
             return reviewer if "reviewer-" in str(path) else editor
 
         with patch.object(F, "build_reasoning_host", side_effect=factory), patch.object(
@@ -362,13 +387,12 @@ class SerialL2Tests(unittest.TestCase):
         def units(specs,worker,workers,on_result,**kw):
             for spec in specs:
                 with (patch.object(PL,'_config',return_value=self.cfg),
-                      patch.object(PL,'_embedder',return_value=None),
                       patch.object(F,'LLM_CLS',side_effect=lambda **kw:
                           Model(['Action 1: Search[Prius]','Action 2: Finish[Toyota]']))):
                     on_result(worker(spec))
 
         with patch.object(PL,'run_generic',side_effect=units), patch.object(
-                F,'build_reasoning_host',side_effect=lambda cfg,path:
+                F,'build_reasoning_host',side_effect=lambda cfg,path,role=None:
                     reviewer if 'reviewer-' in str(path) else editor):
             driver.run_evolutions(1)
         self.assertEqual(len(observed),1)
@@ -415,7 +439,8 @@ class SerialL2Tests(unittest.TestCase):
         entries = [
             {
                 "id": c["id"],
-                "label": "improve",
+                "old_outcome": "failure",
+                "new_outcome": "success",
                 "evidence_ids": ["E1"],
                 "rule_ids": [c["id"] + "R2"],
                 "reason": "changed mechanism",
@@ -428,7 +453,8 @@ class SerialL2Tests(unittest.TestCase):
         for key, value in [
             ("id", "C2"),
             ("id", []),
-            ("label", "solved"),
+            ("label", "improve"),
+            ("new_outcome", "solved"),
             ("evidence_ids", ["E999"]),
             ("rule_ids", ["C2R2"]),
             ("rule_ids", ["B1"]),
@@ -452,7 +478,8 @@ class SerialL2Tests(unittest.TestCase):
             "candidates": [
                 {
                     "id": "C1",
-                    "label": "regress",
+                    "old_outcome": "success",
+                    "new_outcome": "failure",
                     "evidence_ids": ["E1"],
                     "rule_ids": ["B2"],
                     "reason": "lost safeguard",
@@ -460,9 +487,7 @@ class SerialL2Tests(unittest.TestCase):
             ]
         }
         self.assertEqual(
-            CR.parse_card_review(json.dumps(raw), base, candidates, card)["C1"][
-                "label"
-            ],
+            CR.parse_card_review(json.dumps(raw), base, candidates, card)["C1"]["effect"],
             "regress",
         )
 
@@ -470,7 +495,7 @@ class SerialL2Tests(unittest.TestCase):
         candidates = [{"id": "C1", "body": "new"}]
         cards = [{"card_id": str(i)} for i in range(50)]
         units = {
-            c["card_id"]: {"C1": {"card_id": c["card_id"], "label": CR.LABELS[i % 4]}}
+            c["card_id"]: {"C1": {"card_id": c["card_id"], "effect": CR.EFFECTS[i % 4]}}
             for i, c in enumerate(cards)
         }
         result = CR.aggregate(candidates, cards, units)[0]
@@ -481,7 +506,7 @@ class SerialL2Tests(unittest.TestCase):
         self.assertEqual(result["unknown_fraction"], 12 / 50)
         with self.assertRaises(ValueError):
             CR.aggregate(candidates, cards, dict(list(units.items())[:-1]))
-        units["0"]["C1"]["label"] = "invalid"
+        units["0"]["C1"]["effect"] = "invalid"
         with self.assertRaises(ValueError):
             CR.aggregate(candidates, cards, units)
 
@@ -529,7 +554,7 @@ class SerialL2Tests(unittest.TestCase):
             calls[1],
         )
 
-    def test_one_invalid_card_holds_entire_batch_and_repairs_once(self):
+    def test_exhausted_card_review_fails_batch_retryably_and_resume_resamples(self):
         driver = self.prepared(batch_size=50)
         original = CR.CardReviewer.review
         calls = {}
@@ -542,11 +567,28 @@ class SerialL2Tests(unittest.TestCase):
             return original(reviewer, base, candidates, card, correction)
 
         with patch.object(CR.CardReviewer, "review", new=partly_invalid):
-            result = self.run_offline(driver)
+            with self.assertRaises(RepairExhausted) as raised:
+                self.run_offline(driver)
+        self.assertTrue(raised.exception.retryable)
         self.assertEqual(sorted(calls.values()), [1, 2])
-        self.assertEqual(result["invalid_batches"], 1)
-        self.assertEqual(result["review_approved_updates"], 0)
+        self.assertFalse(any((self.root / "l2_batches").glob("*.json")))
         self.assertEqual(driver.skill_heads()[0].version, 0)
+
+        # Resume replays both invalid responses without spending budget, then
+        # resamples with a correction; the valid card is not requested again.
+        first = next(iter(calls))
+        resumed = []
+
+        def record(reviewer, base, candidates, card, correction=None):
+            resumed.append((card["card_id"], correction is not None))
+            # The fixture's fake Reviewer checks the uncorrected payload shape.
+            return original(reviewer, base, candidates, card)
+
+        with patch.object(CR.CardReviewer, "review", new=record):
+            result = self.run_offline(driver)
+        self.assertEqual(resumed, [(first, True)])
+        self.assertEqual(result["completed_batches"], result["batches"])
+        self.assertEqual(len(list((self.root / "l2_proposals").glob("*/review-*-2.json"))), 1)
 
     def test_unknown_can_reverse_gain_and_equal_predictions_hold(self):
         def row(cid, net, unknown=0):
@@ -561,16 +603,15 @@ class SerialL2Tests(unittest.TestCase):
         self.assertIsNone(CR.choose([row("C1", 1), row("C2", 0, 2)])[0])
         self.assertIsNone(CR.choose([row("C1", 2), row("C2", 2)])[0])
 
-    def test_invalid_review_is_durable_hold(self):
+    def test_exhausted_review_is_never_journaled_as_a_hold(self):
         driver = self.prepared(batch_size=50)
         with patch.object(CR.CardReviewer, "review", return_value="not json"):
-            result = self.run_offline(driver)
-        self.assertEqual(result["invalid_batches"], 1)
+            with self.assertRaises(RepairExhausted):
+                self.run_offline(driver)
+        self.assertFalse(any((self.root / "l2_batches").glob("*.json")))
+        summary = json.loads((self.root / "summary.json").read_text())
+        self.assertEqual(summary["status"], "needs_attention")
         self.assertEqual(driver.skill_heads()[0].version, 0)
-        with patch.object(
-            F, "build_reasoning_host", side_effect=AssertionError("retry")
-        ):
-            self.assertEqual(driver.run(), result)
 
     def test_editor_enforces_frozen_description(self):
         driver = self.prepared()
@@ -578,12 +619,12 @@ class SerialL2Tests(unittest.TestCase):
             token_counter=len,
             llm=lambda *a, **k: json.dumps({"description": "changed", "body": "new"}),
         )
-        editor = ED.SkillEditor(host, driver.meta.head())
+        editor = ED.SkillEditor(host)
         edit = editor.propose(driver.initial[0], list(driver.cards.values()))
         self.assertIsNone(edit.candidate)
 
     def test_structured_mode_applies_single_edit_and_replays_audit(self):
-        from skillexpand.l2 import structured_skill as SS
+        from skillexpand import structured_skill as SS
         from skillexpand.l2.audit import audit_round
         driver = self.prepared(batch_size=50, skill_edit_mode='structured')
         _, reviewer = self.hosts(driver)
@@ -606,7 +647,7 @@ class SerialL2Tests(unittest.TestCase):
                 }]})
 
         editor = SimpleNamespace(token_counter=len, llm=planner_llm)
-        def factory(cfg, path):
+        def factory(cfg, path, role=None):
             return reviewer if 'reviewer-' in str(path) else editor
         with patch.object(PL, 'run_generic', side_effect=self.units), patch.object(
             F, 'build_reasoning_host', side_effect=factory
@@ -631,19 +672,15 @@ class SerialL2Tests(unittest.TestCase):
         driver = self.prepared(skill_edit_mode='structured')
         host = SimpleNamespace(token_counter=len,
                                llm=lambda *a, **kw: json.dumps({'body': 'rewrite everything'}))
-        editor = ED.SkillEditor(host, driver.meta.head(), skill_edit_mode='structured')
+        editor = ED.SkillEditor(host, skill_edit_mode='structured')
         outcome = editor.propose(driver.initial[0], list(driver.cards.values()))
         self.assertIsNone(outcome.candidate)
         self.assertEqual(outcome.reason, ED.REASON_NO_OPERATIONS)
 
     def test_cli_defaults_and_tail_batches(self):
-        driver = self.prepared()
         self.assertEqual(L.EvolutionConfig().candidate_count, 3)
         self.assertEqual(L.EvolutionConfig().batch_size, 50)
-        family = driver.initial[0].family_id
-        driver.plan = SimpleNamespace(families={family: list(range(123))})
-        driver.config.batch_size = 50
-        self.assertEqual([len(b["task_ids"]) for b in driver.batches()], [50, 50, 23])
+        self.assertEqual([len(b) for b in L.family_task_batches(range(123), 50)], [50, 50, 23])
         self.assertEqual(
             evolve.build_parser().parse_args(["--run-dir", "x"]).candidate_count, 3
         )
@@ -652,7 +689,7 @@ class SerialL2Tests(unittest.TestCase):
         driver = self.prepared(batch_size=1)
         editor, reviewer = self.hosts(driver)
 
-        def factory(cfg, path):
+        def factory(cfg, path, role=None):
             return reviewer if "reviewer-" in str(path) else editor
 
         with patch.object(PL, "run_generic", side_effect=self.units), patch.object(
@@ -679,7 +716,7 @@ class SerialL2Tests(unittest.TestCase):
     def test_partial_round_resume_and_extend_use_real_l1(self):
         driver = self.prepared(batch_size=1)
         editor, reviewer = self.hosts(driver)
-        def factory(cfg, path):
+        def factory(cfg, path, role=None):
             return reviewer if 'reviewer-' in str(path) else editor
         original = driver._run_batch
         calls = []
@@ -692,6 +729,12 @@ class SerialL2Tests(unittest.TestCase):
                 F, 'build_reasoning_host', side_effect=factory), patch.object(driver, '_run_batch', side_effect=crash):
             with self.assertRaises(TimeoutError):
                 driver.run_evolutions(1)
+        failed = json.loads((self.root/'summary.json').read_text())
+        self.assertEqual(failed['status'], 'needs_attention')
+        self.assertEqual(failed['evolution_round'], 1)
+        self.assertEqual(failed['batches'], len(json.loads(
+            (self.root/'evolution/round-1/batches.json').read_text())))
+        self.assertEqual(failed['completed_batches'], 1)
         frozen = (self.root/'evolution/round-1/input.json').read_bytes()
         resumed = L.SerialEvolutionLoop(driver.cfg, driver.plan, L.LoopPaths(self.root), driver.config)
         with patch.object(PL, 'run_generic', side_effect=AssertionError('L1 repeated')), patch.object(
@@ -721,7 +764,9 @@ class SerialL2Tests(unittest.TestCase):
         driver = self.prepared(batch_size=50)
         def interrupted(specs, worker, workers, on_result, **kw):
             self.units(specs[:1], worker, workers, on_result, **kw)
-            on_result({'task_id': specs[1].task_id, 'ok': False, 'error': 'timeout'})
+            on_result({'task_id': specs[1].task_id, 'ok': False,
+                       'failure': failure_record(EnvironmentTimeout('timeout'),
+                                                 unit_id=specs[1].task_id, stage='l1')})
         with patch.object(PL, 'run_generic', side_effect=interrupted), patch.object(
                 F, 'build_reasoning_host', side_effect=AssertionError('L2 before complete L1')):
             with self.assertRaisesRegex(RuntimeError, 'L1 interrupted'):
@@ -733,7 +778,7 @@ class SerialL2Tests(unittest.TestCase):
             self.assertEqual([s.task_id for s in specs], [1])
             return self.units(specs, *args, **kw)
         with patch.object(PL, 'run_generic', side_effect=remaining), patch.object(
-                F, 'build_reasoning_host', side_effect=lambda cfg, path:
+                F, 'build_reasoning_host', side_effect=lambda cfg, path, role=None:
                     reviewer if 'reviewer-' in str(path) else editor):
             driver.run()
         self.assertEqual((self.root/'evolution/round-1/cards/0.json').read_bytes(), saved)
@@ -745,7 +790,7 @@ class SerialL2Tests(unittest.TestCase):
         checkpoint = self.root/'evolution/round-1/trials/0.json'
         saved = checkpoint.read_text()
         data = json.loads(saved)
-        data['trials'][0]['success'] = False
+        data['trials'][0]['success'] = not data['trials'][0]['success']
         checkpoint.write_text(json.dumps(data))
         with self.assertRaises(ValueError):
             audit_round(self.root, 1)
@@ -762,7 +807,7 @@ class SerialL2Tests(unittest.TestCase):
         target = self.root.parent / "cli-import"
         editor, reviewer = self.hosts(driver)
 
-        def factory(cfg, path):
+        def factory(cfg, path, role=None):
             return reviewer if "reviewer-" in str(path) else editor
 
         with patch.object(F, "build_reasoning_host", side_effect=factory), patch.object(
@@ -800,18 +845,81 @@ class SerialL2Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'summary differs'):
             audit_test(target, final_dir)
 
+    def test_snapshot_reuses_frozen_routes(self):
+        import importlib.util
+        from skillexpand.evaluation.routing import FrozenRoutes
+        from skillexpand.evaluation.snapshots import evaluate_library
+
+        spec = importlib.util.spec_from_file_location(
+            "evaluate_snapshot", Path(__file__).resolve().parents[1] / "scripts/evaluate_snapshot.py")
+        ES = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ES)
+        driver = self.prepared()
+        with patch.object(PL, "run_generic", side_effect=self.fake_units):
+            canonical = evolve.test_evaluate(self.cfg, driver.plan, self.root, 1)
+        skills = ES.snapshot(self.root, driver.initial, driver.plan, 0)
+        routes = FrozenRoutes(self.cfg, driver.plan, driver.initial, self.root / "routes",
+                              S.SPLIT_TEST, 1).run()
+        with patch.object(PL, "run_generic", side_effect=self.fake_units):
+            result = evaluate_library(self.cfg, driver.plan, self.root, skills, driver.initial,
+                                      routes, self.root.parent / "snapshot-0", 1,
+                                      summary_extra={"evolution_round": 0})
+        self.assertEqual(result["successes"], canonical["successes"])
+        self.assertEqual(result["evolution_round"], 0)
+
+    def test_snapshot_evaluation_continues_after_one_group_fails(self):
+        from types import SimpleNamespace
+        from skillexpand.evaluation import snapshots as SN
+
+        skills = [S.Skill(f"searchqa.{f}", f, 0, f, "d", "b", S.Provenance(rationale="t"))
+                  for f in ("family-a", "family-b")]
+        routes = SimpleNamespace(groups={skills[0].skill_id: (1,), skills[1].skill_id: (2,)},
+                                 fingerprint="f", failed_task_ids=())
+        calls = []
+
+        class Scorer:
+            protocol_hash = "h"
+
+            def __init__(self, *args):
+                pass
+
+            def score(self, skill, task_ids, panel):
+                calls.append(skill.skill_id)
+                if skill.skill_id == skills[0].skill_id:
+                    raise StageIncomplete("provider down", [failure_record(
+                        ProviderUnavailable("down"), unit_id=1, stage="fixed-execution")])
+                return SimpleNamespace(n=1, successes=1, score=1.0)
+
+        target = self.root / "snapshot-flaky"
+        with patch.object(SN, "FixedSkillScorer", Scorer), \
+                patch.object(SN, "provider_signature", return_value="p"):
+            with self.assertRaisesRegex(RuntimeError, "failed groups"):
+                SN.evaluate_library(self.cfg, None, self.root, skills, skills, routes, target, 1)
+        self.assertEqual(calls, [s.skill_id for s in skills])
+        progress = json.loads((target / "progress.json").read_text())
+        self.assertEqual([f["skill_id"] for f in progress["failed_skills"]], [skills[0].skill_id])
+        self.assertIn(skills[1].skill_id, progress["completed_skills"])
+        self.assertTrue((target / "skills" / f"{skills[1].skill_id}.json").exists())
+        self.assertFalse((target / "summary.json").exists())
+
+        calls.clear()
+
+        class Buggy(Scorer):
+            def score(self, skill, task_ids, panel):
+                calls.append(skill.skill_id)
+                raise UnitFailed(failure_record(KeyError("bug"), unit_id=1, stage="x"))
+
+        with patch.object(SN, "FixedSkillScorer", Buggy), \
+                patch.object(SN, "provider_signature", return_value="p"):
+            with self.assertRaises(UnitFailed):
+                SN.evaluate_library(self.cfg, None, self.root, skills, skills, routes,
+                                    self.root / "snapshot-bug", 1)
+        self.assertEqual(calls, [skills[0].skill_id])
+
     def test_failed_executor_keeps_partial_events(self):
         driver = self.prepared()
         skill = driver.initial[0]
-        spec = PL.UnitSpec(
-            "partial",
-            "searchqa",
-            2,
-            S.ROLE_EVAL,
-            S.ARM_EVAL,
-            S.MODE_CONSOLIDATED_DIRECT,
-            "none",
-            skill_key=skill.key,
+        spec = EW.FixedSpec("partial", "searchqa", 2, skill_key=skill.key,
             skill_body=skill.body,
         )
 
@@ -832,8 +940,8 @@ class SerialL2Tests(unittest.TestCase):
         with patch.object(PL, "_config", return_value=self.cfg), patch.object(
             F, "build_agent", return_value=agent
         ), patch("skillexpand.l1.adapters.resolve", return_value=adapter):
-            result = PL.execute_fixed(spec)
-        self.assertIn("provider disconnected", result["error"])
+            result = EW.execute_fixed(spec)
+        self.assertIn("provider disconnected", result["failure"]["message"])
         self.assertEqual(result["steps"], 1)
         self.assertEqual(len(result["events"]), 1)
         self.assertIn("Toyota evidence", result["trajectory"])
@@ -850,9 +958,9 @@ class SerialL2Tests(unittest.TestCase):
                         "skill_id": spec.descriptions[0]["skill_id"],
                         "raw": "SKILL: " + spec.descriptions[0]["skill_id"],
                     },
-                    "error": None,
+                    "failure": None,
                 }
-            elif worker is PL.execute_fixed:
+            elif worker is EW.execute_fixed:
                 item = {
                     "task_id": spec.task_id,
                     "success": spec.skill_body.startswith("NEW"),
@@ -860,7 +968,7 @@ class SerialL2Tests(unittest.TestCase):
                                 {"success": spec.skill_body.startswith("NEW")}}],
                     "steps": 1,
                     "skill_key": spec.skill_key,
-                    "error": None,
+                    "failure": None,
                 }
             else:
                 raise AssertionError("L2 must not collect or execute train tasks")
@@ -909,7 +1017,7 @@ class SerialL2Tests(unittest.TestCase):
                                 one.skill_id if s.task_id == 1 else two.skill_id
                             ),
                         },
-                        "error": None,
+                        "failure": None,
                     }
                 )
 
@@ -951,15 +1059,7 @@ class SerialL2Tests(unittest.TestCase):
             models.append(obj)
             return obj
 
-        spec = PL.UnitSpec(
-            "fixed",
-            "searchqa",
-            2,
-            S.ROLE_EVAL,
-            S.ARM_EVAL,
-            S.MODE_CONSOLIDATED_DIRECT,
-            "none",
-            skill_key=skill.key,
+        spec = EW.FixedSpec("fixed", "searchqa", 2, skill_key=skill.key,
             skill_body=skill.body,
         )
         with (
@@ -971,7 +1071,7 @@ class SerialL2Tests(unittest.TestCase):
                 side_effect=AssertionError("No routing during measurement"),
             ),
         ):
-            result = PL.execute_fixed(spec)
+            result = EW.execute_fixed(spec)
         self.assertTrue(result["success"], result)
         self.assertIn("Finish[Toyota]", result["trajectory"])
         self.assertTrue(result["events"])
@@ -984,7 +1084,8 @@ class SerialL2Tests(unittest.TestCase):
 
         def broken(specs, worker, workers, on_result, **kw):
             for spec in specs:
-                on_result({"task_id": spec.task_id, "error": "offline"})
+                on_result({"task_id": spec.task_id, "failure": failure_record(ProviderUnavailable("offline"),
+                                                     unit_id=spec.task_id, stage="routing")})
 
         routes = R.FrozenRoutes(
             self.cfg, driver.plan, driver.initial, root, "val"
@@ -1011,15 +1112,7 @@ class SerialL2Tests(unittest.TestCase):
     def test_fixed_executor_reports_service_error_instead_of_task_failure(self):
         driver = self.prepared()
         skill = driver.initial[0]
-        spec = PL.UnitSpec(
-            "error",
-            "searchqa",
-            2,
-            S.ROLE_EVAL,
-            S.ARM_EVAL,
-            S.MODE_CONSOLIDATED_DIRECT,
-            "none",
-            skill_key=skill.key,
+        spec = EW.FixedSpec("error", "searchqa", 2, skill_key=skill.key,
             skill_body=skill.body,
         )
         with (
@@ -1028,8 +1121,8 @@ class SerialL2Tests(unittest.TestCase):
                 F, "build_agent", side_effect=RuntimeError("service unavailable")
             ),
         ):
-            result = PL.execute_fixed(spec)
-        self.assertIn("service unavailable", result["error"])
+            result = EW.execute_fixed(spec)
+        self.assertIn("service unavailable", result["failure"]["message"])
 
     def test_final_routing_failure_remains_in_overall_denominator(self):
         driver = self.prepared()
@@ -1040,7 +1133,7 @@ class SerialL2Tests(unittest.TestCase):
                     {
                         "task_id": spec.task_id,
                         "selection": {"ok": False, "skill_id": ""},
-                        "error": None,
+                        "failure": None,
                     }
                 )
 
@@ -1050,6 +1143,21 @@ class SerialL2Tests(unittest.TestCase):
         self.assertEqual(result["tasks"], 1)
         self.assertEqual(result["routing_failures"], [3])
         self.assertIsNone(result["per_skill"][driver.initial[0].skill_id]["score"])
+
+    def test_cold_start_requires_card_hash_file(self):
+        self.prepared()
+        (self.root / "discovery/card_hashes.json").unlink()
+        with self.assertRaises(FileNotFoundError):
+            A.load_cold_start(self.root)
+
+    def test_l1_failure_summary_names_the_failing_round(self):
+        driver = self.prepared()
+        with patch.object(driver, "_collect_evolution_cards", side_effect=TimeoutError("L1 down")):
+            with self.assertRaises(TimeoutError):
+                driver.run_evolutions(1)
+        failed = json.loads((self.root / "summary.json").read_text())
+        self.assertEqual((failed["status"], failed["evolution_round"]), ("needs_attention", 1))
+        self.assertNotIn("completed_batches", failed)
 
     def test_swapping_val_and_test_cannot_change_frozen_protocol(self):
         self.prepared()

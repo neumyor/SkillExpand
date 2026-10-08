@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 from skillexpand.l2 import reviewer_coevolution as RC
 from skillexpand.l2.loop import EvolutionConfig, SerialEvolutionLoop
-from skillexpand.runtime import reviewer_retry as RR
+from skillexpand.reliability import errors as RE
+from skillexpand.reliability import retry as RR
+from skillexpand.reliability.policies import RepairPolicy
 
 
 def outcome(task_id, success, note=""):
@@ -138,17 +140,19 @@ def test_rule_update_recovers_many_bad_responses_with_identical_prompt(monkeypat
 
 def test_output_error_exhaustion_does_not_swallow_programming_errors(monkeypatch):
     monkeypatch.setattr(RR.time, "sleep", lambda _: None)
-    with pytest.raises(RR.ReviewerUpdateError, match="after 6 attempts"):
-        RR.retry_reviewer(lambda: '{"rules":false}',
-                          lambda raw: RC.parse_update_rules(raw, ["real-id"]), attempts=6)
+    policy = RepairPolicy("test", 6)
+    with pytest.raises(RE.RepairExhausted, match="after 6 attempts") as exhausted:
+        RR.call_with_repair(policy, RR.fresh(lambda: '{"rules":false}'),
+                            lambda raw: RC.parse_update_rules(raw, ["real-id"]))
+    assert exhausted.value.retryable and len(exhausted.value.failures) == 6
     with pytest.raises(AttributeError):
-        RR.retry_reviewer(lambda: (_ for _ in ()).throw(AttributeError("bad host")),
-                          lambda raw: raw, attempts=6)
+        RR.call_with_repair(policy, RR.fresh(lambda: (_ for _ in ()).throw(AttributeError("bad host"))),
+                            lambda raw: raw)
 
 
 def test_feedback_ids_are_a_list_and_unknown_ids_remain_invalid():
     for ids in ("real-id", ["unknown-id"], [], [123]):
-        with pytest.raises(RR.ReviewerOutputError):
+        with pytest.raises(RE.SchemaViolation):
             RC.parse_update_rules(json.dumps({"rules": [
                 {"rule_id": "r", "text": "valid text", "feedback_ids": ids}
             ]}), ["real-id"])

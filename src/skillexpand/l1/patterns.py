@@ -3,8 +3,11 @@ import json
 
 from langchain.schema import HumanMessage, SystemMessage
 
-from skillexpand.l1.family_discovery import _extract_json
+from skillexpand.runtime.json_output import extract_json
 from skillexpand.l1.protocol import projection
+from skillexpand.reliability.policies import repair_policy
+from skillexpand.reliability.retry import call_with_repair, fresh
+from skillexpand.reliability.errors import JournalConflict
 
 PROMPT = '''Find zero or more recurring behavioral patterns in this batch of task cards.
 Each pattern must name its distinct supporting cards and exact evidence IDs. Include
@@ -24,7 +27,7 @@ def batch_view(experiences):
 
 def parse(raw, experiences):
     cards = {e.experience_id: e for e in experiences}
-    value = _extract_json(raw)
+    value = extract_json(raw)
     rows = value['patterns']
     if not isinstance(rows, list) or len(rows) > 3:
         raise ValueError('At most three batch patterns')
@@ -53,26 +56,30 @@ def parse(raw, experiences):
 
 
 def generate(host, experiences):
-    raw = host.llm([SystemMessage(content=PROMPT),
-                    HumanMessage(content=json.dumps(batch_view(experiences), ensure_ascii=False))],
-                   replace_newline=False)
-    try:
-        patterns = parse(raw, experiences)
-        status = 'valid'
-    except (ValueError, KeyError, TypeError, AttributeError):
-        patterns, status = [], 'invalid'
-    return {'raw': raw, 'patterns': patterns, 'status': status}
+    responses = []
+
+    def request():
+        responses.append(host.llm(
+            [SystemMessage(content=PROMPT),
+             HumanMessage(content=json.dumps(batch_view(experiences), ensure_ascii=False))],
+            replace_newline=False))
+        return responses[-1]
+
+    result = call_with_repair(repair_policy('patterns.batch'), fresh(request),
+                              lambda raw: parse(raw, experiences))
+    status = 'invalid' if result.degraded else 'valid'
+    return {'raw': responses[-1], 'patterns': result.value or [], 'status': status}
 
 
 def validate_cache(result, experiences, card_hashes=None):
     if card_hashes is not None and result['card_hashes'] != card_hashes:
-        raise ValueError('Batch pattern input changed')
+        raise JournalConflict('Batch pattern input changed')
     status = result['status']
     if status == 'valid':
         if parse(result['raw'], experiences) != result['patterns']:
-            raise ValueError('Batch pattern evidence changed')
+            raise JournalConflict('Batch pattern evidence changed')
     elif status not in ('invalid', 'insufficient_cards') or result['patterns']:
-        raise ValueError('Invalid batch pattern cache')
+        raise JournalConflict('Invalid batch pattern cache')
     if status == 'insufficient_cards' and len(experiences) != 1:
-        raise ValueError('Batch pattern card count changed')
+        raise JournalConflict('Batch pattern card count changed')
     return result['patterns']

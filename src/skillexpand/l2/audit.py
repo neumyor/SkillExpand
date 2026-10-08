@@ -4,42 +4,37 @@ import json
 from pathlib import Path
 
 from skillexpand import schema as S
-from skillexpand.l1.runner import save
+from skillexpand.persistence.io import require, save
+from skillexpand.persistence import io as IO
 from skillexpand.persistence import store as ST
+from skillexpand.reliability.errors import StoreError
 from skillexpand.l2.editor import SkillEditor
 from skillexpand.l2.update import SkillPatchRunner
 from skillexpand.l2.card_review import OUTCOMES as CR_OUTCOMES
-from skillexpand.l2.patterns import validate_cache
+from skillexpand.l1.patterns import validate_cache
 from skillexpand.l1.audit import audit_checkpoint
 from skillexpand.l1.adapters import resolve
 from omegaconf import OmegaConf
-from skillexpand.l2 import structured_skill as SS
+from skillexpand import structured_skill as SS
 from skillexpand.l2 import reviewer_coevolution as RC
 
 
-def require(condition, message):
-    if not condition:
-        raise ValueError(message)
 
 
 def audit_batch(root, batch, base, cards):
     """Replay cached decisions without any model, environment, or file writes."""
     root = Path(root)
-    records = ST.read_jsonl(root / 'meta_skills.jsonl', repair_tail=False)
-    require(len(records) == 1 and records[0]['version'] == 0, 'L3 must stay frozen')
-    meta = S.from_dict(S.MetaSkill, records[0])
     protocol = json.loads((root / 'l2_manifest.json').read_text())
-    mode = protocol['config'].get('skill_edit_mode', 'rewrite')
-    acceptance_mode = protocol['config'].get('acceptance_mode', 'predicted')
-    predicted_scope = protocol['config'].get('predicted_review_scope', 'val')
-    require(protocol.get('acceptance_mode', acceptance_mode) == acceptance_mode,
-            'L2 manifest acceptance mode disagrees with frozen config')
+    config = protocol['config']
+    mode = config['skill_edit_mode']
+    acceptance_mode = config['acceptance_mode']
+    predicted_scope = config['predicted_review_scope']
     runner = SkillPatchRunner(
-        SkillEditor(None, meta, skill_edit_mode=mode), None,
+        SkillEditor(None, skill_edit_mode=mode), None,
         root / 'l2_proposals', read_only=True,
         acceptance_mode=acceptance_mode,
         predicted_review_scope=predicted_scope,
-        single_candidate=protocol['config'].get('single_candidate', False),
+        single_candidate=config['single_candidate'],
     )
     pattern_path = root / 'l2_patterns' / (batch['batch_id'] + '.json')
     patterns = json.loads(pattern_path.read_text())
@@ -56,9 +51,8 @@ def audit_batch(root, batch, base, cards):
     require(batch.get('candidate') == (S.to_dict(result.candidate) if result.candidate else None),
             'committed candidate differs from replayed decision')
     if acceptance_mode == 'predicted' and predicted_scope == 'train_cards':
-        # v6 predicted review is a paired-outcome protocol.  Keep the derived
-        # effect for selection, but require the raw old/new outcomes to remain
-        # auditable in every card judgment.
+        # Card review is a paired-outcome protocol: the effect is derived, so the
+        # raw old/new outcomes must stay auditable in every card judgment.
         for review in result.record.get('reviews', ()):
             for judgment in review.get('judgments', ()):
                 require(judgment.get('old_outcome') in CR_OUTCOMES and
@@ -124,7 +118,7 @@ def audit_batch(root, batch, base, cards):
             replayed = SS.render(SS.apply_edit(SS.from_legacy(base.body), operation))
             require(replayed == candidate.skill.body,
                     'structured candidate body does not match its recorded operation')
-    if protocol['config'].get('single_candidate', False):
+    if protocol['config']['single_candidate']:
         require(batch.get('single_candidate') is True,
                 'single-candidate protocol missing from batch journal')
         require(batch.get('requested_candidates') == 1,
@@ -148,10 +142,8 @@ def audit_round(root, round_index):
     require(manifest['task_ids'] == train == inputs['task_ids'], 'round/train coverage mismatch')
     heads = {s['family_id']: S.from_dict(S.Skill, s) for s in inputs['skills']}
     protocol = json.loads((root / 'l2_manifest.json').read_text())
-    expected_acceptance_mode = protocol['config'].get('acceptance_mode', 'predicted')
-    expected_predicted_scope = protocol['config'].get('predicted_review_scope', 'val')
-    require(protocol.get('acceptance_mode', expected_acceptance_mode) == expected_acceptance_mode,
-            'L2 manifest acceptance mode disagrees with frozen config')
+    expected_acceptance_mode = protocol['config']['acceptance_mode']
+    expected_predicted_scope = protocol['config']['predicted_review_scope']
     require(expected_predicted_scope in ('val', 'train_cards'),
             'unknown predicted review scope in frozen config')
     require(inputs['round'] == manifest['round'] == round_index, 'round identity mismatch')
@@ -301,7 +293,7 @@ def audit_round(root, round_index):
         expected_mode = expected_acceptance_mode
         require(summary.get('acceptance_mode') == expected_mode,
                 'summary acceptance mode mismatch')
-        require(summary.get('predicted_review_scope', 'val') == expected_predicted_scope,
+        require(summary.get('predicted_review_scope') == expected_predicted_scope,
                 'summary predicted review scope mismatch')
         if expected_mode == 'predicted':
             require(summary.get('val_executions') == 0,
@@ -329,8 +321,8 @@ def audit_round(root, round_index):
     if protocol['config'].get('reviewer_update_mode', 'none') != 'none':
         # Later rounds append to shared ledgers. A historical round audit must
         # replay the evidence available at its boundary, even during resume.
-        all_feedback = RC.read_jsonl(root / 'reviewer_feedback.jsonl')
-        all_updates = RC.read_jsonl(root / 'reviewer_updates.jsonl')
+        all_feedback = IO.read_jsonl(root / 'reviewer_feedback.jsonl', repair_tail=False)
+        all_updates = IO.read_jsonl(root / 'reviewer_updates.jsonl', repair_tail=False)
         known_rounds = {int(json.loads(path.read_text())['round'])
                         for path in (root / 'evolution').glob('round-*/input.json')}
         RC.validate_feedback_records(all_feedback, strict=True)
@@ -479,7 +471,7 @@ def main():
         result = dict(integrity='passed', **audit_round(args.run_dir, args.round))
         save(args.output, result)
         print(json.dumps(result))
-    except (OSError, ValueError, KeyError, TypeError, ST.StoreError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, StoreError) as exc:
         result = {'integrity': 'failed', 'error': str(exc)}
         save(args.output, result)
         print(json.dumps(result))

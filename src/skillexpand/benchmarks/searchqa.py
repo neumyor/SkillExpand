@@ -1,15 +1,73 @@
 import re
 import string
 from typing import Tuple
-import time
 from typing import Any
 
 from langchain import Wikipedia
 from langchain.agents.react.base import DocstoreExplorer
 
 from skillexpand.benchmarks.base import BaseEnv
-from skillexpand.runtime.utils import parse_action
-from skillexpand.runtime.utils import EM
+
+
+def parse_action(string: str):
+    """
+    Parse action string into action type and argument for HotpotQA and Fever.
+\x20\x20\x20\x20
+    Args:
+        string: action string
+\x20\x20\x20\x20
+    Returns:
+        action_type: action type
+        argument: argument
+    """
+    pattern = r'^(\w+)\[(.+)\]$'
+    match = re.match(pattern, string)
+
+    if match:
+        action_type = match.group(1)
+        argument = match.group(2)
+        return action_type, argument
+
+    else:
+        return None, None
+
+def normalize_answer(s: str):
+    """
+    Lower text and remove punctuation, articles and extra whitespace.
+\x20\x20\x20\x20
+    Args:
+        s: string to normalize
+
+    Returns:
+        normalized string
+    """
+    def remove_articles(text):
+        return re.sub(r"\b(a|an|the)\b", " ", text)
+
+    def white_space_fix(text):
+        return " ".join(text.split())
+
+    def remove_punc(text):
+        exclude = set(string.punctuation)
+        return "".join(ch for ch in text if ch not in exclude)
+
+    def lower(text):
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+def EM(answer, key) -> bool:
+    """
+    Exact match between answer and key.
+
+    Args:
+        answer: answer
+        key: key
+\x20\x20\x20\x20
+    Returns:
+        True if exact match, else False
+    """
+    return normalize_answer(answer) == normalize_answer(key)
 
 
 class ContextExplorer:
@@ -83,7 +141,7 @@ class QAEnv(BaseEnv):
             if self.success_fn():
                 observation = 'Answer is CORRECT'
             else:
-                observation = f'Answer is INCORRECT'
+                observation = 'Answer is INCORRECT'
             self.terminated = True
         elif action_type == 'Search':
             # Provider/tool failure is an interrupted unit, never task evidence.
@@ -92,7 +150,7 @@ class QAEnv(BaseEnv):
             try:
                 observation = self.explorer.lookup(argument).strip('\n').strip()
             except ValueError:
-                observation = f'The last page Searched was not found, so you cannot Lookup a keyword in it. Please try one of the similar pages given.'
+                observation = 'The last page Searched was not found, so you cannot Lookup a keyword in it. Please try one of the similar pages given.'
         else:
             observation = 'Invalid Action. Valid Actions are Lookup[<topic>] Search[<topic>] and Finish[<answer>].'
 

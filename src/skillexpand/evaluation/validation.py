@@ -3,7 +3,6 @@
 import json
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -11,26 +10,17 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
 from skillexpand import schema as S
-from skillexpand.persistence.artifacts import provider_signature
-from skillexpand.runtime.reviewer_retry import ReviewerOutputError, retry_reviewer
+from skillexpand.evaluation import workers as EW
+from skillexpand.runtime.models.llm import provider_signature
+from skillexpand.reliability.errors import InvalidInput, JournalConflict, StageIncomplete
+from skillexpand.reliability.policies import repair_policy
+from skillexpand.reliability.retry import call_with_repair, fresh
+from skillexpand.reliability.units import FailureCollector, map_units
 
 #: Why a validation run failed to produce a usable score.
 REASON_NOT_MEASURED = "validation_not_measured"
-REASON_NO_GAIN = "no_validation_gain"
 REASON_WORSE = "validation_score_dropped"
 REASON_TIE = "validation_score_tied"
-REASON_EMPTY_PANEL = "empty_validation_panel"
-
-
-def canonical_patch_body(body: str) -> str:
-    """Normalize incidental whitespace for exact candidate duplicate detection."""
-    lines = [line.strip() for line in (body or "").splitlines()]
-    return "\n".join(line for line in lines if line)
-
-
-def patch_hash(body: str) -> str:
-    """Content hash of a patch's resulting body, for the duplicate guard."""
-    return S.content_hash(canonical_patch_body(body))
 
 
 class ScoreCache:
@@ -93,7 +83,7 @@ class ScoreCache:
     def _replay(self) -> None:
         if not self.path.exists():
             return
-        from skillexpand.persistence.store import read_jsonl
+        from skillexpand.persistence.io import read_jsonl
 
         for record in read_jsonl(self.path):
             key = record.get("cache_key")
@@ -101,29 +91,26 @@ class ScoreCache:
                 self._by_key[key] = record
 
 
-class PredictedValidationError(RuntimeError):
-    """A predicted-validation panel with task-local failures.
+class PredictedValidationError(StageIncomplete):
+    """A predicted-validation panel with retryable task-local failures.
 
-    Successful tasks are already durable in ``ScoreCache``.  Keeping the failed
-    task IDs on the exception lets the stage supervisor retry the missing work
-    instead of treating the whole panel as an opaque, non-resumable failure.
+    Successful tasks are already durable in ``ScoreCache``; a resumed stage
+    requests only ``failed_task_ids``.
     """
 
     def __init__(self, errors: Sequence[Dict[str, Any]], expected_task_ids: Sequence[int]):
-        self.errors = tuple(dict(error) for error in errors)
-        self.failed_task_ids = tuple(sorted(int(error["task_id"]) for error in self.errors))
-        self.expected_task_ids = tuple(sorted(int(task_id) for task_id in expected_task_ids))
+        errors = tuple(dict(error) for error in errors)
         details = ", ".join(
-            f"{item['task_id']}:{item.get('error', 'unknown error')}"
-            for item in self.errors[:3]
+            f"{item['unit_id']}:{item['type']}: {item['message']}" for item in errors[:3]
         )
-        omitted = len(self.errors) - 3
+        omitted = len(errors) - 3
         if omitted > 0:
             details += f", ... ({omitted} more; see evaluation_errors)"
         super().__init__(
-            f"Incomplete predicted validation ({len(self.errors)} failed task(s)"
-            f"): {details}"
-        )
+            f"Incomplete predicted validation ({len(errors)} failed task(s)): {details}", errors)
+        self.errors = errors
+        self.failed_task_ids = tuple(sorted(int(error["unit_id"]) for error in errors))
+        self.expected_task_ids = tuple(sorted(int(task_id) for task_id in expected_task_ids))
 
 
 @dataclass
@@ -169,7 +156,7 @@ class PanelScore:
             skill_key=self.skill_key,
             outcomes=self.outcomes,
             executor_fresh=True,
-            experience_withheld=(fewshot_strategy == F.FEWSHOT_NONE),
+            experience_withheld=(fewshot_strategy == "none"),
             fewshot_strategy=fewshot_strategy,
         )
 
@@ -242,13 +229,12 @@ class FixedSkillScorer:
         task_ids,
         panel_key,
         role=S.ROLE_EVAL,
-        mode=S.MODE_CONSOLIDATED_DIRECT,
     ):
         task_ids = tuple(sorted(task_ids))
         if len(set(task_ids)) != len(task_ids) or not set(task_ids) <= set(
             self.routes.groups[skill.skill_id]
         ):
-            raise ValueError(
+            raise JournalConflict(
                 "Evaluation tasks must belong to this Skill frozen route group"
             )
         # Description does not enter execution. Equal bodies share identical measurements,
@@ -272,14 +258,10 @@ class FixedSkillScorer:
                 records[t] = hit
             else:
                 pending.append(
-                    PL.UnitSpec(
+                    EW.FixedSpec(
                         unit_id=keys[t],
                         benchmark=self.benchmark,
                         task_id=t,
-                        role=role,
-                        arm_id=S.ARM_EVAL,
-                        mode=mode,
-                        fewshot_strategy="none",
                         skill_key=skill.key,
                         skill_body=skill.body,
                         usage_path=str(
@@ -288,20 +270,16 @@ class FixedSkillScorer:
                     )
                 )
         cached = len(records)
-        errors = []
+        collector = FailureCollector("fixed-execution",
+                                     self.cache.path.parent / "evaluation_errors")
 
         def sink(record):
-            from skillexpand.l1.runner import save
-
             t = record["task_id"]
             if t not in keys or t in records:
-                raise ValueError("Duplicate or unexpected evaluation task")
-            if record.get("error"):
-                save(
-                    self.cache.path.parent / "evaluation_errors" / (keys[t] + ".json"),
-                    record,
-                )
-                errors.append(record)
+                raise JournalConflict("Duplicate or unexpected evaluation task")
+            if record.get("failure"):
+                # Partial events stay with the failure as evidence, never as a score.
+                collector.record(record["failure"], keys[t], evidence=record)
                 return
             stored = dict(
                 record,
@@ -313,11 +291,10 @@ class FixedSkillScorer:
             self.cache.put(keys[t], stored)
             records[t] = stored
 
-        PL.run_generic(pending, PL.execute_fixed, workers=self.test_workers, on_result=sink)
-        if errors or set(records) != set(task_ids):
-            raise RuntimeError(
-                "Incomplete Skill evaluation; resume retries failed units"
-            )
+        PL.run_generic(pending, EW.execute_fixed, workers=self.test_workers, on_result=sink)
+        collector.raise_if_incomplete("Incomplete Skill evaluation")
+        if set(records) != set(task_ids):
+            raise JournalConflict("Skill evaluation returned no record for some tasks")
         outcomes = tuple(
             S.TaskOutcome(
                 task_id=t,
@@ -352,13 +329,13 @@ class FixedSkillScorer:
             raise ValueError("Both arms must evaluate the same Skill")
         task_ids = [int(t) for t in task_ids]
         if not task_ids:
-            raise ValueError("Val panel must be nonempty")
+            raise InvalidInput("Val panel must be nonempty")
         base = self.score(base_skill, task_ids, panel_key)
         candidate = self.score(candidate_skill, task_ids, panel_key)
 
-        base_arm = base.as_arm(S.ARM_BASE, S.MODE_CONSOLIDATED_DIRECT, F.FEWSHOT_NONE)
+        base_arm = base.as_arm(S.ARM_BASE, S.MODE_CONSOLIDATED_DIRECT, "none")
         cand_arm = candidate.as_arm(
-            S.ARM_CANDIDATE, S.MODE_CONSOLIDATED_DIRECT, F.FEWSHOT_NONE
+            S.ARM_CANDIDATE, S.MODE_CONSOLIDATED_DIRECT, "none"
         )
         S.assert_isolation_valid([base_arm, cand_arm], panel_key)
 
@@ -449,19 +426,6 @@ class PredictedSkillScorer:
     # The reason is audit metadata; keep it bounded without rejecting otherwise
     # valid reviewer decisions from providers that do not enforce maxLength.
     REASON_MAX_CHARS = 8192
-    FORMAT_RETRIES = 31
-    # Keep the cache identity compatible with the completed portion of the run.
-    # Formatting tolerance is a parser/recovery change, not a new prediction arm.
-    CACHE_RESPONSE_SCHEMA = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["probability_true", "predicted_success", "reason"],
-        "properties": {
-            "probability_true": {"type": "number", "minimum": 0, "maximum": 1},
-            "predicted_success": {"type": "boolean"},
-            "reason": {"type": "string", "minLength": 1, "maxLength": 80},
-        },
-    }
     RESPONSE_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -496,10 +460,10 @@ class PredictedSkillScorer:
         self.calibration_block = str(calibration_block or "")
         self.reviewer_prompt_version = int(reviewer_prompt_version)
         if not 0.0 <= self.threshold <= 1.0:
-            raise ValueError("prediction threshold must be between 0 and 1")
+            raise InvalidInput("prediction threshold must be between 0 and 1")
         self.protocol_hash = S.content_hash({
             "protocol": self.PROTOCOL,
-            "response_schema": self.CACHE_RESPONSE_SCHEMA,
+            "response_schema": self.RESPONSE_SCHEMA,
             "benchmark": cfg.benchmark.name,
             "routes": routes.fingerprint,
             "threshold": self.threshold,
@@ -533,24 +497,15 @@ class PredictedSkillScorer:
             payload["calibration_block"] = self.calibration_block
         return json.dumps(payload, ensure_ascii=False)
 
-    def _parse(self, raw):
-        try:
-            return self._parse_response(raw)
-        except (ValueError, KeyError, TypeError) as exc:
-            raise ReviewerOutputError(str(exc)) from exc
-
     def _parse_response(self, raw):
-        from skillexpand.l1.family_discovery import _extract_json
-        value = _extract_json(raw, required_keys=("probability_true", "predicted_success", "reason"))
+        from skillexpand.runtime.json_output import extract_json
+        value = extract_json(raw, required_keys=("probability_true", "predicted_success", "reason"))
         if set(value) != {"probability_true", "predicted_success", "reason"}:
             raise ValueError("Predicted reviewer must return exactly three required fields")
         probability = value["probability_true"]
         if isinstance(probability, bool) or not isinstance(probability, (int, float)):
             raise ValueError("Predicted reviewer probability_true must be numeric")
-        try:
-            probability = float(probability)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Predicted reviewer must return probability_true") from exc
+        probability = float(probability)
         if not 0.0 <= probability <= 1.0:
             raise ValueError("Predicted probability is outside [0, 1]")
         predicted_success = value["predicted_success"]
@@ -572,12 +527,7 @@ class PredictedSkillScorer:
         }
 
     def _call(self, host, prompt):
-        """Call a reviewer with schema + thinking overrides.
-
-        ``request_kwargs`` is understood by our GPT wrapper.  The fallback keeps
-        small test/offline hosts usable; their prompt still carries the same
-        contract and the result is validated by ``_parse``.
-        """
+        """Call the reviewer with its strict response schema and thinking enabled."""
         from langchain.schema import HumanMessage
         messages = [HumanMessage(content=prompt)]
         request_kwargs = {
@@ -586,23 +536,17 @@ class PredictedSkillScorer:
             # separate role and should retain its long internal reasoning budget.
             "enable_thinking": True,
         }
-        try:
-            return host.llm(messages, stop=[], replace_newline=False,
-                            request_kwargs=request_kwargs)
-        except TypeError as exc:
-            if "request_kwargs" not in str(exc):
-                raise
-            return host.llm(messages, stop=[], replace_newline=False)
+        return host.llm(messages, stop=[], replace_newline=False, request_kwargs=request_kwargs)
 
     def _review(self, host, prompt):
-        attempts = int(os.environ.get("EXPE_REVIEWER_ATTEMPTS", self.FORMAT_RETRIES + 1))
-        return retry_reviewer(lambda: self._call(host, prompt), self._parse,
-                              attempts=attempts)
+        result = call_with_repair(repair_policy("reviewer.predicted_val"),
+                                  fresh(lambda: self._call(host, prompt)), self._parse_response)
+        return result.value, result.attempts
 
     def score(self, skill, task_ids, panel_key):
         task_ids = tuple(sorted(int(t) for t in task_ids))
         if not task_ids or not set(task_ids) <= set(self.routes.groups[skill.skill_id]):
-            raise ValueError("Predicted tasks must belong to the frozen Skill route group")
+            raise JournalConflict("Predicted tasks must belong to the frozen Skill route group")
         keys = {
             t: ScoreCache.make_key(self.cfg.benchmark.name, panel_key, t,
                                    f"predicted:{self.protocol_hash}", skill.body)
@@ -618,7 +562,7 @@ class PredictedSkillScorer:
 
         def one(task_id):
             if self.judge_factory is None:
-                raise RuntimeError("Predicted val scorer requires a judge factory")
+                raise InvalidInput("Predicted val scorer requires a judge factory")
             host = self.judge_factory(
                 task_id, skill,
                 self.cache.path.parent / "usage" /
@@ -632,38 +576,18 @@ class PredictedSkillScorer:
                     "format_attempts": format_attempts,
                     "response_format": "json_schema", **result}
 
-        errors = []
-        if pending:
-            with ThreadPoolExecutor(max_workers=min(self.workers, len(pending)),
-                                    thread_name_prefix="predicted-val") as pool:
-                futures = {task_id: pool.submit(one, task_id) for task_id in pending}
-                for task_id in pending:
-                    try:
-                        record = futures[task_id].result()
-                    except Exception as exc:
-                        message = " ".join(str(exc).split())
-                        if len(message) > 240:
-                            message = message[:237] + "..."
-                        error = {
-                            "task_id": task_id,
-                            "cache_key": keys[task_id],
-                            "error": f"{type(exc).__name__}: {message}",
-                        }
-                        from skillexpand.l1.runner import save
-                        save(self.cache.path.parent / "evaluation_errors" /
-                             (keys[task_id] + ".json"), error)
-                        errors.append(error)
-                    else:
-                        self.cache.put(keys[task_id], record)
-                        records[task_id] = record
-        missing = sorted(set(task_ids) - set(records))
-        if missing:
-            known = {int(error["task_id"]) for error in errors}
-            for task_id in missing:
-                if task_id not in known:
-                    errors.append({"task_id": task_id, "error": "missing result"})
-        if errors:
-            raise PredictedValidationError(errors, task_ids)
+        def store(task_id, record):
+            self.cache.put(keys[task_id], record)
+            records[task_id] = record
+
+        collector = FailureCollector("predicted-validation",
+                                     self.cache.path.parent / "evaluation_errors")
+        map_units(pending, one, workers=self.workers, collector=collector, on_success=store,
+                  name=lambda task_id: keys[task_id], thread_name_prefix="predicted-val")
+        if collector.failures:
+            raise PredictedValidationError(collector.failures, task_ids)
+        if set(records) != set(task_ids):
+            raise JournalConflict("Predicted validation returned no record for some tasks")
         return PredictedPanelScore(
             skill.key, skill.body, task_ids,
             tuple(records[t] for t in task_ids),

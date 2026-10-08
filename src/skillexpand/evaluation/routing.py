@@ -10,12 +10,13 @@ from omegaconf import OmegaConf
 from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
 from skillexpand import schema as S
-from skillexpand.l1.cold_start import freeze
-from skillexpand.persistence.artifacts import provider_signature
+from skillexpand.persistence.io import freeze
+from skillexpand.runtime.models.llm import provider_signature
 from skillexpand.l1.adapters import resolve
-from skillexpand.l1.runner import save
+from skillexpand.persistence.io import save
 from skillexpand.evaluation.selector import SkillSelector
-from skillexpand.evaluation.selector import REASON_SELECTOR_ERROR
+from skillexpand.reliability.errors import JournalConflict
+from skillexpand.reliability.units import FailureCollector, guard
 
 
 @dataclass(frozen=True)
@@ -31,20 +32,16 @@ def route_task(spec):
     """Routing constructs no environment and receives no answers or Skill bodies."""
     from types import SimpleNamespace
 
-    try:
+    def select():
         cfg = PL._config(spec.benchmark)
         host = F.build_reasoning_host(cfg, spec.usage_path, role='selector')
         skills = [SimpleNamespace(**s) for s in spec.descriptions]
-        choice = SkillSelector(host).select(F.task_text_of(cfg, spec.task_id), skills)
-        return {
-            "task_id": spec.task_id,
-            "selection": asdict(choice),
-            "error": "selector provider error"
-            if choice.reason == REASON_SELECTOR_ERROR
-            else None,
-        }
-    except Exception as exc:
-        return {"task_id": spec.task_id, "error": f"{type(exc).__name__}: {exc}"}
+        return SkillSelector(host, resolve(cfg)).select(F.task_text_of(cfg, spec.task_id), skills)
+
+    choice, failure = guard(select, unit_id=spec.task_id, stage="routing")
+    if failure is not None:
+        return {"task_id": spec.task_id, "failure": failure}
+    return {"task_id": spec.task_id, "selection": asdict(choice), "failure": None}
 
 
 class FrozenRoutes:
@@ -105,22 +102,22 @@ class FrozenRoutes:
             for s in sorted(library, key=lambda s: s.skill_id)
         )
         if manifest.get("descriptions") != list(obj.descriptions):
-            raise ValueError("Frozen route descriptions do not match supplied Skills")
+            raise JournalConflict("Frozen route descriptions do not match supplied Skills")
         obj.fingerprint = complete.get("fingerprint") or S.content_hash(manifest)
         obj.records = {}
         for task_id in obj.ids:
             path = route_root / "tasks" / f"{task_id}.json"
             if not path.exists():
-                raise ValueError(f"Frozen route is missing task {task_id}")
+                raise JournalConflict(f"Frozen route is missing task {task_id}")
             obj._add(json.loads(path.read_text()))
         if set(obj.records) != set(obj.ids):
-            raise ValueError("Frozen route does not cover the requested split")
+            raise JournalConflict("Frozen route does not cover the requested split")
         recorded_groups = {
             str(skill_id): tuple(int(task_id) for task_id in task_ids)
             for skill_id, task_ids in (complete.get("groups") or {}).items()
         }
         if recorded_groups != obj.groups:
-            raise ValueError("Frozen route complete.json disagrees with task records")
+            raise JournalConflict("Frozen route complete.json disagrees with task records")
         return obj
 
     def run(self):
@@ -138,22 +135,20 @@ class FrozenRoutes:
             for t in self.ids
             if t not in self.records
         ]
-        errors = []
+        collector = FailureCollector(f"routing-{self.split}", self.root / "errors")
 
         def sink(record):
             task_id = record["task_id"]
-            if record.get("error"):
-                save(self.root / "errors" / f"{task_id}.json", record)
-                errors.append(record)
+            if record["failure"]:
+                collector.record(record["failure"], str(task_id))
                 return
             self._add(record)
             save(self.root / "tasks" / f"{task_id}.json", record)
 
         PL.run_generic(pending, route_task, workers=self.test_workers, on_result=sink)
-        if errors or set(self.records) != set(self.ids):
-            raise RuntimeError(
-                "Routing incomplete; resume retries only provider failures or missing tasks"
-            )
+        collector.raise_if_incomplete("Routing incomplete")
+        if set(self.records) != set(self.ids):
+            raise JournalConflict("Routing returned no record for some tasks")
         save(
             self.root / "complete.json",
             {
@@ -168,14 +163,14 @@ class FrozenRoutes:
     def _add(self, record):
         task_id = record["task_id"]
         choice = record.get("selection", {})
-        if task_id not in self.ids or record.get("error") or "ok" not in choice:
-            raise ValueError("Invalid frozen routing record")
+        if task_id not in self.ids or record["failure"] or "ok" not in choice:
+            raise JournalConflict("Invalid frozen routing record")
         if choice["ok"] and choice.get("skill_id") not in {
             s["skill_id"] for s in self.descriptions
         }:
-            raise ValueError("Frozen route references unknown Skill")
+            raise JournalConflict("Frozen route references unknown Skill")
         if task_id in self.records and self.records[task_id] != record:
-            raise ValueError("Conflicting frozen routing records")
+            raise JournalConflict("Conflicting frozen routing records")
         self.records[task_id] = record
 
     @property

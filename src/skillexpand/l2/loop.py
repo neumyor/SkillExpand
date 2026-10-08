@@ -1,23 +1,27 @@
 """Serial train-batch editing with selectable predictive, empirical, or JEV acceptance."""
 
 import json
-import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from skillexpand.runtime import agent_factory as F
 from skillexpand import schema as S
+from skillexpand.persistence import io as IO
 from skillexpand.persistence import store as ST
 from skillexpand.l2 import editor as ED
 from skillexpand.l2 import update as UP
-from skillexpand.l2 import patterns as BP
+from skillexpand.l1 import patterns as BP
 from skillexpand.l2.card_review import CardReviewer
 from skillexpand.l2.card_review import PROTOCOL
-from skillexpand.persistence.artifacts import load_cold_start
-from skillexpand.persistence.artifacts import code_signature
-from skillexpand.persistence.artifacts import provider_signature
-from skillexpand.l1.cold_start import freeze
-from skillexpand.l1.runner import save
+from skillexpand.l1.artifacts import load_cold_start
+from skillexpand.persistence.io import code_signature
+from skillexpand.runtime.models.llm import provider_signature
+from skillexpand.persistence.io import RunLock, freeze, save
+from skillexpand.reliability.errors import (
+    FrozenProtocolChanged, InvalidInput, JournalConflict, StoreError, classify,
+)
+from skillexpand.reliability.units import FailureCollector
 from skillexpand.runtime import parallel as PL
+from skillexpand.l1 import workers as LW
 from skillexpand.evaluation.routing import FrozenRoutes
 from skillexpand.evaluation import validation as VA
 from skillexpand.evaluation.jev import JevSkillScorer
@@ -43,62 +47,30 @@ class EvolutionConfig:
     def __post_init__(self):
         if min(self.batch_size, self.candidate_count, self.evolve_l1_workers,
                self.l2_review_workers, self.evolve_rounds, self.autonomous_attempts) < 1:
-            raise ValueError("Evolution budgets must be positive")
+            raise InvalidInput("Evolution budgets must be positive")
         if self.supervised_attempts < 0:
-            raise ValueError("supervised_attempts must be nonnegative")
+            raise InvalidInput("supervised_attempts must be nonnegative")
         if self.skill_edit_mode not in ("rewrite", "structured"):
-            raise ValueError("Unknown Skill edit mode")
+            raise InvalidInput("Unknown Skill edit mode")
         if self.acceptance_mode not in ("predicted", "empirical", "jev"):
-            raise ValueError("Unknown acceptance mode")
+            raise InvalidInput("Unknown acceptance mode")
         if self.predicted_review_scope not in ("val", "train_cards"):
-            raise ValueError("Unknown predicted review scope")
+            raise InvalidInput("Unknown predicted review scope")
         if self.single_candidate and self.candidate_count != 1:
-            raise ValueError("single_candidate protocol requires candidate_count=1")
+            raise InvalidInput("single_candidate protocol requires candidate_count=1")
         if self.reviewer_update_mode not in ("none", "summary", "rules"):
-            raise ValueError("Unknown reviewer update mode")
+            raise InvalidInput("Unknown reviewer update mode")
         if self.reviewer_feedback_size < 0:
-            raise ValueError("reviewer_feedback_size must be nonnegative")
+            raise InvalidInput("reviewer_feedback_size must be nonnegative")
 
     def to_dict(self):
         return S.to_dict(self)
 
 
-class RunLock:
-    """An OS-held exclusive lock, released automatically if the process exits."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = Path(path)
-        self._handle = None
-
-    def acquire(self) -> None:
-        import fcntl
-
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            handle.close()
-            raise RuntimeError(
-                f"{self.path.parent} is already being written by another process"
-            )
-        handle.seek(0)
-        handle.truncate()
-        handle.write(f"{os.getpid()}\n")
-        handle.flush()
-        self._handle = handle
-
-    def release(self) -> None:
-        if self._handle is not None:
-            self._handle.close()
-            self._handle = None
-
-    def __enter__(self):
-        self.acquire()
-        return self
-
-    def __exit__(self, *exc):
-        self.release()
+def family_task_batches(task_ids, batch_size):
+    """Fixed-order batches of one family's train tasks; the tail batch is kept."""
+    ids = sorted(task_ids)
+    return [ids[offset:offset + batch_size] for offset in range(0, len(ids), batch_size)]
 
 
 @dataclass
@@ -119,10 +91,6 @@ class LoopPaths:
         return self._p("run.pid")
 
     @property
-    def meta_skills(self) -> Path:
-        return self._p("meta_skills.jsonl")
-
-    @property
     def summary(self) -> Path:
         return self._p("summary.json")
 
@@ -130,27 +98,27 @@ class LoopPaths:
 class SerialEvolutionLoop:
     """Persist every batch decision before committing a reviewed Skill."""
 
-    def __init__(self, cfg, plan, paths, config=None):
+    def __init__(self, cfg, plan, paths, config=None, allow_code_change=False):
         with RunLock(paths.lock):
-            self._initialize(cfg, plan, paths, config)
+            self._initialize(cfg, plan, paths, config, allow_code_change)
 
-    def _initialize(self, cfg, plan, paths, config):
+    def _initialize(self, cfg, plan, paths, config, allow_code_change=False):
         self.cfg, self.plan, self.paths = cfg, plan, paths
         self.config = config or EvolutionConfig()
         input_cfg, checked_plan, self.initial, cold_cards = load_cold_start(paths.root)
         if input_cfg != cfg:
-            raise ValueError(
+            raise FrozenProtocolChanged(
                 "L2 runtime config differs from imported cold-start config"
             )
         if checked_plan != plan:
-            raise ValueError("L2 plan differs from completed cold start")
+            raise FrozenProtocolChanged("L2 plan differs from completed cold start")
         self.cards = {
             t: replace(e, family_id=plan.family_of(t)) for t, e in cold_cards.items()
         }
         manifest = json.loads((paths.root / "manifest.json").read_text())
-        self.l1_attempts = int(manifest.get("k", self.config.autonomous_attempts))
-        self.l1_supervised = bool(manifest.get("supervised", True))
-        self.l1_supervised_attempts = int(manifest.get("supervised_attempts", self.config.supervised_attempts))
+        self.l1_attempts = int(manifest["k"])
+        self.l1_supervised = bool(manifest["supervised"])
+        self.l1_supervised_attempts = int(manifest["supervised_attempts"])
         # Assignment is derived from the audited train map. selected_skill_id and
         # initial_skill_key stay None: these tasks were executed WITHOUT a Skill.
         protocol_config = self.config.to_dict()
@@ -161,7 +129,6 @@ class SerialEvolutionLoop:
         identity = {
             "protocol": PROTOCOL,
             "execution_protocol": "skill-aware-rounds-v2",
-            "acceptance_mode": self.config.acceptance_mode,
             "l1": {"attempts": self.l1_attempts, "supervised": self.l1_supervised},
             "config": protocol_config,
             "cards": {
@@ -172,31 +139,20 @@ class SerialEvolutionLoop:
             "provider": provider_signature(),
             "code": code_signature(),
         }
-        if not (paths.root / "l2_manifest.json").exists() and (
-            (paths.root / "experiences.jsonl").exists()
-            or (paths.root / "patch_attempts.jsonl").exists()
-        ):
-            raise ValueError(
-                "Legacy evolution output: import the cold start into a new run directory"
-            )
         new_run = not (paths.root / "l2_manifest.json").exists()
         self.skills = ST.SkillLibrary(paths.skills, benchmark=plan.benchmark)
         for skill in self.initial:
             if skill.family_id not in self.skills.families:
                 self.skills._append_new(skill)
             elif self.skills.history(skill.family_id)[0] != skill:
-                raise ValueError("Initial Skill library changed")
+                raise JournalConflict("Initial Skill library changed")
         if set(self.skills.families) != {s.family_id for s in self.initial}:
-            raise ValueError("Skill library contains unknown families")
+            raise JournalConflict("Skill library contains unknown families")
         if new_run and any(
             self.skills.head(s.family_id).version != 0 for s in self.initial
         ):
-            raise ValueError("Import initial cold-start Skills into a new L2 run")
-        freeze(paths.root / "l2_manifest.json", identity)
-        self.meta = ST.MetaSkillStore(paths.meta_skills)
-        self.meta.ensure_initial()
-        if self.meta.head().version != 0:
-            raise ValueError("L3 is frozen; use a fresh cold-start import")
+            raise JournalConflict("Import initial cold-start Skills into a new L2 run")
+        freeze(paths.root / "l2_manifest.json", identity, allow_code_change=allow_code_change)
         self._recover_transactions()
         self.val_routes = None
         self.val_scorer = None
@@ -208,12 +164,12 @@ class SerialEvolutionLoop:
 
     def _load_reviewer_update(self):
         path = self.paths.root / "reviewer_updates.jsonl"
-        rows = RC.read_jsonl(path)
+        rows = IO.read_jsonl(path, repair_tail=False)
         if not rows:
             return None
         update = S.from_dict(RC.ReviewerUpdate, rows[-1])
         if update.protocol != RC.PROTOCOL:
-            raise ValueError("Reviewer update protocol mismatch")
+            raise JournalConflict("Reviewer update protocol mismatch")
         return update
 
     def _calibration_block(self):
@@ -286,42 +242,10 @@ class SerialEvolutionLoop:
         return self.predicted_scorer
 
     def _reasoning_host(self, role, usage_path):
-        """Build a role-specific host while keeping the two-argument API usable.
-
-        A few offline integrations replace ``build_reasoning_host`` with a small
-        factory accepting only ``(cfg, path)``.  Passing a role through a cloned
-        config preserves that compatibility and still makes the selected model
-        explicit in the host's config and usage artifact.
-        """
-        from omegaconf import OmegaConf
-        role_cfg = OmegaConf.create(OmegaConf.to_container(self.cfg, resolve=True))
-        role_cfg.agent.llm = F.role_model(self.cfg, role)
-        role_cfg.models = OmegaConf.create(
-            {**dict(OmegaConf.to_container(self.cfg.get('models', {}), resolve=True)),
-             role: role_cfg.agent.llm}
-        )
-        return F.build_reasoning_host(role_cfg, usage_path)
+        return F.build_reasoning_host(self.cfg, usage_path, role=role)
 
     def skill_heads(self):
         return [self.skills.head(f) for f in sorted(self.skills.families)]
-
-    def batches(self):
-        batches = []
-        for skill in sorted(self.initial, key=lambda s: s.skill_id):
-            ids = sorted(self.plan.families[skill.family_id])
-            for offset in range(0, len(ids), self.config.batch_size):
-                batch_ids = ids[offset : offset + self.config.batch_size]
-                batches.append(
-                    {
-                        "skill_id": skill.skill_id,
-                        "family_id": skill.family_id,
-                        "task_ids": batch_ids,
-                        "batch_id": S.content_hash(
-                            {"skill": skill.skill_id, "tasks": batch_ids}
-                        ),
-                    }
-                )
-        return batches
 
     def _restore(self, value):
         from skillexpand.l2.audit import audit_batch
@@ -332,19 +256,19 @@ class SerialEvolutionLoop:
         raw = value.get("candidate")
         if raw:
             if value["outcome"] != "review_approved":
-                raise ST.StoreError("Only review-approved candidates may be installed")
+                raise StoreError("Only review-approved candidates may be installed")
             candidate = S.from_dict(S.CandidateSkill, raw)
             if candidate.candidate_id != value["selected_candidate_id"]:
-                raise ST.StoreError("Journal candidate differs from selected candidate")
+                raise StoreError("Journal candidate differs from selected candidate")
             try:
                 installed = self.skills.get(candidate.skill.key)
             except KeyError:
                 base = self.skills.get(candidate.base_skill_key)
                 if base.description != candidate.skill.description:
-                    raise ST.StoreError("Routing description is frozen")
+                    raise StoreError("Routing description is frozen")
                 installed = self.skills.commit(candidate)
             if installed != candidate.skill:
-                raise ST.StoreError("Journal conflicts with Skill history")
+                raise StoreError("Journal conflicts with Skill history")
 
     def _recover_transactions(self):
         directory = self.paths.root / "l2_batches"
@@ -352,16 +276,13 @@ class SerialEvolutionLoop:
             return
         # Replay in round and task order, never hash-filename order.
         records = [json.loads(p.read_text()) for p in directory.glob('*.json')]
-        for value in sorted(records, key=lambda r: (r.get('round', 0), r['skill_id'],
-                                                   r['task_ids'][0])):
-            round_index = value.get('round', 0)
-            if round_index < 1:
-                raise ValueError('Legacy card-only journals require a separate run directory')
+        for value in sorted(records, key=lambda r: (r['round'], r['skill_id'], r['task_ids'][0])):
+            round_index = value['round']
             plans = json.loads((self.paths.root / 'evolution' / f'round-{round_index}' /
                                 'batches.json').read_text())
             plan = next((b for b in plans if b['batch_id'] == value['batch_id']), None)
             if plan is None or any(value.get(k) != v for k, v in plan.items()):
-                raise ValueError('Journal differs from frozen evolution plan')
+                raise JournalConflict('Journal differs from frozen evolution plan')
             self._restore(value)
 
     def _run_batch(self, batch):
@@ -369,7 +290,7 @@ class SerialEvolutionLoop:
         if path.exists():
             value = json.loads(path.read_text())
             if any(value.get(k) != v for k, v in batch.items()):
-                raise ValueError('Batch journal differs from frozen batch')
+                raise JournalConflict('Batch journal differs from frozen batch')
             self._restore(value)
             return
         skill = self.skills.head(batch["family_id"])
@@ -391,7 +312,7 @@ class SerialEvolutionLoop:
                 return CardReviewer(host)
 
         runner = UP.SkillPatchRunner(
-            ED.SkillEditor(planner_host, self.meta.head(), self.config.skill_edit_mode,
+            ED.SkillEditor(planner_host, self.config.skill_edit_mode,
                            editor_host=editor_host),
             None,
             self.paths.root / "l2_proposals",
@@ -425,13 +346,10 @@ class SerialEvolutionLoop:
 
     def _evolution_batches(self, round_index, cards):
         """Build fixed family batches from one and only one L1 evolution round."""
-        batches = []
-        for skill in sorted(self.skill_heads(), key=lambda s: s.skill_id):
-            ids = sorted(self.plan.families[skill.family_id])
-            for offset in range(0, len(ids), self.config.batch_size):
-                task_ids = ids[offset:offset + self.config.batch_size]
-                batches.append(self._make_evolution_batch(round_index, skill.family_id, task_ids, cards))
-        return batches
+        return [self._make_evolution_batch(round_index, skill.family_id, task_ids, cards)
+                for skill in sorted(self.skill_heads(), key=lambda s: s.skill_id)
+                for task_ids in family_task_batches(self.plan.families[skill.family_id],
+                                                    self.config.batch_size)]
 
     def _make_evolution_batch(self, round_index, family_id, task_ids, cards):
         """Stable evidence identity; the journal separately records the current head."""
@@ -454,18 +372,18 @@ class SerialEvolutionLoop:
             value = json.loads(path.read_text())
             skills = [S.from_dict(S.Skill, s) for s in value['skills']]
             if value['round'] != round_index or value['task_ids'] != sorted(self.plan.tasks_in(S.SPLIT_TRAIN)):
-                raise ValueError('Round input identity mismatch')
+                raise JournalConflict('Round input identity mismatch')
             if {s.family_id for s in skills} != set(self.plan.families):
-                raise ValueError('Round input family coverage mismatch')
+                raise JournalConflict('Round input family coverage mismatch')
             if {s.skill_id: s.key for s in skills} != expected:
-                raise ValueError('Round input differs from previous output')
+                raise JournalConflict('Round input differs from previous output')
             for skill in skills:
                 if self.skills.get(skill.key) != skill:
-                    raise ValueError('Round input Skill differs from version history')
+                    raise JournalConflict('Round input Skill differs from version history')
             return skills
         skills = self.skill_heads()
         if {s.skill_id: s.key for s in skills} != expected:
-            raise ValueError('Skill heads differ from previous round output')
+            raise JournalConflict('Skill heads differ from previous round output')
         freeze(path, {'round': round_index, 'skills': [S.to_dict(s) for s in skills],
                       'task_ids': sorted(self.plan.tasks_in(S.SPLIT_TRAIN))})
         return skills
@@ -477,7 +395,7 @@ class SerialEvolutionLoop:
                 exp.family_id != skill.family_id or exp.initial_skill_key != skill.key or
                 exp.selected_skill_id != skill.skill_id or exp.selection_source != S.SELECTION_FIXED or
                 exp.experience_card is None or exp.experience_card.get('task', {}).get('task_id') != task_id):
-            raise ValueError(f'Evolution card identity/provenance mismatch: {task_id}')
+            raise JournalConflict(f'Evolution card identity/provenance mismatch: {task_id}')
 
     def _collect_evolution_cards(self, round_index):
         """Run L1 with the current Skill heads and persist every task result."""
@@ -491,7 +409,7 @@ class SerialEvolutionLoop:
                 path = results_dir / f"{task_id}.json"
                 if path.exists():
                     continue
-                specs.append(PL.ExperienceSpec(
+                specs.append(LW.ExperienceSpec(
                     unit_id=f"evolution:{round_index}:{task_id}",
                     benchmark=self.plan.benchmark, task_id=task_id,
                     family_id=skill.family_id, split=S.SPLIT_TRAIN,
@@ -504,26 +422,24 @@ class SerialEvolutionLoop:
                     supervised_attempts=self.l1_supervised_attempts,
                     evolution_round=round_index,
                     l1_checkpoint_path=str(directory / "trials" / f"{task_id}.json")))
-        errors = []
+        collector = FailureCollector(f'evolution-{round_index}/l1', directory / 'errors')
         pending = {s.task_id for s in specs}
         received = set()
         def sink(record):
             task_id = record['task_id']
             if task_id not in pending or task_id in received:
-                raise ValueError('Unexpected or duplicate L1 result')
+                raise JournalConflict('Unexpected or duplicate L1 result')
             received.add(task_id)
             if not record.get('ok'):
-                errors.append(record)
-                save(directory / 'errors' / f"{record['task_id']}.json", record)
+                collector.record(record['failure'], str(task_id))
                 return
             exp = S.from_dict(S.TaskExperience, record['experience'])
             self._check_card(exp, task_id, round_index, skills)
             save(results_dir / f"{exp.task_id}.json", record['experience'])
         if specs:
-            PL.run_generic(specs, PL.execute_experience, workers=self.config.evolve_l1_workers,
+            PL.run_generic(specs, LW.execute_experience, workers=self.config.evolve_l1_workers,
                            on_result=sink)
-        if errors:
-            raise RuntimeError(f"Evolution L1 interrupted on {len(errors)} tasks")
+        collector.raise_if_incomplete("Evolution L1 interrupted")
         cards = self._read_evolution_cards(round_index)
         freeze(directory / 'manifest.json', {
             'round': round_index,
@@ -541,26 +457,26 @@ class SerialEvolutionLoop:
         skills = self._round_input(round_index)
         expected = sorted(t for ids in self.plan.families.values() for t in ids)
         if {p.name for p in results_dir.glob('*.json')} != {f'{t}.json' for t in expected}:
-            raise ValueError('Round card coverage differs from train tasks')
+            raise JournalConflict('Round card coverage differs from train tasks')
         cards = {}
         for task_id in expected:
             path = results_dir / f"{task_id}.json"
             if not path.exists():
-                raise RuntimeError(f"Missing evolution card for task {task_id}")
+                raise JournalConflict(f"Missing evolution card for task {task_id}")
             exp = S.from_dict(S.TaskExperience, json.loads(path.read_text()))
             self._check_card(exp, task_id, round_index, skills)
             from skillexpand.l1.audit import audit_checkpoint
             from skillexpand.l1.adapters import resolve
             checkpoint = json.loads((directory / 'trials' / f'{task_id}.json').read_text())
             if checkpoint['experience'] != S.to_dict(exp):
-                raise ValueError(f'Evolution card/checkpoint mismatch: {task_id}')
+                raise JournalConflict(f'Evolution card/checkpoint mismatch: {task_id}')
             audit_checkpoint(checkpoint, resolve(self.cfg))
             if manifest is not None:
                 expected_skill = manifest.get('skill_keys', {}).get(exp.family_id)
                 if expected_skill and exp.initial_skill_key != expected_skill:
-                    raise ValueError(f"Evolution card {task_id} came from a different Skill head")
+                    raise JournalConflict(f"Evolution card {task_id} came from a different Skill head")
                 if manifest['cards'][str(task_id)] != S.content_hash(S.to_dict(exp)):
-                    raise ValueError(f'Evolution card hash mismatch: {task_id}')
+                    raise JournalConflict(f'Evolution card hash mismatch: {task_id}')
             cards[task_id] = exp
         return cards
 
@@ -581,7 +497,7 @@ class SerialEvolutionLoop:
         feedback_root = self.paths.root / "reviewer_feedback"
         feedback_root.mkdir(parents=True, exist_ok=True)
         feedback_path = self.paths.root / "reviewer_feedback.jsonl"
-        existing_rows = RC.read_jsonl(feedback_path)
+        existing_rows = IO.read_jsonl(feedback_path, repair_tail=False)
         existing_ids = {row.get("feedback_id") for row in existing_rows}
         cache = VA.ScoreCache(feedback_root / "scores.jsonl")
         scorer = VA.FixedSkillScorer(
@@ -614,7 +530,7 @@ class SerialEvolutionLoop:
             if self.config.reviewer_feedback_size:
                 task_ids = task_ids[: self.config.reviewer_feedback_size]
             if not task_ids:
-                raise ValueError(f"Reviewer feedback panel is empty for {base.skill_id}")
+                raise InvalidInput(f"Reviewer feedback panel is empty for {base.skill_id}")
             candidates = []
             for proposal in batch.get("proposals", ()):
                 raw = proposal.get("edit", {}).get("candidate")
@@ -653,7 +569,7 @@ class SerialEvolutionLoop:
                 )
                 for row in rows:
                     if row.feedback_id not in existing_ids:
-                        RC.append_jsonl(feedback_path, row)
+                        IO.append_jsonl(feedback_path, row)
                         existing_ids.add(row.feedback_id)
                     new_records.append(row)
         # A round with no materialized candidate has no factual calibration
@@ -679,7 +595,7 @@ class SerialEvolutionLoop:
                 generation_round=round_index,
                 parent_version=parent_version,
             )
-        RC.append_jsonl(self.paths.root / "reviewer_updates.jsonl", update)
+        IO.append_jsonl(self.paths.root / "reviewer_updates.jsonl", update)
         self.reviewer_update = update
         # A new update must be picked up by the next round's scorer, while a
         # resumed current round must never silently use a stale prompt object.
@@ -690,9 +606,10 @@ class SerialEvolutionLoop:
         """Execute the explicit closed loop: Skill-aware L1, then serial L2."""
         rounds = self.config.evolve_rounds if rounds is None else int(rounds)
         if rounds < 1:
-            raise ValueError('At least one evolve round is required')
+            raise InvalidInput('At least one evolve round is required')
         lock = RunLock(self.paths.lock)
         lock.acquire()
+        in_flight = None  # (round_index, batches) of the round being executed
         try:
             self.skills = ST.SkillLibrary(self.paths.skills, benchmark=self.plan.benchmark)
             self._recover_transactions()
@@ -700,8 +617,9 @@ class SerialEvolutionLoop:
             started_rounds = [int(p.parent.name.split('-')[1]) for p in
                              (self.paths.root / 'evolution').glob('round-*/input.json')]
             if started_rounds and rounds < max(started_rounds):
-                raise ValueError('Requested horizon precedes an existing round')
+                raise InvalidInput('Requested horizon precedes an existing round')
             for round_index in range(1, rounds + 1):
+                in_flight = (round_index, None)
                 round_summary = self.paths.root / 'evolution' / f'round-{round_index}' / 'summary.json'
                 if round_summary.exists() and json.loads(round_summary.read_text()).get('status') == 'complete':
                     self.cards = self._read_evolution_cards(round_index)
@@ -713,32 +631,40 @@ class SerialEvolutionLoop:
                 cards = self._collect_evolution_cards(round_index)
                 self.cards = cards
                 batches = self._evolution_batches(round_index, cards)
+                in_flight = (round_index, batches)
                 freeze(round_summary.parent / 'batches.json', batches)
                 for batch in batches:
                     self._run_batch(batch)
                 self._collect_reviewer_feedback(round_index)
-                last_result = self.summary(round_index, batches)
+                last_result = self.summary(batches)
                 last_result.update({
                     'reviewer_prompt_version': (
                         self.reviewer_update.reviewer_prompt_version
                         if self.reviewer_update else 0
                     ),
-                    'reviewer_feedback_count': len(RC.read_jsonl(
-                        self.paths.root / 'reviewer_feedback.jsonl'
-                    )),
+                    'reviewer_feedback_count': len(IO.read_jsonl(
+                        self.paths.root / 'reviewer_feedback.jsonl', repair_tail=False)),
                 })
                 save(self.paths.root / 'evolution' / f'round-{round_index}' / 'summary.json',
                      last_result)
                 from skillexpand.l2.audit import audit_round
                 save(round_summary.parent / 'audit.json', audit_round(self.paths.root, round_index))
-            result = last_result or self.summary()
+            result = dict(last_result)
             result.update({'evolve_rounds': rounds, 'latest_evolution_round': rounds,
                            'l1_cards_are_skill_aware': True})
             save(self.paths.summary, result)
             return result
         except Exception as exc:
-            save(self.paths.summary, dict(self.summary(), status='needs_attention',
-                                          error=f'{type(exc).__name__}: {exc}'))
+            # Report the round that failed, not a horizon-wide count: batch IDs
+            # are round-specific, so only that round's batches can be counted.
+            progress = {'protocol': PROTOCOL, 'benchmark': self.plan.benchmark}
+            if in_flight is not None:
+                round_index, batches = in_flight
+                progress = dict(self.summary(batches) if batches is not None else progress,
+                                evolution_round=round_index)
+            save(self.paths.summary, dict(progress, status='needs_attention',
+                                          error=f'{type(exc).__name__}: {exc}',
+                                          failure_category=classify(exc).value))
             raise
         finally:
             lock.release()
@@ -746,9 +672,7 @@ class SerialEvolutionLoop:
     def run(self):
         return self.run_evolutions()
 
-    def summary(self, round_index=None, batches_override=None):
-        batches = batches_override or (self.batches() if round_index is None else self._evolution_batches(
-            round_index, self.cards))
+    def summary(self, batches):
         records = [
             json.loads(p.read_text())
             for b in batches
@@ -773,10 +697,6 @@ class SerialEvolutionLoop:
             "review_approved_updates": sum(
                 r["outcome"] == "review_approved" for r in records
             ),
-            "invalid_batches": sum(
-                r["reason"].startswith(("invalid_review:", "invalid_hypotheses:"))
-                for r in records
-            ),
             "skills": {s.skill_id: s.key for s in self.skill_heads()},
             "acceptance_mode": self.config.acceptance_mode,
             "predicted_review_scope": self.config.predicted_review_scope,
@@ -786,9 +706,8 @@ class SerialEvolutionLoop:
                 self.reviewer_update.reviewer_prompt_version
                 if self.reviewer_update else 0
             ),
-            "reviewer_feedback_count": len(RC.read_jsonl(
-                self.paths.root / "reviewer_feedback.jsonl"
-            )),
+            "reviewer_feedback_count": len(IO.read_jsonl(
+                self.paths.root / "reviewer_feedback.jsonl", repair_tail=False)),
             "empirically_validated": bool(records) and self.config.acceptance_mode == "empirical" and all(
                 r.get("empirically_validated") is True for r in records
             ),
@@ -806,6 +725,5 @@ class SerialEvolutionLoop:
                 for r in records
             ),
             "description_frozen": True,
-            "meta_skill": self.meta.head().key,
             "l3_enabled": False,
         }

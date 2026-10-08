@@ -2,7 +2,7 @@
 """Define and prepare the frozen model-role replacement experiment matrix.
 
 This module only plans and prepares independent campaign directories.  The
-existing ``run_campaign.py`` remains responsible for preflight, execution,
+campaign launcher (``skillexpand.campaign``) remains responsible for preflight, execution,
 resume, and stage audits.
 """
 
@@ -13,6 +13,9 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from skillexpand.campaign import CONCURRENCY, read, save  # noqa: E402
 
 
 ROLES = (
@@ -26,22 +29,6 @@ ROLES = (
 PRIMARY_ROLES = ("l1_executor", "cold_start", "l2_planner", "l2_reviewer")
 OPTIONAL_ROLES = ("l2_editor", "selector")
 SCHEMA = 1
-CONCURRENCY = {
-    "searchqa": {
-        "cold_start_workers": 128,
-        "family_discovery_workers": 128,
-        "evolve_l1_workers": 128,
-        "l2_review_workers": 8,
-        "test_workers": 128,
-    },
-    "alfworld": {
-        "cold_start_workers": 32,
-        "family_discovery_workers": 32,
-        "evolve_l1_workers": 32,
-        "l2_review_workers": 8,
-        "test_workers": 32,
-    },
-}
 ROLE_FLAGS = {
     "l1_executor": "--l1-model",
     "cold_start": "--cold-start-model",
@@ -144,18 +131,6 @@ def build_plan(default_model, strong_model, include_optional=False):
     }
 
 
-def read(path):
-    return json.loads(Path(path).read_text())
-
-
-def save(path, value):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
-    os.replace(temporary, path)
-
-
 def validate_plan(plan):
     if plan.get("schema") != SCHEMA or plan.get("kind") != "model-role-replacement":
         raise ValueError("Unsupported model-role matrix plan")
@@ -253,10 +228,7 @@ def status(plan, root):
             continue
         manifest = read(manifest_path)
         expected = condition["models"]
-        current = manifest.get("models") or {}
-        fallback = manifest.get("model", "")
-        actual = {role: current.get(role) or fallback for role in ROLES}
-        row["models_match"] = actual == expected
+        row["models_match"] = manifest.get("models") == expected
         shared_files = {
             path: digest for path, digest in (manifest.get("files") or {}).items()
             if path.startswith("code/") or path.startswith("inputs/")
@@ -306,17 +278,10 @@ def test_complete(condition_root):
 def protocol_matches(plan, manifest):
     """Check the campaign fields that must be identical across conditions."""
     protocol = plan["protocol"]
-    if (not manifest.get("llm_base_url") or
-            manifest.get("evolve_rounds") != protocol["evolve_rounds"] or
-            manifest.get("acceptance_mode", "predicted") != protocol["acceptance_mode"] or
-            manifest.get("predicted_review_scope", "val") != protocol["predicted_review_scope"] or
-            manifest.get("skill_edit_mode", "rewrite") != protocol["skill_edit_mode"] or
-            manifest.get("batch_size") != protocol["batch_size"] or
-            manifest.get("candidate_count") != protocol["candidate_count"] or
-            manifest.get("autonomous_attempts", 4) != protocol["autonomous_attempts"] or
-            manifest.get("supervised_attempts", 1) != protocol["supervised_attempts"] or
-            manifest.get("request_interval_seconds") != protocol["request_interval_seconds"] or
-            manifest.get("concurrency") != protocol["concurrency"]):
+    shared = ("evolve_rounds", "acceptance_mode", "predicted_review_scope", "skill_edit_mode",
+              "batch_size", "candidate_count", "autonomous_attempts", "supervised_attempts",
+              "request_interval_seconds", "concurrency")
+    if not manifest.get("llm_base_url") or any(manifest.get(k) != protocol[k] for k in shared):
         return False
     concurrency = manifest.get("concurrency", {})
     for benchmark, expected in protocol["splits"].items():

@@ -1,11 +1,10 @@
 """Shared bounded execution loop; only train L1 orchestrates retries and guidance."""
 import json
 from langchain.schema import HumanMessage
-from skillexpand.runtime.agent.expel import ExpelAgent
 from skillexpand.runtime.agent.react import ReactAgent
 
 
-class RepairAgent(ExpelAgent):
+class RepairAgent(ReactAgent):
     def insert_before_task_prompt(self):
         if getattr(self, 'rules', '') and not getattr(self, 'no_rules', True):
             self.prompt_history.extend(self.rule_template.format_messages(rules=self.rules))

@@ -37,7 +37,7 @@ the v5 protocol signature, so new collection requires a new directory. The retir
 
 ## Benchmark isolation
 
-ALFWorld alone loads `l1/alfworld_contract.py` into execution, repair and synthesis.
+ALFWorld alone loads `runtime/prompts/alfworld_contract.py` into execution, repair and synthesis.
 The contract states actual TextWorld commands, inventory prerequisites, exact object
 identity, reset, empty observations, budget and repeated-action termination. Its static
 demonstrations use `move ... to ...`; its parser accepts bare move/examine/close/help.

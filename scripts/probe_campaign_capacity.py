@@ -44,7 +44,7 @@ def main():
 
     def request(round_id, benchmark, index):
         started = time.monotonic()
-        payload = {'model': manifest['model'], 'messages': [
+        payload = {'model': manifest['models']['l1_executor'], 'messages': [
             {'role': 'user', 'content': f'Reply OK. Probe {benchmark} {index}.'}],
             'max_tokens': 8, 'temperature': 0, 'enable_thinking': False}
         req = urllib.request.Request(base_url + '/chat/completions',

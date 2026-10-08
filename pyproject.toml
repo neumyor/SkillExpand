@@ -34,4 +34,5 @@ testpaths = ["tests"]
 addopts = "--ignore=tests/test_alfworld_l1_smoke.py"
 
 [tool.ruff.lint]
-select = ["E9", "F63", "F7", "F82"]
+# All pyflakes checks, including unused imports/variables, plus syntax errors.
+select = ["E9", "F"]

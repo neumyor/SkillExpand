@@ -8,11 +8,12 @@ loop and offline audit tools.
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from skillexpand import schema as S
-from skillexpand.runtime.reviewer_retry import ReviewerOutputError, retry_reviewer
+from skillexpand.reliability.errors import SchemaViolation
+from skillexpand.reliability.policies import repair_policy
+from skillexpand.reliability.retry import call_with_repair, fresh
 
 
 PROTOCOL = "reviewer-coevolution-feedback-v1"
@@ -60,7 +61,7 @@ def _note(value: Any) -> str:
 
 def _trace_hash(value: Any) -> str:
     if isinstance(value, Mapping):
-        trajectory = value.get("trajectory", value.get("trace", ""))
+        trajectory = value.get("trajectory", "")
     else:
         trajectory = getattr(value, "trajectory", "")
     return S.content_hash(str(trajectory or ""))
@@ -79,8 +80,8 @@ def _error_category(success: bool, note: str) -> str:
 def _prediction_probability(row: Mapping[str, Any]) -> float:
     base = float(row.get("base_probability", 0.5))
     candidate = float(row.get("candidate_probability", 0.5))
-    # Retained as a compact relative ranking value for legacy paired summaries.
-    # Absolute calibration metrics use base/candidate probabilities directly.
+    # A compact relative ranking value; absolute calibration metrics use the
+    # base/candidate probabilities directly.
     return max(0.0, min(1.0, 0.5 + candidate - base))
 
 
@@ -431,13 +432,13 @@ def parse_update_rules(raw: str, valid_feedback_ids: Sequence[str]) -> Tuple[Dic
     try:
         return _parse_update_rules(raw, valid_feedback_ids)
     except (ValueError, KeyError, TypeError) as exc:
-        raise ReviewerOutputError(str(exc)) from exc
+        raise SchemaViolation(str(exc)) from exc
 
 
 def _parse_update_rules(raw: str, valid_feedback_ids: Sequence[str]) -> Tuple[Dict[str, Any], ...]:
-    from skillexpand.l1.family_discovery import _extract_json
+    from skillexpand.runtime.json_output import extract_json
 
-    value = _extract_json(raw, required_keys=("rules",))
+    value = extract_json(raw, required_keys=("rules",))
     if set(value) != {"rules"} or not isinstance(value["rules"], list):
         raise ValueError("Reviewer update must contain only a rules list")
     if len(value["rules"]) > MAX_RULES:
@@ -482,36 +483,15 @@ def generate_reviewer_update(records, *, generation_round, parent_version=None,
         raw_outputs.append(raw)
         return raw
 
-    rules, _ = retry_reviewer(
-        call, lambda raw: parse_update_rules(raw, [row.feedback_id for row in rows]),
-    )
+    rules = call_with_repair(
+        repair_policy("reviewer.calibration_rules"), fresh(call),
+        lambda raw: parse_update_rules(raw, [row.feedback_id for row in rows]),
+    ).value
     return build_reviewer_update(
         rows, generation_round=generation_round, parent_version=parent_version,
         rules=rules, generator="llm", input_prompt=prompt,
         raw_output=str(raw_outputs[-1]),
     )
-
-
-def append_jsonl(path: Path, value: Any) -> None:
-    """Append one update/feedback record with an fsync for resumable runs."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as stream:
-        stream.write(json.dumps(S.to_dict(value), sort_keys=True, ensure_ascii=False) + "\n")
-        stream.flush()
-        import os
-        os.fsync(stream.fileno())
-
-
-def read_jsonl(path: Path) -> Tuple[Dict[str, Any], ...]:
-    path = Path(path)
-    if not path.exists():
-        return ()
-    rows = []
-    for line in path.read_text().splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
-    return tuple(rows)
 
 
 def validate_feedback_records(records: Iterable[Mapping[str, Any]], *, split: str = S.SPLIT_TRAIN,

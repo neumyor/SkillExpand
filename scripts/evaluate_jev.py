@@ -20,7 +20,6 @@ from skillexpand.evaluation.jev import JevClient, JevSkillScorer
 from skillexpand.evaluation.jev import load_panel_records, score_actual_records
 from skillexpand.evaluation.routing import FrozenRoutes
 from skillexpand.persistence.store import SkillLibrary
-from skillexpand.runtime import agent_factory as F
 
 
 def load_plan(root, cfg):

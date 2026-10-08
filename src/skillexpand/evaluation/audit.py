@@ -6,8 +6,8 @@ from pathlib import Path
 from skillexpand import schema as S
 from skillexpand.evaluation.selector import parse_selection
 from skillexpand.evaluation.validation import ScoreCache, library_fingerprint
-from skillexpand.l1.audit import require
-from skillexpand.l1.runner import save
+from skillexpand.persistence.io import require
+from skillexpand.persistence.io import save
 
 
 def audit_test(root, target):
@@ -33,7 +33,7 @@ def audit_test(root, target):
             {f'{t}.json' for t in ids}, 'unexpected/missing test routes')
     for t in ids:
         record = read(route_dir / 'tasks' / f'{t}.json')
-        require(record['task_id'] == t and not record.get('error'), 'invalid route record')
+        require(record['task_id'] == t and not record['failure'], 'invalid route record')
         choice = record['selection']
         selected = parse_selection(choice.get('raw', ''), groups)
         require(choice['ok'] == (selected is not None), 'route differs from raw selector output')
@@ -60,7 +60,7 @@ def audit_test(root, target):
             result = scores[key]
             require(result['task_id'] == t and result['skill_id'] == skill.skill_id and
                     result['skill_key'] == skill.key and result['protocol_hash'] == score_protocol and
-                    result['panel_key'] == panel and not result.get('error'), 'test result identity mismatch')
+                    result['panel_key'] == panel and not result['failure'], 'test result identity mismatch')
             require(type(result['success']) is bool, 'test outcome is not boolean')
             observations = [e for e in result['events'] if 'observation' in e]
             require(result['success'] == (observations[-1]['environment']['success'] if observations else False),

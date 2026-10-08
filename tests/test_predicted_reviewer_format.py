@@ -7,7 +7,8 @@ from unittest.mock import Mock, patch
 import pytest
 
 from skillexpand.evaluation.validation import PredictedSkillScorer
-from skillexpand.l1.family_discovery import DiscoveryError, _extract_json
+from skillexpand.reliability.errors import ResponseFormatError
+from skillexpand.runtime.json_output import extract_json
 from skillexpand.runtime.models.llm import GPTWrapper
 
 
@@ -20,23 +21,23 @@ def scorer():
 
 def test_extract_json_recovers_fences_commentary_trailing_comma_and_python_literals():
     expected = {"probability_true": 0.8, "predicted_success": True, "reason": "ok"}
-    assert _extract_json('```json\n' + json.dumps(expected) + '\n```') == expected
-    assert _extract_json('Analysis first. {"other": 1}\n' + json.dumps(expected),
+    assert extract_json('```json\n' + json.dumps(expected) + '\n```') == expected
+    assert extract_json('Analysis first. {"other": 1}\n' + json.dumps(expected),
                          required_keys=tuple(expected)) == expected
-    assert _extract_json('json\n{"probability_true":0.8,"predicted_success":true,'
+    assert extract_json('json\n{"probability_true":0.8,"predicted_success":true,'
                          '"reason":"literal ,} is fine",}') == {
                              **expected, "reason": "literal ,} is fine"}
-    assert _extract_json("{'probability_true': 0.8, 'predicted_success': True, "
+    assert extract_json("{'probability_true': 0.8, 'predicted_success': True, "
                          "'reason': 'ok'}") == expected
 
 
 def test_truncated_json_is_rejected_and_echo_cannot_become_review():
     reviewer = scorer()
-    with pytest.raises(DiscoveryError):
-        _extract_json('{"probability_true":0.95,"predicted_success":true,'
+    with pytest.raises(ResponseFormatError):
+        extract_json('{"probability_true":0.95,"predicted_success":true,'
                       '"reason":"unfinished')
     with pytest.raises(ValueError, match="exactly three"):
-        reviewer._parse('{"task":"Question: In Northeast Asia:LOUSE",'
+        reviewer._parse_response('{"task":"Question: In Northeast Asia:LOUSE",'
                         '"skill":{},"output_schema":{"probability_true":"number",'
                         '"predicted_success":"boolean","reason":"string"}}')
 
@@ -49,13 +50,13 @@ def test_truncated_json_is_rejected_and_echo_cannot_become_review():
 ])
 def test_predicted_review_validates_schema_and_consistency(payload, error):
     with pytest.raises(ValueError, match=error):
-        scorer()._parse(json.dumps(payload))
+        scorer()._parse_response(json.dumps(payload))
 
 
 def test_reason_at_new_limit_is_accepted():
     payload = {"probability_true": 0.8, "predicted_success": True,
                "reason": "x" * 512}
-    assert scorer()._parse(json.dumps(payload))["reason"] == payload["reason"]
+    assert scorer()._parse_response(json.dumps(payload))["reason"] == payload["reason"]
 
 
 def test_format_retry_preserves_thinking_and_json_schema():
@@ -131,7 +132,7 @@ def test_request_kwargs_are_reviewer_local_and_restored():
 
     client.side_effect = answer
     with patch('skillexpand.runtime.models.llm.ChatOpenAI', return_value=client):
-        wrapper = GPTWrapper('test', 'EMPTY', False)
+        wrapper = GPTWrapper('test', 'EMPTY')
         assert wrapper([], request_kwargs={"enable_thinking": True,
                                            "response_format": {"type": "json_object"}}) == '{"ok":true}'
         assert wrapper([]) == '{"ok":true}'

@@ -1,19 +1,16 @@
 """Regression checks for installed resources, historical inputs and process workers."""
-import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-from omegaconf import OmegaConf
-from skillexpand.l1.adapters import SearchQAAdapter, resolve
-from skillexpand.persistence.artifacts import code_signature
+from skillexpand.persistence.io import code_signature
 from skillexpand.runtime import parallel
 
 
 def _spawn_probe(value):
     from skillexpand.runtime.agent_factory import load_config
-    from skillexpand.persistence.artifacts import code_signature
+    from skillexpand.persistence.io import code_signature
     return {'value': value, 'benchmark': load_config('alfworld').benchmark.name,
             'environment_tracked': 'benchmarks/alfworld.py' in code_signature()}
 
@@ -30,14 +27,6 @@ def test_cli_and_packaged_configs_work_outside_checkout(tmp_path):
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert 'skillexpand.l1.adapters:SearchQAAdapter' in result.stdout
-
-
-def test_old_adapter_reference_loads_without_mutating_frozen_config():
-    cfg = OmegaConf.create({'benchmark': {'name': 'searchqa',
-        'l1': {'adapter': 'skill_evolution.l1.adapters:SearchQAAdapter'}}})
-    before = OmegaConf.to_container(cfg, resolve=True)
-    assert isinstance(resolve(cfg), SearchQAAdapter)
-    assert OmegaConf.to_container(cfg, resolve=True) == before
 
 
 def test_fingerprint_covers_environment_prompts_and_all_stages():

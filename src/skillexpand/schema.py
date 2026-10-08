@@ -71,63 +71,16 @@ MODES = (MODE_VANILLA, MODE_TASK_ADAPTED,
 
 ARM_BASE = 'base'
 ARM_CANDIDATE = 'candidate'
-#: A measurement of one revision with no pairing implied, used by the validation panel.
-#:
-#: The panel scores a revision on its own, and the base/candidate labels are attached
-#: later when a score is turned into an arm of the comparison.  Labelling a panel run as
-#: "the candidate arm" because it happens to be the one being measured would be a claim
-#: about a pairing that does not exist yet at that point.
-ARM_EVAL = 'eval'
-ARMS = (ARM_BASE, ARM_CANDIDATE, ARM_EVAL)
 
 SELECTION_AGENT = 'agent'
 SELECTION_FIXED = 'fixed'
 SELECTION_UNSKILLED = 'unskilled'
 SELECTIONS = (SELECTION_AGENT, SELECTION_FIXED, SELECTION_UNSKILLED)
 
-UPDATE_ACCEPTED = 'accepted'
-#: The candidate was measured and did not strictly beat the stable head.  A tie is a
-#: rejection: ``vc > vs`` is the whole rule, and a candidate that merely matches the
-#: head has not been shown to be an improvement that would justify invalidating the
-#: pool and the reject buffer.
-UPDATE_REJECTED = 'rejected'
-#: The patch was byte-identical (after canonicalisation) to one already rejected
-#: against this same stable head.  Rejected without spending a validation run, because
-#: the outcome is already known -- see :func:`patch_hash`.
-UPDATE_DUPLICATE_PATCH = 'duplicate_patch'
-UPDATE_NO_PROPOSAL = 'no_proposal'
-UPDATE_NO_POOLED_TASKS = 'no_pooled_tasks'
-UPDATE_OUTCOMES = (UPDATE_ACCEPTED, UPDATE_REJECTED, UPDATE_DUPLICATE_PATCH,
-                   UPDATE_NO_PROPOSAL, UPDATE_NO_POOLED_TASKS)
 
 OUTCOME_DIRECT_SUCCESS = 'direct_success'
 OUTCOME_REFLECTION_RECOVERED = 'reflection_recovered'
 OUTCOME_HARD_FAILURE = 'hard_failure'
-OUTCOME_TYPES = (OUTCOME_DIRECT_SUCCESS, OUTCOME_REFLECTION_RECOVERED,
-                 OUTCOME_HARD_FAILURE)
-
-TRIGGER_POSITIVE = 'positive'
-TRIGGER_NEGATIVE = 'negative'
-TRIGGER_MIXED = 'mixed'
-TRIGGER_NO_REPAIR_SIGNAL = 'no_repair_signal'
-LEARNING_TRIGGERS = (TRIGGER_POSITIVE, TRIGGER_NEGATIVE, TRIGGER_MIXED, TRIGGER_NO_REPAIR_SIGNAL)
-
-SELECTION_ATTEMPT_SUCCESS = 'success'
-SELECTION_ATTEMPT_FAILED = 'failed'
-SELECTION_ATTEMPT_STATUSES = (SELECTION_ATTEMPT_SUCCESS, SELECTION_ATTEMPT_FAILED)
-
-#: Pool threshold triggers L2 candidate generation.
-TRIGGER_POOL_THRESHOLD = 'pool_threshold'
-TRIGGER_FIXED_BATCH = 'fixed_batch'
-TRIGGERS = (TRIGGER_POOL_THRESHOLD, TRIGGER_FIXED_BATCH)
-
-VERDICT_ACCEPT = 'accept'
-VERDICT_REJECT = 'reject'
-VERDICTS = (VERDICT_ACCEPT, VERDICT_REJECT)
-
-META_ACTION_SYNTHESISE = 'synthesise'
-META_ACTION_HOLD = 'hold'
-META_ACTIONS = (META_ACTION_SYNTHESISE, META_ACTION_HOLD)
 
 
 def reason_tuple(value: Any, owner: str = 'record') -> Tuple[str, ...]:
@@ -262,10 +215,6 @@ def to_jsonl(obj: Any) -> str:
     return _canonical_json(to_dict(obj))
 
 
-def from_jsonl(cls: Any, line: str) -> Any:
-    return from_dict(cls, json.loads(line))
-
-
 # --------------------------------------------------------------------------
 # Knowledge artefacts
 # --------------------------------------------------------------------------
@@ -325,14 +274,8 @@ class Skill:
 
 @dataclass(frozen=True)
 class SkillEdit:
-    """One parsed operation proposed by the Attributor.
-
-    Mirrors ExpeL's ``ADD / EDIT / REMOVE / AGREE`` vocabulary
-    (``agent/expel.py:665`` ``parse_rules``).  Storing the operations, not just
-    the resulting text, is what lets the meta-layer learn *which kinds of edit*
-    survive val acceptance. Structured edits additionally retain the real section and
-    stable target rule ID used to construct the candidate.
-    """
+    """One structured edit applied to a candidate: the real section and stable
+    target rule ID used to construct it, kept for audit replay."""
 
     op: str
     text: str
@@ -349,18 +292,13 @@ class SkillEdit:
 
 @dataclass(frozen=True)
 class CandidateSkill:
-    """A *proposal*.  Never written into the live library by construction.
-
-    ExpeL conflates proposing with committing -- ``create_rules`` mutates
-    ``self.rule_items_with_count`` in place (``agent/expel.py:303-317``) -- so
-    downstream code must treat this object as the only carrier of a proposal.
-    """
+    """A *proposal*.  Never written into the live library by construction;
+    only an accepted batch commits its ``skill``."""
 
     candidate_id: str
     base_skill_key: str
     skill: Skill
     raw_llm_output: str
-    meta_skill_version: int
     proposed_from_experience_id: str
     edits: Tuple[SkillEdit, ...] = ()
 
@@ -397,7 +335,6 @@ class TaskExperience:
     reward: bool
     num_trials: int
     initial_skill_key: Optional[str] = None
-    initial_meta_skill_version: Optional[int] = None
     failed_trajectories: Tuple[str, ...] = ()
     reflections: Tuple[str, ...] = ()
     final_trajectory: Optional[str] = None
@@ -694,64 +631,8 @@ def paired_delta(base: ArmEvaluation, candidate: ArmEvaluation,
 
 
 # --------------------------------------------------------------------------
-# The skill selector and the meta layer
+# Validation results
 # --------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SelectionAttempt:
-
-    attempt_id: str
-    benchmark: str
-    task_id: int
-    family_id: str
-    attempt_index: int
-    status: str
-    reason: str
-    raw_output: str = ''
-    skill_id: str = ''
-    mode: str = SELECTION_AGENT
-    prompt_chars: int = 0
-    created_at: str = field(default_factory=utc_now)
-
-    def __post_init__(self) -> None:
-        if self.status not in SELECTION_ATTEMPT_STATUSES:
-            raise ValueError(f'unknown selection status {self.status!r}')
-        if self.status == SELECTION_ATTEMPT_SUCCESS and not self.skill_id:
-            raise ValueError('a successful selection attempt must name the skill')
-
-    @property
-    def succeeded(self) -> bool:
-        return self.status == SELECTION_ATTEMPT_SUCCESS
-
-
-@dataclass(frozen=True)
-class PatchAttemptRecord:
-
-    patch_id: str
-    stable_head_key: str
-    #: Canonicalised hash of the patch body; the duplicate guard compares this.
-    patch_hash: str
-    #: The resulting skill text the patch proposed, verbatim.
-    candidate_body: str
-    validation_before: float
-    validation_after: float
-    #: 'accept' / 'reject'.  Only 'reject' entries live in a reject buffer.
-    verdict: str
-    reasons: Tuple[str, ...] = ()
-    created_at: str = field(default_factory=utc_now)
-
-    candidate_description: str = ''
-
-    def __post_init__(self) -> None:
-        if self.verdict not in VERDICTS:
-            raise ValueError(f'unknown patch verdict {self.verdict!r}')
-        object.__setattr__(self, 'reasons', reason_tuple(self.reasons,
-                                                        'PatchAttemptRecord'))
-
-    @property
-    def delta(self) -> float:
-        return self.validation_after - self.validation_before
 
 
 @dataclass(frozen=True)
@@ -810,33 +691,6 @@ class ValidationResult:
             if a.arm_id == arm_id:
                 return a
         return None
-
-
-@dataclass(frozen=True)
-class MetaSkill:
-    """Layer 3: a natural-language policy describing *how to update skills*.
-
-    It conditions the editor's prompt.  It is never derived from a single failure:
-    The retired online L3 updater synthesised it periodically from a
-    batch of patch outcomes, which is what makes it slow memory rather than a
-    reaction to the last thing that happened.
-    """
-
-    version: int
-    body: str
-    parent_version: Optional[int] = None
-    created_at: str = field(default_factory=utc_now)
-    derived_from_patch_ids: Tuple[str, ...] = ()
-    rationale: str = ''
-    trigger: str = 'threshold'
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, 'derived_from_patch_ids',
-                           tuple(self.derived_from_patch_ids))
-
-    @property
-    def key(self) -> str:
-        return f'M@v{self.version}'
 
 
 # --------------------------------------------------------------------------
@@ -900,234 +754,3 @@ class SplitPlan:
         )
 
 
-@dataclass(frozen=True)
-class PatchAttempt:
-
-    patch_id: str
-    benchmark: str
-    skill_id: str
-    skill_family_id: str
-    stable_head_key: str
-    #: The revision the patch would install, i.e. ``head + 1``.  Also the revision the
-    #: skill library ultimately received -- identical to ``stable_head_key`` on a
-    #: rejection, because a rejection changes nothing.
-    candidate_skill_key: str
-    #: The editor strategy in force when the patch was proposed.  Frozen at enqueue
-    #: time, so a strategy revision that lands while the attempt waits cannot leave
-    #: this field describing something that did not happen.
-    meta_skill_version: int
-    pooled_experience_ids: Tuple[str, ...]
-    pooled_task_ids: Tuple[int, ...]
-    #: Which held-out panel was measured, and on which tasks.  Stored per attempt even
-    #: though the panel is fixed for the whole run: a reader of one record must not have
-    #: to consult the configuration to know what the score refers to.
-    validation_panel_key: str
-    validation_task_ids: Tuple[int, ...]
-    #: This attempt's position in its skill's sequence: 0 is the first, and the counter
-    #: never resets.  Not decoration -- ``created_at`` has second resolution, so several
-    #: attempts of one skill routinely share a timestamp and their log order is otherwise
-    #: decided by a content hash.  That makes "which attempt came first" unanswerable
-    #: exactly where it matters: the reject buffer is cleared by an archive, and "before or
-    #: after the last archive" is a question about order.
-    attempt_index: int = 0
-    #: The verdict and its supporting numbers.  ``None`` when nothing was measured --
-    #: no patch was proposed, or the patch was a duplicate of one already rejected
-    #: against this same head.
-    validation: Optional[ValidationResult] = None
-    #: The patch and its outcome, present whenever a patch was proposed (including a
-    #: duplicate, whose record explains the verdict without a measurement).
-    #:
-    #: ``None`` on an attempt that proposed nothing.  That case is *not* a rejected patch
-    #: -- the editor had nothing to say about the batch -- and putting a placeholder
-    #: record here would leak into the reject buffer and the duplicate guard, making a
-    #: future patch that happens to equal the head's own text look like a repeat offence.
-    patch: Optional[PatchAttemptRecord] = None
-    outcome: str = UPDATE_NO_PROPOSAL
-    #: Why no patch was proposed, when none was.  The editor's own reason, kept because
-    #: "answered with AGREEs" and "output did not parse" are failures of different things
-    #: and a run that lost the distinction could not tell a strategy problem from a
-    #: prompt-formatting problem.
-    editor_note: str = ''
-    pool_cleared: bool = False
-    l1_base_agreement: Optional[float] = None
-    trigger: str = TRIGGER_POOL_THRESHOLD
-    learning_trigger: str = TRIGGER_POSITIVE
-    created_at: str = field(default_factory=utc_now)
-
-    def __post_init__(self) -> None:
-        if self.outcome not in UPDATE_OUTCOMES:
-            raise ValueError(f'unknown patch outcome {self.outcome!r}')
-        if self.trigger not in TRIGGERS:
-            raise ValueError(f'unknown trigger {self.trigger!r}')
-        if self.learning_trigger not in LEARNING_TRIGGERS:
-            raise ValueError(f'unknown learning_trigger {self.learning_trigger!r}')
-        object.__setattr__(self, 'pooled_experience_ids',
-                           tuple(self.pooled_experience_ids))
-        object.__setattr__(self, 'pooled_task_ids', tuple(self.pooled_task_ids))
-        object.__setattr__(self, 'validation_task_ids',
-                           tuple(self.validation_task_ids))
-        if self.outcome == UPDATE_ACCEPTED:
-            if self.validation is None:
-                raise ValueError(
-                    'an accepted patch must carry its validation result; without it '
-                    'the accept decision is not reproducible from the record')
-            if not self.validation.passed:
-                raise ValueError(
-                    'an accepted patch must have passed its validation; the outcome '
-                    'and the verdict disagree')
-        if self.outcome == UPDATE_NO_POOLED_TASKS and self.pool_cleared:
-            raise ValueError(
-                'an attempt with no pooled evidence cannot have cleared its pool; the '
-                'archive flag names a pool that existed')
-
-    @property
-    def accepted(self) -> bool:
-        return self.outcome == UPDATE_ACCEPTED
-
-    @property
-    def rejected(self) -> bool:
-        return self.outcome in (UPDATE_REJECTED, UPDATE_DUPLICATE_PATCH)
-
-    @property
-    def measured(self) -> bool:
-        """Whether a validation run actually happened.
-
-        Distinct from "rejected": a duplicate patch is rejected without being measured,
-        because its outcome was already measured against the same head.  Anything
-        averaging score deltas must filter on this, or the unmeasured rejections enter
-        the average as whatever value their absent result defaults to.
-        """
-        return self.validation is not None
-
-    @property
-    def patch_hash(self) -> Optional[str]:
-        return self.patch.patch_hash if self.patch else None
-
-    @property
-    def validation_before(self) -> Optional[float]:
-        return self.validation.score_before if self.validation else None
-
-    @property
-    def validation_after(self) -> Optional[float]:
-        return self.validation.score_after if self.validation else None
-
-    @property
-    def validation_delta(self) -> Optional[float]:
-        return self.validation.delta if self.validation else None
-
-    @property
-    def graded(self) -> bool:
-        """Whether this attempt carries a verdict about the editing strategy.
-
-        An attempt that produced no patch is a statement about the *batch's evidence* --
-        the editor had nothing to say -- not about the strategy, so it is excluded from
-        layer 3's evidence and from the patch-level statistics.  It stays in the log and
-        its count is reported as context.
-        """
-        return self.outcome in (UPDATE_ACCEPTED, UPDATE_REJECTED,
-                                UPDATE_DUPLICATE_PATCH)
-
-    @property
-    def archive_pool(self) -> bool:
-        """Whether this attempt ends its pool rather than leaving it pending.
-
-        Two ways, and both mean the same thing: *this evidence set has been given its
-        full hearing*.
-
-        *   the pool had already reached ``max_pool_batch`` and the patch still failed -- the archive proper;
-        *   the editor produced no patch at all from a full pool.  A silent editor is not
-            a failed patch, but it is equally an answer, and the only thing the pool can
-            offer next time is the same batch.  Re-asking it would spin: every attempt
-            would return ``no_proposal``, consume nothing, and leave the pool over the
-            trigger -- measured, that loop does not terminate.
-
-        ``pool_cleared`` records the case; this property is the reading of it, so a caller
-        asking "does this attempt still own a pool?" has one place to ask.
-        """
-        return self.pool_cleared
-
-    @property
-    def version(self) -> int:
-        _, _, tail = self.stable_head_key.rpartition('@v')
-        return int(tail) if tail.isdigit() else -1
-
-
-@dataclass(frozen=True)
-class MetaUpdateDecision:
-
-    decision_id: str
-    action: str
-    head_meta_key: str
-    installed_meta_key: Optional[str] = None
-    consumed_patch_ids: Tuple[str, ...] = ()
-    #: Patch ids the pool held when this decision was made.
-    #:
-    #: Load-bearing for ``hold``: a hold consumes nothing, so without a recorded pool
-    #: size the same hold would be appended again on every subsequent trigger check --
-    #: once per completed attempt -- and the decision log would be mostly duplicates of
-    #: one unchanged fact.
-    pending_at_decision: int = 0
-    #: Accept/reject split of the evidence, so a reader can see what the strategy was
-    #: revised from without opening every patch record.
-    accepted_at_decision: int = 0
-    rejected_at_decision: int = 0
-    reasons: Tuple[str, ...] = ()
-    raw_llm_output: str = ''
-    created_at: str = field(default_factory=utc_now)
-
-    def __post_init__(self) -> None:
-        if self.action not in META_ACTIONS:
-            raise ValueError(f'unknown meta action {self.action!r}')
-        object.__setattr__(self, 'consumed_patch_ids',
-                           tuple(self.consumed_patch_ids))
-        object.__setattr__(self, 'reasons', reason_tuple(self.reasons,
-                                                        'MetaUpdateDecision'))
-
-
-def patch_attempt_id(stable_head_key: str, consumed: Sequence[str], trigger: str,
-                     outcome: str, attempt_index: int = 0) -> str:
-    """Deterministic id for one patch attempt.
-
-    Content-addressed on the head, the evidence, the trigger -- **and the attempt's
-    ordinal for that head**.  The ordinal is not decoration: the plan's unit of record is
-    *every L2 attempt*, and after a rejection the same head can legitimately
-    be asked the same question again on the same evidence -- a resumed run re-deriving an
-    attempt, or a test driving two attempts on one pool.  Without the ordinal those two
-    attempts would carry one id, and the append-only log would refuse the second record as
-    a duplicate of the first, losing the fact that the editor was asked twice.
-
-    The duplicate the design actually forbids is a duplicate *patch*, and that is guarded
-    separately by :func:`validation.patch_hash` against the reject buffer -- which is the
-    candidate duplicate policy and operates on the proposed text rather than on the attempt.
-
-    Deterministic in its inputs, so a re-derived attempt still names itself identically.
-    """
-    return content_hash({
-        'head': stable_head_key,
-        'experiences': list(consumed),
-        'trigger': trigger,
-        'outcome': outcome,
-        'n': int(attempt_index),
-    })
-
-
-def revision_after(skill: 'Skill') -> str:
-    return f'{skill.skill_id}@v{skill.version + 1}'
-
-
-def patch_acceptance_rate(attempts: Sequence[PatchAttempt]) -> Optional[float]:
-    """Share of *measured* attempts that were accepted.
-
-    ``None`` when nothing was measured, never 0.0: an unmeasured batch of attempts and
-    a batch that was measured and rejected throughout must not compare equal, or a
-    strategy would look like it had been tried when it had not.
-
-    The denominator is measured attempts only.  Duplicates were rejected without a
-    validation run because their outcome was already known against the same head;
-    counting them would let a strategy that repeats itself look badly on a number that
-    measures repetition rather than judgement.
-    """
-    measured = [a for a in attempts if a.measured]
-    if not measured:
-        return None
-    return sum(1 for a in measured if a.accepted) / len(measured)

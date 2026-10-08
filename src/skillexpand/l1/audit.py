@@ -1,24 +1,21 @@
-"""Offline integrity audit of v5 checkpoints; never calls a model or environment."""
+"""Offline integrity audit of L1 checkpoints; never calls a model or environment."""
 import argparse
 import json
 from pathlib import Path
 
+from skillexpand import schema as S
 from skillexpand.l1 import learning as L, protocol as P
+from skillexpand.persistence.io import require
+from skillexpand.reliability.errors import transient_type_names
+from skillexpand.runtime.models import llm as _provider  # noqa: F401 - registers translations
 
 
-# These errors are emitted by the provider callback for an individual failed
-# attempt before GPTWrapper retries the same logical request. They do not make
-# a completed checkpoint invalid; abandoned requests and unknown errors do.
-TRANSIENT_PROVIDER_ERRORS = frozenset({
-    'Timeout', 'TimeoutError', 'APIError', 'APIConnectionError',
-    'RateLimitError', 'ServiceUnavailableError', 'ConnectionError',
-    'RemoteDisconnected',
-})
+# Errors the provider callback records for one failed attempt before the
+# provider retry loop repeats the same logical request.  They do not make a
+# completed checkpoint invalid; unknown errors do.
+TRANSIENT_PROVIDER_ERRORS = transient_type_names()
 
 
-def require(condition, message):
-    if not condition:
-        raise ValueError(message)
 
 
 def audit_checkpoint(data, adapter):
@@ -43,16 +40,14 @@ def audit_checkpoint(data, adapter):
             require(t['success'] == (observations[-1]['environment']['success'] if observations else False),
                     'Trial outcome differs from environment result')
     exp = data['experience']
-    identity = data.get('identity')
-    if identity is not None:
-        from skillexpand import schema as S
-        require(S.content_hash(identity) == data['signature'], 'Checkpoint identity hash mismatch')
-        require(exp.get('evolution_round', 0) == identity.get('evolution_round', 0), 'Round identity mismatch')
-        require(exp['initial_skill_key'] == (identity['skill']['key'] if identity['skill'] else None),
-                'Injected Skill identity mismatch')
-        require(sum(t['phase'] == 'autonomous' for t in completed) <= identity['k'], 'Autonomous budget exceeded')
-        require(sum(t['phase'] == 'supervised' for t in completed) <= int(identity['supervised']),
-                'Supervised budget exceeded')
+    identity = data['identity']
+    require(S.content_hash(identity) == data['signature'], 'Checkpoint identity hash mismatch')
+    require(exp['evolution_round'] == identity['evolution_round'], 'Round identity mismatch')
+    require(exp['initial_skill_key'] == (identity['skill']['key'] if identity['skill'] else None),
+            'Injected Skill identity mismatch')
+    require(sum(t['phase'] == 'autonomous' for t in completed) <= identity['k'], 'Autonomous budget exceeded')
+    require(sum(t['phase'] == 'supervised' for t in completed) <= int(identity['supervised']),
+            'Supervised budget exceeded')
     require(exp['trial_rewards'] == [t['success'] for t in completed], 'Trial reward mismatch')
     require(exp['trial_phases'] == [t['phase'] for t in completed], 'Trial phase mismatch')
     require(exp['num_trials'] == len(completed), 'Trial count mismatch')
@@ -172,8 +167,12 @@ def audit_usage(checkpoint, data=None):
         # Token totals remain incomplete whenever a provider attempt failed.
         tokens_complete=errors == 0,
         # Checkpoint integrity is still auditable when those failures were
-        # transient attempts followed by a successful retry.
-        audit_complete=(not pending and abandoned == 0 and nonretryable_errors == 0),
+        # transient attempts followed by a successful retry, or requests
+        # abandoned by an interrupted process: the checkpoint never uses an
+        # abandoned response (its trial was recorded as interrupted and rerun),
+        # and every response it does use is matched against the ledger above.
+        # Their token cost is unknown, which ``tokens_complete`` reports.
+        audit_complete=(not pending and nonretryable_errors == 0),
         **tokens,
     )
 
@@ -187,7 +186,7 @@ def main():
     from omegaconf import OmegaConf
     from skillexpand.runtime.agent_factory import load_config
     from skillexpand.l1.adapters import resolve
-    from skillexpand.l1.runner import save
+    from skillexpand.persistence.io import save
     rows = []
     for path in args.checkpoints:
         try:

@@ -1,12 +1,12 @@
 """Bounded task-local repair with atomic trial checkpoints and an exclusive lock."""
 import copy
-import fcntl
 import json
-import os
 from contextlib import contextmanager
 from pathlib import Path
 from langchain.schema import HumanMessage
 from omegaconf import OmegaConf
+from skillexpand.persistence.io import exclusive_lock, save
+from skillexpand.reliability.errors import FrozenProtocolChanged, InvalidInput, JournalConflict, classify
 from skillexpand.l1.adapters import resolve
 from skillexpand.l1.adapters import PROMPT_FIELDS
 from skillexpand.l1 import protocol as P
@@ -19,33 +19,24 @@ def checkpoint(path):
         yield None
         return
     path = Path(path).resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.with_suffix('.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with exclusive_lock(path.with_suffix('.lock')):
         yield path
 
 
-def save(path, data):
-    if path is None:
-        return
-    path.parent.mkdir(parents=True,exist_ok=True)
-    temp = path.with_suffix('.tmp')
-    with temp.open('w') as stream:
-        json.dump(data, stream, ensure_ascii=False)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temp, path)
+def _error_entry(exc, stage):
+    # Type name only: the message may echo provider payloads into the checkpoint.
+    return {'stage': stage, 'error': type(exc).__name__, 'category': classify(exc).value}
 
 
-def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_skill_id,
+def run(agent, cfg, task_id, family_id, split, skill, selected_skill_id,
         selection_source, selection_reason, selection_raw, k=4, supervised=True,
         supervised_attempts=1, checkpoint_path=None, evolution_round=0):
     if k < 1:
-        raise ValueError('autonomous attempts must be >= 1')
+        raise InvalidInput('autonomous attempts must be >= 1')
     if supervised_attempts < 0:
-        raise ValueError('supervised attempts must be >= 0')
+        raise InvalidInput('supervised attempts must be >= 0')
     if split != S.SPLIT_TRAIN:
-        raise ValueError('L1 repair is train-only')
+        raise InvalidInput('L1 repair is train-only')
     adapter = resolve(cfg)
     adapter.configure(agent)
     settings = cfg.benchmark.get('l1', {})
@@ -67,13 +58,13 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
             'protocol': P.VERSION, 'signature': signature, 'trials': [], 'state': {},
             'guidance': None, 'guidance_checked': False, 'reflections': [], 'errors': []}
         if data['signature'] != signature:
-            raise ValueError('L1 checkpoint configuration/task/skill mismatch; use a new run directory')
+            raise FrozenProtocolChanged('L1 checkpoint configuration/task/skill mismatch; use a new run directory')
         data['identity'] = identity
         if data.get('experience'):
             return S.from_dict(S.TaskExperience, data['experience']), agent
         if path is not None:
             from skillexpand.persistence.usage import attach_usage
-            attach_usage([agent.llm,agent.long_context_llm],path.with_suffix('.usage.json'))
+            attach_usage([agent.llm],path.with_suffix('.usage.json'))
         trials = data['trials']
         for trial in trials:
             if trial['status'] == 'running':
@@ -96,7 +87,7 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
                                 HumanMessage(content=json.dumps(payload,ensure_ascii=False))],
                                stop=[],replace_newline=False)
             except Exception as exc:
-                data['errors'].append({'stage': 'reflection', 'key': key, 'error': type(exc).__name__})
+                data['errors'].append(dict(_error_entry(exc, 'reflection'), key=key))
                 save(path, data)
                 raise
             parsed = P.parse(raw,payload['evidence'],guided)
@@ -143,8 +134,10 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
             try:
                 result = agent.execute_trial(adapter,trial['repair_state'],guidance,on_event)
             except Exception as exc:
+                # Interrupted trials never consume the autonomous budget; the
+                # category tells a resumed run whether retrying can help.
                 trial.update(status='interrupted',success=False,termination='execution_error',
-                             error=type(exc).__name__+': '+str(exc),
+                             error=type(exc).__name__+': '+str(exc),failure_category=classify(exc).value,
                              trajectory='\n'.join(e.get('model_text','') for e in trial['events']))
                 data['state'] = P.refresh(data['state'],trials)
                 save(path,data)
@@ -156,7 +149,7 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
 
         completed = [t for t in trials if t['status']=='completed']
         if not completed or trials[-1]['status']=='interrupted':
-            raise RuntimeError('L1 budget ended on an interrupted trial; inspect the checkpoint')
+            raise JournalConflict('L1 budget ended on an interrupted trial; inspect the checkpoint')
         # Final extraction uses completed episodes without promoting retry hypotheses.
         if 'synthesis' not in data:
             payload = P.context(agent.task, completed, {}, None, agent.token_counter, adapter=adapter)
@@ -165,7 +158,7 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
                                 HumanMessage(content=json.dumps(payload, ensure_ascii=False))],
                                stop=[], replace_newline=False)
             except Exception as exc:
-                data['errors'].append({'stage': 'extraction', 'error': type(exc).__name__})
+                data['errors'].append(_error_entry(exc, 'extraction'))
                 save(path, data)
                 raise
             data['synthesis'] = {'input': payload, 'raw': raw,
@@ -185,8 +178,7 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
                             HumanMessage(content=json.dumps(repair_payload, ensure_ascii=False))],
                             stop=[], replace_newline=False)
                     except Exception as exc:
-                        data['errors'].append({'stage': 'extraction_repair',
-                                               'error': type(exc).__name__})
+                        data['errors'].append(_error_entry(exc, 'extraction_repair'))
                         save(path, data)
                         raise
                     synthesis['repair'] = {'input': repair_payload, 'raw': repair_raw,
@@ -216,7 +208,7 @@ def run(agent, cfg, task_id, family_id, split, skill, meta_version, selected_ski
             benchmark=cfg.benchmark.name,task_id=task_id,task=agent.task,
             family_id=family_id,split=split,reward=bool(solved),num_trials=len(completed),
             evolution_round=evolution_round,
-            initial_skill_key=skill.key if skill else None,initial_meta_skill_version=meta_version,
+            initial_skill_key=skill.key if skill else None,
             selected_skill_id=selected_skill_id,selection_source=selection_source,
             selection_reason=selection_reason,selection_raw=selection_raw,
             failed_trajectories=tuple(t['trajectory'] for t in completed if not t['success']),

@@ -5,7 +5,7 @@ import joblib
 from .base import BaseEnv
 from .searchqa import QAEnv
 from .alfworld import AlfworldEnv
-from skillexpand.runtime.utils import get_env_name_from_gamefile
+from .alfworld import get_env_name_from_gamefile
 
 
 def _alfworld_tasks(cfg):
@@ -16,6 +16,8 @@ def _alfworld_tasks(cfg):
         for row in json.loads(Path(cfg.benchmark.task_file).read_text())
     ]
 
+
+__all__ = ['BaseEnv', 'QAEnv', 'AlfworldEnv', 'ENVS', 'INIT_TASKS_FN']
 
 INIT_TASKS_FN = {'searchqa': lambda cfg: _searchqa_tasks(cfg), 'alfworld': _alfworld_tasks}
 ENVS = {'searchqa': QAEnv, 'alfworld': AlfworldEnv}

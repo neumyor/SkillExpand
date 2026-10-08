@@ -8,14 +8,23 @@ selection error.
 
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
+import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Sequence
+from http.client import HTTPException
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from skillexpand import schema as S
 from skillexpand.evaluation.validation import ScoreCache
+from skillexpand.reliability.errors import (
+    InvalidInput, JournalConflict, ProviderRejected, ProviderUnavailable, SchemaViolation, StageIncomplete,
+)
+from skillexpand.reliability.policies import PROVIDER
+from skillexpand.reliability.retry import retry_transient
+from skillexpand.reliability.units import FailureCollector, map_units
 from skillexpand.runtime import agent_factory as F
 
 
@@ -33,13 +42,13 @@ def load_panel_records(path):
         if not line.strip():
             continue
         row = json.loads(line)
-        if row.get("error"):
+        if row.get("failure"):
             continue
         if "skill_key" not in row or "task_id" not in row or "success" not in row:
-            raise ValueError(f"panel row {line_number} lacks skill_key/task_id/success")
+            raise InvalidInput(f"panel row {line_number} lacks skill_key/task_id/success")
         key = (str(row["skill_key"]), int(row["task_id"]))
         if key in records:
-            raise ValueError(f"duplicate actual panel row for {key}")
+            raise InvalidInput(f"duplicate actual panel row for {key}")
         records[key] = row
     return records
 
@@ -64,7 +73,7 @@ class JevClient:
         self.timeout = float(timeout)
         self.threshold = float(threshold)
         if not 0.0 <= self.threshold <= 1.0:
-            raise ValueError("JEV threshold must be between 0 and 1")
+            raise InvalidInput("JEV threshold must be between 0 and 1")
 
     def judge(self, task: str, skill: S.Skill) -> Dict:
         state = (
@@ -89,15 +98,28 @@ class JevClient:
             data=json.dumps(payload, ensure_ascii=False).encode(),
             headers={"Content-Type": "application/json"},
         )
-        with urlopen(request, timeout=self.timeout) as response:
-            result = json.load(response)
+        def send():
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    return json.load(response)
+            except HTTPError as exc:
+                error = (ProviderUnavailable if exc.code == 429 or exc.code >= 500
+                         else ProviderRejected)
+                raise error(f"JEV HTTP {exc.code}: {exc.reason}") from exc
+            except (URLError, socket.timeout, TimeoutError, ConnectionError, HTTPException) as exc:
+                raise ProviderUnavailable(f"JEV unreachable: {exc}") from exc
+
+        try:
+            result = retry_transient(send, PROVIDER, sleep=time.sleep)
+        except json.JSONDecodeError as exc:
+            raise SchemaViolation(f"JEV response is not JSON: {exc}") from exc
         try:
             probabilities = result["answers"]["success"]["probabilities"]
             probability = float(probabilities["true"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("JEV response lacks answers.success.probabilities.true") from exc
+            raise SchemaViolation("JEV response lacks answers.success.probabilities.true") from exc
         if not 0.0 <= probability <= 1.0:
-            raise ValueError("JEV true probability is outside [0, 1]")
+            raise SchemaViolation("JEV true probability is outside [0, 1]")
         return {
             "probability_true": probability,
             "predicted_success": probability >= self.threshold,
@@ -177,7 +199,7 @@ class JevSkillScorer:
     def score(self, skill, task_ids, panel_key):
         task_ids = tuple(sorted(int(t) for t in task_ids))
         if not task_ids or not set(task_ids) <= set(self.routes.groups[skill.skill_id]):
-            raise ValueError("JEV tasks must belong to the frozen Skill route group")
+            raise JournalConflict("JEV tasks must belong to the frozen Skill route group")
         keys = {
             # The raw probability is reusable across thresholds, but the persisted
             # ``predicted_success`` bit is thresholded at write time.  Include the
@@ -202,21 +224,16 @@ class JevSkillScorer:
             return {"task_id": task_id, "skill_key": skill.key, "cache_key": keys[task_id],
                     "panel_key": panel_key, "protocol_hash": self.protocol_hash, **result}
 
-        errors = []
-        if pending:
-            with ThreadPoolExecutor(max_workers=min(self.workers, len(pending)),
-                                    thread_name_prefix="jev-score") as pool:
-                futures = {task_id: pool.submit(one, task_id) for task_id in pending}
-                for task_id in pending:
-                    try:
-                        record = futures[task_id].result()
-                    except Exception as exc:  # keep all completed requests durable
-                        errors.append({"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"})
-                    else:
-                        self.cache.put(keys[task_id], record)
-                        records[task_id] = record
-        if errors or set(records) != set(task_ids):
-            raise RuntimeError(f"Incomplete JEV validation ({len(errors)} failed task(s))")
+        def store(task_id, record):
+            self.cache.put(keys[task_id], record)
+            records[task_id] = record
+
+        collector = FailureCollector("jev-validation", self.cache.path.parent / "evaluation_errors")
+        map_units(pending, one, workers=self.workers, collector=collector, on_success=store,
+                  name=lambda task_id: keys[task_id], thread_name_prefix="jev-score")
+        collector.raise_if_incomplete("Incomplete JEV validation")
+        if set(records) != set(task_ids):
+            raise StageIncomplete("Incomplete JEV validation (missing results)")
         return JevPanelScore(
             skill.key, skill.body, task_ids,
             tuple(records[t] for t in task_ids),

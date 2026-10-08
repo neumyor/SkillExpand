@@ -1,28 +1,32 @@
 """Supervisor control-flow tests without network calls or benchmark execution."""
-import importlib.util
+from dataclasses import replace
 import json
+import os
 from pathlib import Path
-import time
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-spec = importlib.util.spec_from_file_location('campaign_launcher',
-    Path(__file__).resolve().parents[1] / 'scripts/run_campaign.py')
-C = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(C)
+from skillexpand import campaign as C
 
 
 @pytest.fixture
 def campaign(tmp_path, monkeypatch):
     manifest = {'repo': str(tmp_path), 'python': 'python', 'concurrency': C.CONCURRENCY,
-                'autonomous_attempts': 4, 'batch_size': 50, 'candidate_count': 3}
+                'autonomous_attempts': 4, 'supervised_attempts': 1, 'batch_size': 50,
+                'candidate_count': 3, 'single_candidate': False, 'skill_edit_mode': 'rewrite',
+                'acceptance_mode': 'predicted', 'predicted_review_scope': 'val',
+                'reviewer_update_mode': 'none', 'reviewer_feedback_size': 0,
+                'models': {role: 'm' for role in C.ROLES}}
     C.save(tmp_path / 'manifest.json', manifest)
     monkeypatch.setattr(C, 'verify', lambda root: manifest)
     monkeypatch.setattr(C, 'environment', lambda root: {})
     monkeypatch.setattr(C, 'health', lambda root: {})
     monkeypatch.setattr(C, 'audit_stage', lambda *args: {'integrity': 'passed'})
-    monkeypatch.setattr(C, 'RETRY_DELAYS', (0, 0, 0))
+    real_policy = C.stage_policy
+    monkeypatch.setattr(C, 'stage_policy', lambda: replace(real_policy(), delays=(0,)))
     monkeypatch.setenv('EXPE_STAGE_ATTEMPTS', '4')
     return tmp_path
 
@@ -101,16 +105,17 @@ def test_detached_launch_and_duplicate_pid_refusal(campaign, monkeypatch):
     assert len(invocations) == 1
 
 
-def test_validation_errors_do_not_retry_due_to_old_network_error(campaign):
-    C.save(campaign / 'run/discovery/errors/0.json', {'error': 'Timeout: service unavailable'})
-    assert not C.retryable_failure(ValueError('audit mismatch'), campaign / 'run', 0)
-    assert C.retryable_failure(RuntimeError('L1 interrupted'), campaign / 'run', 0)
-    assert not C.retryable_failure(RuntimeError('L1 interrupted'), campaign / 'run', time.time() + 10)
-
-
-def test_predicted_validation_failure_is_retryable(campaign):
-    exc = RuntimeError('Incomplete predicted validation (1 failed task(s); task_ids=[7])')
-    assert C.retryable_failure(exc, campaign / 'run', 0)
+def test_stage_failures_are_classified_by_category_not_message(campaign):
+    from skillexpand.reliability import errors as E
+    summary = C.failure_summary
+    assert summary(E.StageIncomplete('L1 interrupted', [{'category': 'infrastructure'}]))['retryable']
+    assert summary(E.RepairExhausted('reviewer output budget exhausted'))['retryable']
+    for exc in (E.AuditFailure('audit mismatch'), E.ProviderRejected('invalid key'),
+                E.InvalidInput('bad split')):
+        assert summary(exc)['retryable'] is False and summary(exc)['halt'] == 'stage'
+    # A message mentioning a network failure no longer makes a defect retryable.
+    for exc in (RuntimeError('Timeout: service unavailable'), ValueError('unknown frozen task')):
+        assert summary(exc) == {'category': 'bug', 'retryable': False, 'halt': 'all'}
 
 
 def test_default_recovery_survives_more_than_four_stage_failures(campaign, monkeypatch):
@@ -121,12 +126,6 @@ def test_default_recovery_survives_more_than_four_stage_failures(campaign, monke
     assert C.run_job(campaign, 'preflight', 'searchqa') == 0
     assert calls[:10] == [('cold-start', n) for n in range(1, 11)]
     assert calls[10:] == [('evolve-1', 1), ('evolve-2', 1)]
-
-
-def test_reviewer_update_failure_is_retryable_but_integrity_error_is_not(campaign):
-    from skillexpand.runtime.reviewer_retry import ReviewerUpdateError
-    assert C.retryable_failure(ReviewerUpdateError('output budget exhausted'), campaign / 'run', 0)
-    assert not C.retryable_failure(ValueError('unknown frozen task'), campaign / 'run', 0)
 
 
 def test_input_validation_rejects_missing_tasks_and_unknown_roles():
@@ -164,8 +163,9 @@ def test_campaign_runtime_uses_local_configuration(tmp_path, monkeypatch):
     assert settings['alfworld_config'] == str(files['ALFWORLD_CONFIG'])
 
     C.save(tmp_path / 'manifest.json', dict(settings, repo=str(tmp_path),
+        models={role: settings['model'] for role in C.ROLES},
         request_interval_seconds=C.REQUEST_INTERVAL_SECONDS,
-        timeouts={'request': 300, 'request_retries': 2,
+        timeouts={'request': 300,
                   'environment': 120, 'worker_progress': 3600}))
     monkeypatch.setenv('OPENAI_API_KEY', 'test-only-secret')
     environment = C.environment(tmp_path)
@@ -179,9 +179,9 @@ def test_campaign_runtime_uses_local_configuration(tmp_path, monkeypatch):
 def test_environment_rejects_endpoint_drift(tmp_path, monkeypatch):
     manifest = {
         'llm_base_url': 'https://frozen.example/v1',
-        'timeouts': {'request': 300, 'request_retries': 2, 'environment': 120,
+        'timeouts': {'request': 300, 'environment': 120,
                      'worker_progress': 3600},
-        'model': 'base', 'models': {}, 'overlay': str(tmp_path),
+        'models': {}, 'overlay': str(tmp_path),
         'alfworld_data': str(tmp_path), 'alfworld_config': str(tmp_path / 'cfg'),
         'alfworld_bench_src': str(tmp_path), 'python': str(tmp_path / 'python'),
         'request_interval_seconds': C.REQUEST_INTERVAL_SECONDS,
@@ -220,7 +220,7 @@ def test_campaign_requires_local_configuration(monkeypatch):
 
 
 def test_health_probes_each_distinct_role_model(tmp_path, monkeypatch):
-    models = {role: 'base' for role in C.role_models({'models': {}})}
+    models = {role: 'base' for role in C.ROLES}
     models['l2_reviewer'] = 'strong'
     C.save(tmp_path / 'manifest.json', {'models': models})
     monkeypatch.setattr(C, 'environment', lambda root: {
@@ -249,7 +249,82 @@ def test_health_probes_each_distinct_role_model(tmp_path, monkeypatch):
         return Response(model)
 
     monkeypatch.setattr(C.urllib.request, 'urlopen', urlopen)
+    # health() exports the campaign environment into this process; undo it.
+    monkeypatch.setattr(C.os, 'environ', dict(os.environ))
     result = C.health(tmp_path)
     assert seen == ['base', 'strong']
     assert result['models']['l2_reviewer'] == 'strong'
     assert {item['requested_model'] for item in result['probes']} == {'base', 'strong'}
+
+
+def _runtime(tmp_path, monkeypatch):
+    for name, path in (('ALFWORLD_PYTHON', tmp_path / 'python'),
+                       ('ALFWORLD_CONFIG', tmp_path / 'textworld.yaml')):
+        path.touch()
+        monkeypatch.setenv(name, str(path))
+    for name, path in (('EXPE_CAMPAIGN_OVERLAY', tmp_path / 'overlay'),
+                       ('ALFWORLD_DATA', tmp_path / 'data'),
+                       ('ALFWORLD_BENCH_SRC', tmp_path / 'benchmark-src')):
+        path.mkdir()
+        monkeypatch.setenv(name, str(path))
+    monkeypatch.setenv('EXPE_LLM_MODEL', 'test-model')
+    monkeypatch.setenv('EXPE_LLM_BASE_URL', 'https://llm.example.invalid/v1')
+    inputs = tmp_path / 'inputs'
+    inputs.mkdir()
+    for benchmark in C.BENCHMARKS:
+        (inputs / f'{benchmark}-tasks.json').write_text(json.dumps([{'question': str(i)} for i in range(7)]))
+        assignment = {str(i): part for i, part in enumerate(['train'] * 4 + ['val', 'test', 'test'])}
+        (inputs / f'{benchmark}-split.json').write_text(json.dumps({'assignment': assignment}))
+    return inputs
+
+
+def test_prepare_freezes_code_and_a_launcher_that_runs_only_the_frozen_copy(tmp_path, monkeypatch):
+    inputs = _runtime(tmp_path, monkeypatch)
+    root = tmp_path / 'campaign'
+    manifest = C.prepare(root, inputs)
+    assert (root / 'code/src/skillexpand/campaign.py').is_file()
+    assert (root / 'code/run_campaign.py').read_text() == C.FROZEN_LAUNCHER
+    assert 'code/run_campaign.py' in manifest['files']
+    # A broken package earlier on PYTHONPATH must not shadow the frozen copy.
+    shadow = tmp_path / 'shadow' / 'skillexpand'
+    shadow.mkdir(parents=True)
+    (shadow / '__init__.py').write_text('raise ImportError("live package used")\n')
+    env = dict(os.environ, PYTHONPATH=str(shadow.parent))
+    output = subprocess.check_output(
+        [sys.executable, str(root / 'code/run_campaign.py'), 'check', '--root', str(root)],
+        env=env, text=True)
+    assert json.loads(output.strip().splitlines()[-1])['verified'] is True
+
+
+def test_source_git_drift_is_reported_not_fatal(tmp_path, monkeypatch):
+    inputs = _runtime(tmp_path, monkeypatch)
+    root = tmp_path / 'campaign'
+    C.prepare(root, inputs)
+    monkeypatch.setattr(C, 'git_identity', lambda repo: {'commit': 'other', 'dirty': True,
+                                                         'status_hash': 'x'})
+    manifest = C.verify(root)
+    assert C.source_drift(manifest)['changed'] is True
+    (root / 'code/src/skillexpand/schema.py').write_text('# edited\n')
+    with pytest.raises(ValueError, match='Frozen campaign file changed'):
+        C.verify(root)
+
+
+def test_prepare_refuses_to_run_from_a_frozen_copy(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, '__file__', str(tmp_path / 'code/src/skillexpand/campaign.py'))
+    with pytest.raises(ValueError, match='source checkout'):
+        C.source_checkout()
+
+
+def test_checkout_shim_hands_campaign_actions_to_the_frozen_launcher(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'run_campaign_shim', Path(__file__).resolve().parents[1] / 'scripts/run_campaign.py')
+    shim = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shim)
+    root = tmp_path / 'campaign'
+    assert shim.frozen_launcher(['start', '--root', str(root)]) is None
+    (root / 'code').mkdir(parents=True)
+    (root / 'code/run_campaign.py').write_text(C.FROZEN_LAUNCHER)
+    assert shim.frozen_launcher(['start', '--root', str(root), '--mode', 'full']) == \
+        root.resolve() / 'code/run_campaign.py'
+    assert shim.frozen_launcher(['prepare', '--root', str(root)]) is None

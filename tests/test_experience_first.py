@@ -12,14 +12,15 @@ from skillexpand.l1 import cold_start as C
 from skillexpand import cli as evolve
 from skillexpand import schema as S
 from skillexpand.l2 import loop as L
-from skillexpand.l2 import patterns as BP
+from skillexpand.l1 import patterns as BP
 from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
-from skillexpand.evaluation import validation as V
 from skillexpand.persistence import store as ST
-from skillexpand.persistence import artifacts as A
+from skillexpand.l1 import artifacts as A
 from skillexpand.evaluation.selector import SkillSelector
 from tests.test_l1_repair import Model
+from skillexpand.reliability.errors import ProviderUnavailable, StoreError
+from skillexpand.reliability.units import failure_record
 
 
 class ExperienceFirstTests(unittest.TestCase):
@@ -63,6 +64,7 @@ class ExperienceFirstTests(unittest.TestCase):
         self.cfg = F.load_config("searchqa")
         self.cfg.benchmark.task_file = str(self.tasks)
         self.cfg.agent.llm = "gpt-3.5-turbo"
+        self.cfg.models = {role: "gpt-3.5-turbo" for role in self.cfg.models}
         self.plan = S.SplitPlan.make(
             {0: "train", 1: "train", 2: "val", 3: "test"}, "searchqa", 42
         )
@@ -122,7 +124,6 @@ class ExperienceFirstTests(unittest.TestCase):
             self.executed.append(spec)
             with (
                 patch.object(PL, "_config", return_value=self.cfg),
-                patch.object(PL, "_embedder", return_value=None),
                 patch.object(
                     F,
                     "LLM_CLS",
@@ -215,7 +216,6 @@ class ExperienceFirstTests(unittest.TestCase):
             for spec in specs:
                 self.executed.append(spec)
                 with (patch.object(PL,'_config',return_value=self.cfg),
-                      patch.object(PL,'_embedder',return_value=None),
                       patch.object(F,'LLM_CLS',side_effect=lambda **kw:
                           Model(['Action 1: Search[Prius]','Action 2: Finish[Toyota]']))):
                     on_result(worker(spec))
@@ -240,7 +240,8 @@ class ExperienceFirstTests(unittest.TestCase):
 
         def fail(specs, worker, workers, on_result, **kw):
             original(specs[:1], worker, workers, on_result)
-            on_result({"ok": False, "task_id": 1, "error": "network"})
+            on_result({"ok": False, "task_id": 1, "failure": failure_record(
+                ProviderUnavailable("network"), unit_id=1, stage="cold-start/l1")})
 
         cold = self.cold()
         cold._run_units = fail
@@ -276,6 +277,9 @@ class ExperienceFirstTests(unittest.TestCase):
             replace(skill, description="")
 
     def test_routed_real_executor_does_not_see_reference_or_repair(self):
+        from skillexpand.evaluation import routing as R
+        from skillexpand.evaluation import workers as EW
+
         skill = S.Skill(
             "searchqa.one", "one", 0, "lookup", "Manufacturer lookup", "Use evidence."
         )
@@ -283,9 +287,7 @@ class ExperienceFirstTests(unittest.TestCase):
         selector_models = []
 
         def model(**kw):
-            m = Model(
-                ["SKILL: searchqa.one\nWHY: manufacturer", "Action 1: Finish[Toyota]"]
-            )
+            m = Model(["Action 1: Finish[Toyota]"])
             models.append(m)
             return m
 
@@ -295,33 +297,26 @@ class ExperienceFirstTests(unittest.TestCase):
             selector_models.append(selector)
             return SimpleNamespace(llm=selector)
 
-        spec = PL.UnitSpec(
-            "eval",
-            "searchqa",
-            2,
-            S.ROLE_EVAL,
-            S.ARM_EVAL,
-            S.MODE_CONSOLIDATED_DIRECT,
-            "none",
-            skill_library=(S.to_dict(skill),),
+        route = R.RouteSpec(
+            "searchqa", 2,
+            ({"skill_id": skill.skill_id, "description": skill.description},), None,
         )
         with (
             patch.object(PL, "_config", return_value=self.cfg),
             patch.object(F, "LLM_CLS", side_effect=model),
-            patch.object(
-                F,
-                "build_reasoning_host",
-                side_effect=selector_host,
-            ),
+            patch.object(F, "build_reasoning_host", side_effect=selector_host),
         ):
-            result = PL.execute(spec)
+            routed = R.route_task(route)
+            self.assertEqual(routed["selection"]["skill_id"], skill.skill_id)
+            result = EW.execute_fixed(EW.FixedSpec(
+                "eval", "searchqa", 2, skill_key=skill.key, skill_body=skill.body))
         self.assertTrue(result["success"], result)
         self.assertEqual(result["skill_key"], skill.key)
         self.assertEqual(len(selector_models), 1)
         self.assertEqual(len(selector_models[0].prompts), 1)
         self.assertGreaterEqual(len(models), 1)
         self.assertNotIn("Reference answer:", "\n".join(models[0].prompts))
-        self.assertIsNone(result["trajectory"])
+        self.assertNotIn("Current task repair state", "\n".join(models[0].prompts))
 
     def test_task_concurrency_and_split_before_clustering(self):
         batches = list(C.task_batches(list(range(22)), 8))
@@ -335,26 +330,14 @@ class ExperienceFirstTests(unittest.TestCase):
         self.assertEqual(set(plan.assignment), {0, 1, 2, 3})
 
     def test_wrong_selector_answer_is_failure_not_silent_reroute(self):
-        skill = S.Skill(
-            "searchqa.one", "one", 0, "lookup", "Manufacturer lookup", "rule"
-        )
-        spec = PL.UnitSpec(
-            "eval",
-            "searchqa",
-            2,
-            S.ROLE_EVAL,
-            S.ARM_EVAL,
-            S.MODE_CONSOLIDATED_DIRECT,
-            "none",
-            skill_library=(S.to_dict(skill),),
+        from skillexpand.evaluation import routing as R
+
+        route = R.RouteSpec(
+            "searchqa", 2,
+            ({"skill_id": "searchqa.one", "description": "Manufacturer lookup"},), None,
         )
         with (
             patch.object(PL, "_config", return_value=self.cfg),
-            patch.object(
-                F,
-                "LLM_CLS",
-                side_effect=lambda **kw: Model(["SKILL: invented\nWHY: none"]),
-            ),
             patch.object(
                 F,
                 "build_reasoning_host",
@@ -363,12 +346,11 @@ class ExperienceFirstTests(unittest.TestCase):
                 ),
             ),
         ):
-            record = PL.execute(spec)
-        self.assertFalse(record["success"])
-        self.assertEqual(record["steps"], 0)
-        self.assertIsNone(record["skill_key"])
-        self.assertIsNone(record["error"])
-        self.assertEqual(record["failure_mode"], "routing_failure")
+            record = R.route_task(route)
+        self.assertFalse(record["selection"]["ok"])
+        self.assertEqual(record["selection"]["skill_id"], "")
+        self.assertEqual(record["selection"]["reason"], "unparsable")
+        self.assertIsNone(record["failure"])
 
     def test_usage_accumulates_across_restart_and_lock_excludes_second_writer(self):
         from skillexpand.persistence.usage import PersistentUsage
@@ -413,7 +395,7 @@ class ExperienceFirstTests(unittest.TestCase):
             stream.write('{"id":2}\n')
         self.assertEqual(ST.read_jsonl(path), [{"id": 1}, {"id": 2}])
         path.write_bytes(b'{"id":1}\nBROKEN\n{"id":2}\n')
-        with self.assertRaises(ST.StoreError):
+        with self.assertRaises(StoreError):
             ST.read_jsonl(path)
 
     def test_initial_skill_accepts_ordered_rule_list_without_data_loss(self):
@@ -428,7 +410,7 @@ class ExperienceFirstTests(unittest.TestCase):
                 C.normalize_initial_skill({"description": "scope", "body": body})
 
     def test_structured_cold_start_assigns_sections_and_stable_ids(self):
-        from skillexpand.l2 import structured_skill as SS
+        from skillexpand import structured_skill as SS
         def ask(prompt):
             if 'initial reusable Skill' in prompt:
                 return json.dumps({

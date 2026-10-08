@@ -1,7 +1,6 @@
 """Read completed cold starts as immutable input to a new L2 protocol."""
 
 import json
-import os
 from pathlib import Path
 
 from omegaconf import OmegaConf
@@ -9,11 +8,12 @@ from omegaconf import OmegaConf
 from skillexpand.runtime import agent_factory as F
 from skillexpand import schema as S
 from skillexpand.persistence import store as ST
-from skillexpand.l1.cold_start import read_split
-from skillexpand.l1.cold_start import freeze
+from skillexpand.persistence.io import read_split
+from skillexpand.reliability.errors import JournalConflict
+from skillexpand.persistence.io import freeze
 from skillexpand.l1.family_discovery import load_family_plan
+from skillexpand.l1 import patterns as BP
 from skillexpand.l1.protocol import projection
-from skillexpand.l2 import patterns as BP
 
 
 FILES = (
@@ -27,32 +27,6 @@ FILES = (
 )
 
 
-def code_signature():
-    source = Path(__file__).resolve().parents[1]
-    return {
-        str(p.relative_to(source)): S.content_hash(p.read_text())
-        for p in sorted(source.rglob("*.py"))
-    }
-
-
-def provider_signature():
-    # Hash runtime switches rather than persisting endpoint URLs or arbitrary extras.
-    from skillexpand.runtime.models.llm import get_llm_base_url
-    from skillexpand.runtime.models.llm import get_extra_model_kwargs
-    from skillexpand.runtime.models.llm import request_policy
-
-    policy = request_policy()
-    # Retry scheduling does not change a completed generation. Retain the
-    # historical identity for frozen routes; the active recovery policy is
-    # recorded separately by the resume preparation report.
-    identity_policy = {key: policy[key] for key in ('timeout', 'retries')}
-    return S.content_hash(
-        {"endpoint": get_llm_base_url(), "extra": get_extra_model_kwargs(), 'requests': identity_policy,
-         'environment_timeout': os.environ.get('EXPE_ENV_TIMEOUT_SECONDS', '120'),
-         'worker_timeout': os.environ.get('EXPE_WORKER_TIMEOUT_SECONDS', '3600')}
-    )
-
-
 def load_cold_start(root):
     root = Path(root)
     values = {name: json.loads((root / name).read_text()) for name in FILES}
@@ -61,7 +35,7 @@ def load_cold_start(root):
         manifest["split"] != values["split.json"]
         or manifest["config"] != values["config.json"]
     ):
-        raise ValueError("Cold-start split/config differs from its frozen manifest")
+        raise JournalConflict("Cold-start split/config differs from its frozen manifest")
     cfg = OmegaConf.create(values["config.json"])
     plan = read_split(root / "split.json")
     clusters = load_family_plan(root / "clusters.json", benchmark=plan.benchmark)
@@ -73,23 +47,23 @@ def load_cold_start(root):
     }
     train = set(plan.tasks_in(S.SPLIT_TRAIN))
     if complete.get("train_count") != len(train):
-        raise ValueError("Cold-start train count mismatch")
+        raise JournalConflict("Cold-start train count mismatch")
     if mapping != expected or set(clusters.task_to_family) != train:
-        raise ValueError("Cold-start mapping must cover exactly train tasks")
+        raise JournalConflict("Cold-start mapping must cover exactly train tasks")
     if complete["mapping_hash"] != S.content_hash(mapping) or complete[
         "initial_skills_hash"
     ] != S.content_hash(initial):
-        raise ValueError("Cold-start artifact hash mismatch")
+        raise JournalConflict("Cold-start artifact hash mismatch")
     table = F.task_table(cfg, refresh=True)
     if set(plan.assignment) != set(range(len(table))) or values["manifest.json"][
         "task_table_hash"
     ] != S.content_hash(table):
-        raise ValueError("Cold-start task data changed")
+        raise JournalConflict("Cold-start task data changed")
     skills = tuple(S.from_dict(S.Skill, item) for item in initial)
     if len(skills) != len(clusters.families) or {s.family_id for s in skills} != set(
         clusters.families
     ):
-        raise ValueError("Initial library does not match clusters")
+        raise JournalConflict("Initial library does not match clusters")
     cards = {}
     for t in sorted(train):
         exp = S.from_dict(
@@ -107,21 +81,16 @@ def load_cold_start(root):
             or exp.experience_card.get("schema_version") != 5
             or exp.experience_card.get("task", {}).get("task_id") != t
         ):
-            raise ValueError(f"Invalid cold-start experience: task {t}")
+            raise JournalConflict(f"Invalid cold-start experience: task {t}")
         cards[t] = exp
-    hashes_path = root / "discovery/card_hashes.json"
-    if hashes_path.exists():
-        from skillexpand.l1.protocol import projection
-
-        expected_hashes = json.loads(hashes_path.read_text())
-        actual_hashes = {
-            str(t): S.content_hash(projection(e.experience_card))
-            for t, e in cards.items()
-        }
-        if actual_hashes != expected_hashes:
-            raise ValueError("Cold-start cards differ from discovery hashes")
+    expected_hashes = json.loads((root / "discovery/card_hashes.json").read_text())
+    actual_hashes = {
+        str(t): S.content_hash(projection(e.experience_card)) for t, e in cards.items()
+    }
+    if actual_hashes != expected_hashes:
+        raise JournalConflict("Cold-start cards differ from discovery hashes")
     if len({e.experience_id for e in cards.values()}) != len(cards):
-        raise ValueError("Duplicate cold-start experience IDs")
+        raise JournalConflict("Duplicate cold-start experience IDs")
     batch_size = manifest['card_batch_size']
     for family, ids in sorted(clusters.families_index.items()):
         for index, start in enumerate(range(0, len(ids), batch_size)):
@@ -141,7 +110,7 @@ def load_cold_start(root):
             or tuple(skill.provenance.source_experience_ids)
             != tuple(cards[t].experience_id for t in ids)
         ):
-            raise ValueError("Initial Skill provenance does not match train cards")
+            raise JournalConflict("Initial Skill provenance does not match train cards")
     plan = S.SplitPlan.make(
         plan.assignment, plan.benchmark, plan.seed, clusters.families_index
     )
@@ -162,11 +131,8 @@ def import_cold_start(source, target):
     freeze(target / "cold_start_import.json", identity)
     for name in FILES:
         freeze(target / name, json.loads((source / name).read_text()))
-    hashes_path = source / "discovery/card_hashes.json"
-    if hashes_path.exists():
-        freeze(
-            target / "discovery/card_hashes.json", json.loads(hashes_path.read_text())
-        )
+    freeze(target / "discovery/card_hashes.json",
+           json.loads((source / "discovery/card_hashes.json").read_text()))
     for t, exp in cards.items():
         freeze(target / "discovery/results" / f"{t}.json", S.to_dict(exp))
     for path in sorted((source / 'discovery' / 'initial_skills').glob('*-patterns.json')):
@@ -177,5 +143,5 @@ def import_cold_start(source, target):
         if skill.family_id not in library.families:
             library._append_new(skill)
         elif library.history(skill.family_id)[0] != skill:
-            raise ValueError("Imported initial Skill differs from local history")
+            raise JournalConflict("Imported initial Skill differs from local history")
     return cfg, plan

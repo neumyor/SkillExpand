@@ -1,9 +1,32 @@
 import re
-from typing import List, Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Union
 from skillexpand.benchmarks.base import BaseEnv
-from skillexpand.runtime.deadline import environment_call
+from skillexpand.benchmarks.base import environment_call
 
-from skillexpand.runtime.utils import get_env_name_from_gamefile
+
+ENV_NAMES = [
+            'pick_and_place',
+            'pick_clean_then_place',
+            'pick_heat_then_place',
+            'pick_cool_then_place',
+            'look_at_obj',
+            'pick_two_obj'
+        ]
+
+
+def get_env_name_from_gamefile(gamefile: str) -> Union[str, None]:
+    """
+    Gets the environment name from the gamefile for ALFWorld.
+
+    Args:
+        gamefile: The gamefile.
+
+    Returns:
+        The environment name.
+    """
+    for k in ENV_NAMES:
+        if k in gamefile:
+            return k
 
 
 def resolve_alfworld_env_cls(env_type: str):

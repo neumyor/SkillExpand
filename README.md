@@ -48,6 +48,22 @@ flowchart LR
 
 `empirical` 和 `jev` 也都使用冻结的 val route，但分别执行真实环境测量或调用 JEV 服务。所有 acceptance 结果、panel、task IDs、请求数和 protocol hash 都写入批次工件；`val` predicted 路径的 benchmark `executions` 固定为 0。
 
+## Reviewer 协同演化（单候选）
+
+`--single-candidate`（要求 `--candidate-count 1`）让每个 batch 只提出一个候选，把"提出修改 → 验收 → 接受或拒绝"变成可归因的单一因果链。`--reviewer-update-mode` 控制 Reviewer 是否从真实反馈中校准：
+
+| 模式 | 条件 | 行为 |
+|---|---|---|
+| `none` | C0 | 不收集反馈，Reviewer 始终使用初始 prompt |
+| `summary` | C2 | 每轮结束后在固定 train family panel 上执行旧 head 与候选各一次，写入 `reviewer_feedback.jsonl` 和 `reviewer_updates.jsonl`；update 只用于审计，不进入 Reviewer prompt |
+| `rules` | C3 | 同上，并把程序统计 + Reviewer 压缩出的有限校准规则放入下一轮 predicted-val Reviewer 的 prompt |
+
+`--reviewer-feedback-size N` 把每个 family 的反馈 panel 固定为前 N 个 train task（0 表示全部）。反馈只来自 train，val 只用于当轮验收，test 只用于最终报告。设计与统计口径见 [实验计划](docs/EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)。
+
+## 模型角色
+
+六个角色可以使用不同模型：`--l1-model`（执行 agent）、`--cold-start-model`、`--l2-planner-model`、`--l2-editor-model`、`--l2-reviewer-model`、`--selector-model`。未指定的角色沿用导入冷启动中冻结的映射，没有映射时使用配置中的执行模型（`EXPE_LLM_MODEL`）。导入冷启动时先恢复其冻结配置，再应用本次运行显式给出的角色，因此 L2 角色可以与冷启动时的执行模型不同。单因素替换实验的矩阵由 `scripts/model_role_matrix.py` 生成，见 [实验计划](docs/EXPERIMENT_PLAN_MODEL_ROLES.md)。
+
 ## 运行示例
 
 显式 split 文件必须使用最新命名：
@@ -83,13 +99,24 @@ flowchart LR
   --phase test --resume
 ```
 
-`test` 是独立评测阶段和数据 split，产物位于 `test/<library-hash>/`。
+`test` 是独立评测阶段和数据 split，产物位于 `test/<library-hash>/`。某一轮结束时的 Skill Bank 快照（`--round 0` 为冷启动库）可在同一组冻结 test 路由上评测：
+
+```bash
+.venv/bin/python scripts/evaluate_snapshot.py \
+  --run-dir runs/searchqa-example --round 1 --output runs/searchqa-example/test-snapshots/round-1
+```
 
 ## 工件与审计
 
 运行目录保存 `discovery/`、`evolution/round-N/`、`l2_proposals/`、`l2_batches/`、`skills.jsonl`、`routes/val/`、`routes/test/` 和 `test/<library-hash>/`。`l2_manifest.json` 冻结 split、配置、代码和模型身份；每轮 audit 会校验 train 覆盖、卡片 hash、候选重放、Skill 版本链及 acceptance scope。
 
-改变 prompt、代码、模型、split 或并发协议必须使用新的运行目录。恢复只复用当前协议已落盘的逐单元结果。
+改变 prompt、模型、split、配置或验收协议必须使用新的运行目录。只改源码时，`--resume` 默认拒绝继续；确认改动不影响协议后可加 `--allow-code-change`，漂移会追加到冻结 manifest 旁的 `code_changes.jsonl`，原 manifest 不改写。恢复只复用当前协议已落盘的逐单元结果。
+
+## 代码与脚本
+
+`src/skillexpand/` 按层组织，只允许向下依赖（`tests/test_layering.py` 强制检查）：`schema`/`structured_skill` → `persistence`（`io.py` 提供原子写、冻结、JSONL 和锁）与 `reliability`（异常分类、重试/修复策略、单元失败记录，见 [异常处理](docs/ERROR_HANDLING.md)）→ `benchmarks` → `runtime`（执行器、LLM、任务池）→ `l1` → `evaluation` → `l2` → `campaign`/`cli`。
+
+`scripts/` 只放可复用入口：`run_campaign.py`（冻结 campaign，逻辑在 `skillexpand.campaign`）、`check_fresh_campaign.py`、`evaluate_snapshot.py`、`model_role_matrix.py`、`summarize_model_role_matrix.py`、`evaluate_jev.py`、`prepare_data.py`、`probe_campaign_capacity.py`、`detach.py` 和环境脚本。代码不兼容旧版本产生的运行目录；旧 run 只能用产生它的代码续跑或审计。
 
 安装和 benchmark 环境配置见 [运行指南](docs/RUNNING.md) 与 [Benchmark/L1 接口](docs/BENCHMARKS.md)；系统设计见 [架构](docs/ARCHITECTURE.md)，L2 审计见 [L2 审计](docs/L2_CARD_REVIEW_AUDIT.md)。
 

@@ -22,7 +22,6 @@ class NativeAlfworldSmoke(unittest.TestCase):
         from skillexpand.l1.audit import audit_checkpoint
         from skillexpand.l1.adapters import resolve
         from skillexpand import schema as S
-        from langchain.schema import HumanMessage
         cfg = F.load_config('alfworld')
         cfg.benchmark.general.use_cuda = False
         cfg.agent.llm = 'gpt-3.5-turbo'
@@ -63,12 +62,11 @@ class NativeAlfworldSmoke(unittest.TestCase):
                 self.assertFalse(agent.env.truncated)
                 self.assertIsNone(agent.env.termination_reason)
                 from skillexpand.runtime import parallel as PL
-                spec = PL.UnitSpec('native-final', 'alfworld', 0, S.ROLE_EVAL,
-                    S.ARM_EVAL, S.MODE_CONSOLIDATED_DIRECT, 'none',
-                    skill_key=skill.key, skill_body=skill.body)
+                from skillexpand.evaluation import workers as EW
+                spec = EW.FixedSpec('native-final', 'alfworld', 0, skill_key=skill.key, skill_body=skill.body)
                 with patch.object(F, 'LLM_CLS', return_value=Model()), patch.object(PL, '_config', return_value=cfg):
-                    final = PL.execute_fixed(spec)
-                self.assertIsNone(final['error'])
+                    final = EW.execute_fixed(spec)
+                self.assertIsNone(final['failure'])
                 self.assertFalse(final['success'])
                 self.assertEqual(final['failure_mode'], 'repeated_action')
                 self.assertEqual(final['steps'], 2)

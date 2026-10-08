@@ -193,8 +193,7 @@ class SupervisedDiagnosisTests(unittest.TestCase):
         self.assertIn('No card is a mandatory repair target',notes)
         self.assertIsNone(failed)
         self.assertEqual(stats['successes'],1)
-        from skillexpand import schema as S
-        editor=ED.SkillEditor(a,S.MetaSkill(version=0,body='Use evidence.'))
+        editor=ED.SkillEditor(a)
         prompt,_,_=editor.build_prompt(self.skill,self.skill.body,[exp])
         text='\n'.join(x.content for x in prompt)
         self.assertIn('TASK EVIDENCE',text)
@@ -215,7 +214,7 @@ class SupervisedDiagnosisTests(unittest.TestCase):
         self.cfg.benchmark.l1.selector_instructions='Custom selector SKILL: / WHY:'
         a,m=self.agent(['Action 1: Finish[Toyota]'])
         from skillexpand.evaluation.selector import SkillSelector
-        self.assertIn('Custom selector',SkillSelector(a).build_prompt('q',[self.skill])[0].content)
+        self.assertIn('Custom selector',SkillSelector(a,resolve(self.cfg)).build_prompt('q',[self.skill])[0].content)
         p=self.root/'signature.json'
         self.gather(a,path=p)
         self.assertIn('Custom SearchQA execution',m.prompts[0])

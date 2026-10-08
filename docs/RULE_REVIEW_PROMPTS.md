@@ -22,9 +22,8 @@ The current protocol is relative-outcomes: the reviewer returns `old_outcome` an
 for equal known outcomes, and `unknown` otherwise. When the card was executed with
 the current Skill, `old_outcome` must match its first autonomous attempt; a card from
 another revision does not provide a baseline outcome and must be treated as unknown
-or independently inferred. Fresh prompts never emit a `label`; a compatibility parser
-branch can normalize an old label-only response when replaying legacy synthetic tests,
-but all persisted judgments contain the canonical old/new outcomes and derived effect.
+or independently inferred. A response containing `label` or `effect` is rejected;
+persisted judgments contain the old/new outcomes and the derived `effect`.
 New prompts change the implementation fingerprint: start a fresh L2 import rather than
 resuming a previous prompt version's L2 directory.
 

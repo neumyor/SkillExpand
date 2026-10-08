@@ -3,7 +3,7 @@
 import unittest
 from types import SimpleNamespace
 
-from skillexpand.l2 import structured_skill as SS
+from skillexpand import structured_skill as SS
 from skillexpand.l2.card_review import review_payload
 from skillexpand.l2.editor import SkillEditor, REASON_NO_OPERATIONS
 from skillexpand import schema as S
@@ -65,10 +65,9 @@ class StructuredSkillTests(unittest.TestCase):
 
     def test_planner_edit_is_applied_without_editor_llm_and_invalid_ids_hold(self):
         base = S.Skill("searchqa.f", "f", 0, "lookup", "scope", SS.render(self.sections))
-        meta = S.MetaSkill(0, "strategy")
         calls = []
         host = SimpleNamespace(llm=lambda *args, **kwargs: calls.append(args), token_counter=len)
-        editor = SkillEditor(host, meta, skill_edit_mode="structured")
+        editor = SkillEditor(host, skill_edit_mode="structured")
         card = SimpleNamespace(experience_id="e1", task_id=1)
         outcome = editor.apply_planner_edit(base, [card], {
             "edit": {"op": "add", "section": "completion_checks", "target_id": None,

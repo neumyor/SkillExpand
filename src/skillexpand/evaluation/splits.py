@@ -1,9 +1,10 @@
 """Partition tasks before any experience collection; train clusters are attached later."""
 import random
 from skillexpand import schema as S
+from skillexpand.reliability.errors import InvalidInput
 from typing import Dict
 DEFAULT_RATIOS={'train':.5,'val':.25,'test':.25}
-class SplitError(ValueError):
+class SplitError(InvalidInput):
     pass
 
 def allocate(n: int, ratios: Dict[str, float],

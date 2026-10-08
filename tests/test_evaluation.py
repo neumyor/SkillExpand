@@ -1,13 +1,8 @@
-import os
-import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import List
 
 from skillexpand import schema as S
-from skillexpand.evaluation import selector as SE
-from skillexpand.evaluation import splits as SP
-from skillexpand.persistence import store as ST
 from skillexpand.evaluation import validation as VA
 
 FAILURES: List[str] = []
@@ -57,99 +52,6 @@ def falsy(value, what: str = "") -> None:
 BENCH = "alfworld"
 FAMILIES = ["pick_heat_then_place", "pick_cool_then_place"]
 SKILL_IDS = [f"{BENCH}.{f}" for f in FAMILIES]
-
-
-def make_attempt(
-    patch_id: str,
-    skill_id: str,
-    consumed: Sequence[str],
-    outcome: str = S.UPDATE_REJECTED,
-    head_version: int = 0,
-    meta_version: int = 0,
-    trigger: str = S.TRIGGER_POOL_THRESHOLD,
-    before: float = 0.5,
-    after: float = 0.375,
-    body: str = "1. a rule",
-    created_at: str = "2026-01-01T00:00:00+00:00",
-    attempt_index: int = 0,
-    pool_cleared: bool = False,
-) -> S.PatchAttempt:
-    """A patch attempt whose verdict and scores are controlled by the arguments."""
-    head_key = f"{skill_id}@v{head_version}"
-    task_ids = (1, 2)
-    arms = tuple(
-        S.ArmEvaluation(
-            arm_id=arm,
-            role=S.ROLE_EVAL,
-            mode=S.MODE_CONSOLIDATED_DIRECT,
-            skill_key=head_key,
-            outcomes=tuple(
-                S.TaskOutcome(
-                    task_id=t,
-                    family_id="f",
-                    role=S.ROLE_EVAL,
-                    success=(t <= (before * len(task_ids))),
-                )
-                for t in task_ids
-            ),
-            executor_fresh=True,
-            experience_withheld=True,
-            fewshot_strategy="none",
-        )
-        for arm in (S.ARM_BASE, S.ARM_CANDIDATE)
-    )
-    validation = S.ValidationResult(
-        skill_id=skill_id,
-        panel_key=f"{skill_id}#panel2",
-        task_ids=task_ids,
-        base_skill_key=head_key,
-        candidate_skill_key=f"{skill_id}@v{head_version + 1}",
-        arms=arms,
-        metrics={
-            "mean_base": before,
-            "mean_candidate": after,
-            "success_delta": after - before,
-            "n_paired": float(len(task_ids)),
-        },
-        passed=(outcome == S.UPDATE_ACCEPTED),
-        pairs=tuple((t, before, after) for t in task_ids),
-        returned_to_editor=False,
-    )
-    record = S.PatchAttemptRecord(
-        patch_id=f"{patch_id}-record",
-        stable_head_key=head_key,
-        patch_hash=VA.patch_hash(body),
-        candidate_body=body,
-        validation_before=before,
-        validation_after=after,
-        verdict=(
-            S.VERDICT_ACCEPT if outcome == S.UPDATE_ACCEPTED else S.VERDICT_REJECT
-        ),
-        created_at=created_at,
-        reasons=() if outcome == S.UPDATE_ACCEPTED else ("tie",),
-    )
-    return S.PatchAttempt(
-        patch_id=patch_id,
-        benchmark=BENCH,
-        skill_id=skill_id,
-        skill_family_id=skill_id.partition(".")[2],
-        stable_head_key=head_key,
-        candidate_skill_key=f"{skill_id}@v{head_version + 1}",
-        meta_skill_version=meta_version,
-        pooled_experience_ids=tuple(consumed),
-        pooled_task_ids=(1,),
-        validation_panel_key=f"{skill_id}#panel2",
-        validation_task_ids=task_ids,
-        validation=(None if outcome == S.UPDATE_DUPLICATE_PATCH else validation),
-        patch=record,
-        outcome=outcome,
-        trigger=trigger,
-        attempt_index=attempt_index,
-        pool_cleared=pool_cleared,
-        created_at=created_at,
-    )
-
-
 
 
 # --------------------------------------------------------------------------
@@ -257,26 +159,6 @@ def test_score_cache_tolerates_a_truncated_final_line() -> None:
 # --------------------------------------------------------------------------
 # The meta pool
 # --------------------------------------------------------------------------
-
-
-
-
-
-
-def test_acceptance_rate_excludes_unmeasured_attempts() -> None:
-    skill_id = SKILL_IDS[0]
-    accepted = make_attempt("p1", skill_id, (), outcome=S.UPDATE_ACCEPTED)
-    duplicate = make_attempt("p2", skill_id, (), outcome=S.UPDATE_DUPLICATE_PATCH)
-    eq(
-        S.patch_acceptance_rate([accepted, duplicate]),
-        1.0,
-        "the duplicate was never measured, so it cannot lower the rate",
-    )
-    eq(
-        S.patch_acceptance_rate([duplicate]),
-        None,
-        "and a batch with nothing measured has no rate at all",
-    )
 
 
 # --------------------------------------------------------------------------
