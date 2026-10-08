@@ -49,8 +49,8 @@ def route_task(spec):
 
 class FrozenRoutes:
     def __init__(self, cfg, plan, library, root, split, test_workers=4):
-        if split not in (S.SPLIT_VAL, S.SPLIT_TEST):
-            raise ValueError("Only val or test tasks are routed")
+        if split not in (S.SPLIT_TRAIN, S.SPLIT_VAL, S.SPLIT_TEST):
+            raise ValueError("Only train, val, or test tasks are routed")
         self.cfg, self.plan, self.split = cfg, plan, split
         route_root = Path(root) / split
         self.root, self.test_workers = route_root, test_workers
@@ -87,8 +87,8 @@ class FrozenRoutes:
         task-to-Skill assignment is the frozen input we want to reuse, while a new
         selector call would silently change the evaluation panel.
         """
-        if split not in (S.SPLIT_VAL, S.SPLIT_TEST):
-            raise ValueError("Only val or test tasks are routed")
+        if split not in (S.SPLIT_TRAIN, S.SPLIT_VAL, S.SPLIT_TEST):
+            raise ValueError("Only train, val, or test tasks are routed")
         route_root = Path(root) / split
         manifest_path = route_root / "manifest.json"
         complete_path = route_root / "complete.json"

@@ -28,6 +28,19 @@ def request_policy():
     return {'timeout': timeout, 'retries': _positive_int_env('EXPE_LLM_RETRIES', 2)}
 
 
+def output_token_limit():
+    raw = os.environ.get('EXPE_LLM_MAX_TOKENS')
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError('EXPE_LLM_MAX_TOKENS must be an integer') from exc
+    if not 1 <= value <= 65536:
+        raise ValueError('EXPE_LLM_MAX_TOKENS must be in [1, 65536]')
+    return value
+
+
 def wait_for_request_slot():
     path = os.environ.get('EXPE_LLM_GATE_FILE')
     if not path:
@@ -64,7 +77,10 @@ _WARNED = set()
 
 def get_llm_base_url() -> str:
     """OpenAI-compatible base URL, or None for upstream (real OpenAI) behaviour."""
-    return os.environ.get(BASE_URL_ENV_VAR) or os.environ.get('OPENAI_API_BASE') or None
+    value = os.environ.get(BASE_URL_ENV_VAR) or os.environ.get('OPENAI_API_BASE') or None
+    if os.environ.get('EXPE_LLM_RELAY_REQUIRED', '').lower() in ('1', 'true', 'yes', 'on') and not value:
+        raise RuntimeError('Tencent E2B LLM relay is required but no relay base URL is configured')
+    return value
 
 
 def _truthy(name: str) -> bool:
@@ -146,7 +162,13 @@ class GPTWrapper:
             openai_api_key=openai_api_key,
             max_retries=0,
             request_timeout=self.request_policy['timeout'],
+            # All provider calls use the relay's SSE path. ChatOpenAI still
+            # returns one assembled message to callers after consuming chunks.
+            streaming=True,
         )
+        max_tokens = output_token_limit()
+        if max_tokens is not None:
+            kwargs['max_tokens'] = max_tokens
         if base_url is not None:
             kwargs['openai_api_base'] = base_url
             # A remote server needs no client-side retry storm; keep it quick so a

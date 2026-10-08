@@ -130,10 +130,13 @@ def audit_round(root, round_index):
     manifest = json.loads((directory / 'manifest.json').read_text())
     inputs = json.loads((directory / 'input.json').read_text())
     split = json.loads((root / 'split.json').read_text())
-    mapping = json.loads((root / 'task_skill_map.json').read_text())
+    progressive = bool(json.loads((root / 'config.json').read_text()).get('benchmark', {}).get('progressive_library', False))
+    mapping = (json.loads((root / 'task_skill_map.json').read_text())
+               if (root / 'task_skill_map.json').exists() else {})
     train = sorted(int(t) for t, value in split['assignment'].items() if value == S.SPLIT_TRAIN)
     require(manifest['task_ids'] == train == inputs['task_ids'], 'round/train coverage mismatch')
     heads = {s['family_id']: S.from_dict(S.Skill, s) for s in inputs['skills']}
+    heads_by_id = {s.skill_id: s for s in heads.values()}
     protocol = json.loads((root / 'l2_manifest.json').read_text())
     expected_acceptance_mode = protocol['config'].get('acceptance_mode', 'predicted')
     expected_predicted_scope = protocol['config'].get('predicted_review_scope', 'val')
@@ -169,22 +172,37 @@ def audit_round(root, round_index):
         require(exp.task_id == task_id, f'card filename/task mismatch: {task_id}')
         require(exp.split == S.SPLIT_TRAIN, f'non-train card: {task_id}')
         require(exp.evolution_round == round_index, f'wrong card round: {task_id}')
-        require(exp.benchmark == split['benchmark'] and exp.selected_skill_id == mapping[str(task_id)],
-                'card benchmark/routing mismatch')
+        require(exp.benchmark == split['benchmark'], 'card benchmark mismatch')
+        if progressive:
+            require(exp.selected_skill_id in heads_by_id,
+                    'card selected an unknown Skill')
+        else:
+            require(exp.selected_skill_id == mapping[str(task_id)], 'card benchmark/routing mismatch')
         expected_skill = manifest['skill_keys'].get(exp.family_id)
         require(expected_skill == exp.initial_skill_key,
                 f'card {task_id} was executed with a different Skill head')
         require(S.content_hash(value) == manifest['cards'][str(task_id)],
                 f'card hash mismatch: {task_id}')
-        require(exp.selection_source == S.SELECTION_FIXED and
+        require(exp.selection_source == (S.SELECTION_AGENT if progressive else S.SELECTION_FIXED) and
                 exp.selected_skill_id == heads[exp.family_id].skill_id, 'card selection mismatch')
+        if progressive:
+            require(exp.skill_load and exp.skill_load.get('skill_id') == exp.selected_skill_id,
+                    'card Skill load provenance mismatch')
+            require(exp.skill_load.get('load_stage') == 'after_selection',
+                    'progressive Skill was loaded before selection')
+            require(all('body' not in item and 'key' not in item for item in exp.selection_catalog),
+                    'card selector catalog leaked Skill body')
         checkpoint = json.loads((directory / 'trials' / f'{task_id}.json').read_text())
-        require(checkpoint['experience'] == value, f'card/checkpoint mismatch: {task_id}')
-        require(checkpoint['identity']['skill'] ==
-                {'key': expected_skill, 'body': heads[exp.family_id].body}, 'executed Skill body mismatch')
-        require(checkpoint['identity']['k'] == protocol['l1']['attempts'] and
-                checkpoint['identity']['supervised'] == protocol['l1']['supervised'], 'L1 budget changed')
-        audit_checkpoint(checkpoint, adapter)
+        if progressive and split['benchmark'] == 'terminalbench':
+            from skillexpand.benchmarks.terminalbench import audit_harbor_experience
+            audit_harbor_experience(exp)
+        else:
+            require(checkpoint['experience'] == value, f'card/checkpoint mismatch: {task_id}')
+            require(checkpoint['identity']['skill'] ==
+                    {'key': expected_skill, 'body': heads[exp.family_id].body}, 'executed Skill body mismatch')
+            require(checkpoint['identity']['k'] == protocol['l1']['attempts'] and
+                    checkpoint['identity']['supervised'] == protocol['l1']['supervised'], 'L1 budget changed')
+            audit_checkpoint(checkpoint, adapter)
         cards[task_id] = exp
 
     planned = json.loads((directory / 'batches.json').read_text())

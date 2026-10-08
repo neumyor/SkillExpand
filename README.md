@@ -95,3 +95,20 @@ flowchart LR
 
 最近一次 SearchQA/ALFWorld campaign 的审计状态和历史 test 快照见
 [实验状态记录](docs/EXPERIMENT_STATUS_20260930.md)。
+# Progressive Skill library loading
+
+Held-out execution uses an opt-in progressive library protocol when a `UnitSpec`
+contains `skill_library`:
+
+```text
+catalog (skill_id + description only)
+  -> selector chooses one skill_id
+  -> loader resolves that skill's current version and body
+  -> executor receives only the selected body
+```
+
+The unit record stores `selection` and `skill_load` so the loaded revision is
+auditable. When this protocol is used for an evolution rollout, the recorded
+`skill_key` is the candidate's base and the acceptance path commits a new
+version of that selected family. The catalog itself is never pasted into the
+executor prompt and sibling Skill bodies are not loaded.

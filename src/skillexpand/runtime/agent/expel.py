@@ -8,7 +8,18 @@ from langchain.prompts import PromptTemplate
 from langchain.schema import HumanMessage, Document
 import numpy as np
 from openai.error import InvalidRequestError
-from scipy.spatial.distance import cosine
+try:
+    from scipy.spatial.distance import cosine
+except ImportError:
+    def cosine(left, right):
+        """NumPy fallback for environments without the optional SciPy wheel."""
+        left = np.asarray(left, dtype=float)
+        right = np.asarray(right, dtype=float)
+        left_norm = np.linalg.norm(left)
+        right_norm = np.linalg.norm(right)
+        if left_norm == 0.0 or right_norm == 0.0:
+            return 0.0
+        return 1.0 - float(np.dot(left, right) / (left_norm * right_norm))
 
 from skillexpand.runtime.agent import ReflectAgent
 from skillexpand.runtime.agent import ReactAgent

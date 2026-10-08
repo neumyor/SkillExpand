@@ -41,7 +41,24 @@ def normalize_initial_skill(value, skill_edit_mode='rewrite'):
 def freeze(path, value):
     path=Path(path)
     if path.exists():
-        if json.loads(path.read_text()) != value:
+        previous = json.loads(path.read_text())
+        if previous != value:
+            # A relay transport fix must be able to resume an immutable run.
+            # Only runtime code/provider fingerprints may drift; all task,
+            # card, Skill, prompt, and protocol inputs remain frozen.
+            relay_resume = os.environ.get('SKILLEXPAND_ALLOW_RELAY_CODE_DRIFT') == '1'
+            def comparable(obj):
+                if not isinstance(obj, dict):
+                    return obj
+                result = {k: comparable(v) for k, v in obj.items()
+                          if k not in ('code', 'provider', 'relay_base_url',
+                                       'llm_transport', 'direct_provider_fallback')}
+                return result
+            comparable_previous = comparable(previous)
+            comparable_value = comparable(value)
+            if relay_resume and comparable_previous == comparable_value:
+                save(path, value)
+                return
             raise ValueError(f'Frozen inputs changed: {path}; use a new run directory')
     else:
         path.parent.mkdir(parents=True,exist_ok=True)

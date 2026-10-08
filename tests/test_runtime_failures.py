@@ -22,6 +22,7 @@ def test_model_retry_budget_preserves_original_error():
         assert sleep.call_count == 2
         assert factory.call_args.kwargs['max_retries'] == 0
         assert factory.call_args.kwargs['request_timeout'] == 1
+        assert factory.call_args.kwargs['streaming'] is True
 
 
 def test_model_success_not_retried_and_invalid_timeout_rejected():

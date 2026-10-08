@@ -412,6 +412,8 @@ class TaskExperience:
     #: answer even in oracle mode.
     selection_reason: str = ''
     selection_raw: str = ''
+    selection_catalog: Tuple[Dict[str, str], ...] = ()
+    skill_load: Optional[Dict[str, Any]] = None
     #: Reward of each repair-loop trial in order.  ``reward`` is the disjunction.
     #:
     #: Kept because "solved on trial 0" and "solved on trial 3" are different
@@ -449,6 +451,7 @@ class TaskExperience:
         object.__setattr__(self, 'failed_trajectories', tuple(self.failed_trajectories))
         object.__setattr__(self, 'reflections', tuple(self.reflections))
         object.__setattr__(self, 'trial_rewards', tuple(self.trial_rewards))
+        object.__setattr__(self, 'selection_catalog', tuple(self.selection_catalog))
 
     @staticmethod
     def make_id(benchmark: str, family_id: str, task_id: int) -> str:

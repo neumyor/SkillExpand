@@ -156,6 +156,20 @@ class SkillLibrary:
     def all_heads(self) -> Dict[str, S.Skill]:
         return {f: self.head(f) for f in self.families}
 
+    def catalog(self) -> List[Dict[str, str]]:
+        """Return the selector-visible catalog without Skill bodies."""
+        return [
+            {'skill_id': skill.skill_id, 'description': skill.description}
+            for skill in sorted(self.all_heads().values(), key=lambda s: s.skill_id)
+        ]
+
+    def load(self, skill_id: str) -> S.Skill:
+        """Load the current head body after a selector chose ``skill_id``."""
+        for skill in self.all_heads().values():
+            if skill.skill_id == skill_id:
+                return skill
+        raise KeyError(f'Skill {skill_id!r} is not in the library')
+
     def get(self, skill_key: str) -> S.Skill:
         skill_id, _, version = skill_key.rpartition('@v')
         if not version.isdigit():

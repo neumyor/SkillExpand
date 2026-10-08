@@ -2,7 +2,9 @@
 import multiprocessing
 import os
 import time
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from skillexpand.runtime import agent_factory as F
@@ -149,6 +151,10 @@ class ExperienceSpec:
     selection_source: str = S.SELECTION_FIXED
     selection_reason: str = ''
     selection_raw: str = ''
+    skill_library: tuple = ()
+    progressive_selection: bool = False
+    frozen_selector_result: Optional[str] = None
+    usage_path: Optional[str] = None
     #: Repair-loop trial cap: the first attempt plus one per allowed reflection.
     #: Carried explicitly so the loop's configured value reaches the worker instead of
     #: the worker silently falling back to the config file's reflection depth.
@@ -189,6 +195,115 @@ def execute_experience(spec: ExperienceSpec) -> Dict[str, Any]:
     started = time.time()
     try:
         cfg = _config(spec.benchmark)
+        if spec.benchmark == 'terminalbench' and cfg.benchmark.get('rollout', {}).get('mode') == 'harbor_rollout':
+            from skillexpand.benchmarks.terminalbench import harbor_rollout
+            from skillexpand.l1 import protocol as P
+            from skillexpand.l1 import learning as L
+            selection = None
+            selection_catalog = ()
+            skill_load = None
+            if spec.progressive_selection:
+                from skillexpand.runtime.progressive import select_and_load, catalog
+                library = tuple(S.from_dict(S.Skill, item) for item in spec.skill_library)
+                task = F.task_table(cfg)[spec.task_id]['task']
+                if spec.frozen_selector_result:
+                    cached = json.loads(Path(spec.frozen_selector_result).read_text())
+                    previous = cached['experience']
+                    choice = cached['selection']
+                    if (not cached.get('ok') or previous['task_id'] != spec.task_id or
+                            previous['task'] != task or choice.get('catalog') != catalog(library) or
+                            not choice.get('ok')):
+                        raise ValueError('Frozen selector task/catalog identity mismatch')
+                    class CachedSelectorHost:
+                        def llm(self, *args, **kwargs):
+                            return choice['raw']
+                    host = CachedSelectorHost()
+                else:
+                    host = F.build_reasoning_host(
+                        cfg, spec.usage_path or str(Path(spec.l1_checkpoint_path).with_suffix('.selector.json')),
+                        role='selector')
+                skill, selection = select_and_load(host, task, library)
+                if spec.frozen_selector_result:
+                    if selection['skill_id'] != choice['skill_id']:
+                        raise ValueError('Frozen selector raw response disagrees with selected Skill')
+                    selection['reused_from_result'] = spec.frozen_selector_result
+                selection_catalog = tuple(selection.get('catalog', ()))
+                skill_load = {
+                    'skill_id': skill.skill_id,
+                    'skill_key': skill.key,
+                    'body_chars': len(skill.body),
+                    'load_stage': 'after_selection',
+                }
+                family_id = skill.family_id
+                skill_key = skill.key
+                selected_skill_id = skill.skill_id
+                selection_source = S.SELECTION_AGENT
+                selection_reason = selection.get('why', '')
+                selection_raw = selection.get('raw', '')
+            else:
+                skill = _reconstruct_skill(spec)
+                family_id = spec.family_id
+                skill_key = spec.skill_key
+                selected_skill_id = spec.selected_skill_id
+                selection_source = spec.selection_source
+                selection_reason = spec.selection_reason
+                selection_raw = spec.selection_raw
+                selection_catalog = tuple(spec.skill_library)
+                skill_load = ({'skill_id': skill.skill_id, 'skill_key': skill.key,
+                               'body_chars': len(skill.body), 'load_stage': 'fixed'}
+                              if skill else None)
+            task = F.task_table(cfg)[spec.task_id]['task']
+            payload, raw_response = harbor_rollout(
+                cfg, spec.task_id, skill, spec.max_trials or 1,
+                Path(spec.l1_checkpoint_path).parent.parent / 'harbor',
+                spec.evolution_round)
+            trials = []
+            for item in payload.get('trials', []):
+                trajectory = item.get('trajectory_path') or item.get('trial_dir')
+                events = []
+                trajectory_file = Path(trajectory) if trajectory else None
+                if trajectory_file and trajectory_file.is_file():
+                    try:
+                        trace = json.loads(trajectory_file.read_text())
+                        for index, step in enumerate(trace.get('steps', []), 1):
+                            text = step.get('message') or step.get('observation') or ''
+                            if text:
+                                events.append({'ref': f'e{index}', 'action': 'TerminalBatch',
+                                               'observation': str(text),
+                                               'environment': {'success': item.get('reward') == 1}})
+                    except (OSError, ValueError, TypeError):
+                        pass
+                reward = item.get('reward') == 1
+                trials.append({'index': int(item.get('attempt_index', len(trials) + 1)),
+                               'phase': 'autonomous', 'status': 'completed', 'success': reward,
+                               'termination': item.get('status', 'verifier'),
+                               'trajectory': trajectory, 'events': events or [{'ref': 'e1',
+                               'action': 'TerminalBatch', 'observation': 'No trajectory steps recorded.',
+                               'environment': {'success': reward}}]})
+            rewards = tuple(bool(t['success']) for t in trials)
+            solved = any(rewards)
+            evidence = P.evidence(task, trials, adapter=__import__('skillexpand.l1.adapters', fromlist=['resolve']).resolve(cfg))
+            card = L.card(spec.task_id, task, trials, {'status': 'valid', 'claims': []},
+                          'terminalbench_harbor', f'{spec.unit_id}:card', len,
+                          evidence=evidence, card_id=f'{spec.unit_id}:card',
+                          benchmark='terminalbench', family_id=family_id,
+                          evolution_round=spec.evolution_round, skill_key=skill_key)
+            exp = S.TaskExperience(
+                experience_id=f'{spec.unit_id}:experience', benchmark='terminalbench',
+                task_id=spec.task_id, task=task, family_id=family_id, split=spec.split,
+                reward=solved, num_trials=len(trials), initial_skill_key=skill_key,
+                failed_trajectories=tuple(t['trajectory'] for t in trials if not t['success']),
+                final_trajectory=next((t['trajectory'] for t in reversed(trials) if t['success']), None),
+                selected_skill_id=selected_skill_id, selection_source=selection_source,
+                selection_reason=selection_reason, selection_raw=selection_raw,
+                selection_catalog=selection_catalog, skill_load=skill_load,
+                trial_rewards=rewards, trial_phases=tuple(t['phase'] for t in trials),
+                experience_card=card, l1_audit_path=spec.l1_checkpoint_path,
+                l1_trials=tuple(trials), evolution_round=spec.evolution_round)
+            return {'record_type': 'experience', 'unit_id': spec.unit_id, 'task_id': spec.task_id,
+                    'family_id': family_id, 'selection': selection, 'ok': True, 'experience': S.to_dict(exp),
+                    'harbor_response': raw_response, 'secs': round(time.time() - started, 1),
+                    'error': None, 'pid': os.getpid()}
         experience, agent = X.gather_task_experience(
             cfg, spec.task_id, spec.family_id, spec.split,
             skill=_reconstruct_skill(spec),
@@ -203,7 +318,8 @@ def execute_experience(spec: ExperienceSpec) -> Dict[str, Any]:
             supervised_repair=spec.supervised_repair,
             supervised_attempts=spec.supervised_attempts,
             evolution_round=spec.evolution_round)
-        close_environment(agent)
+        if agent is not None:
+            close_environment(agent)
         return {
             'record_type': 'experience',
             'unit_id': spec.unit_id,
@@ -327,12 +443,10 @@ def _log(record: Dict[str, Any]) -> None:
 
 
 def execute_routed(spec,cfg):
-    """A fresh environment; selector sees only descriptions, never answers or cards."""
-    from dataclasses import asdict
-    from skillexpand.evaluation.selector import SkillSelector
-    from skillexpand.evaluation.selector import REASON_SELECTOR_ERROR
+    """A fresh environment using catalog -> select -> load progressive routing."""
     from skillexpand.l1.agent import RepairAgent
     from skillexpand.l1.adapters import resolve
+    from skillexpand.runtime.progressive import select_and_load
     started=time.time()
     library=[S.from_dict(S.Skill,s) for s in spec.skill_library]
     agent=F.build_agent(cfg,task_idx=spec.task_id,rules=None,fewshot_strategy='none',
@@ -340,17 +454,27 @@ def execute_routed(spec,cfg):
     if spec.usage_path:
         from skillexpand.persistence.usage import attach_usage
         attach_usage([agent.llm,agent.long_context_llm],spec.usage_path)
-    choice=SkillSelector(agent).select(F.task_text_of(cfg,spec.task_id),library)
+    try:
+        skill, selection_record = select_and_load(
+            agent, F.task_text_of(cfg, spec.task_id), library)
+    except Exception as exc:
+        selection_record = {"stage": "select", "error": f"{type(exc).__name__}: {exc}"}
+        choice = None
+    else:
+        choice = selection_record
     base=dict(record_type='unit',unit_id=spec.unit_id,task_id=spec.task_id,family='heldout',
         role=spec.role,arm_id=spec.arm_id,mode=spec.mode,repeat=spec.repeat,
-        selection=asdict(choice),skill_key=None,success=False,steps=0,terminated=False,
+        selection=selection_record,skill_key=None,success=False,steps=0,terminated=False,
+        skill_load=None,
         truncated=False,failure_mode='routing_failure',error=None,trajectory=None,pid=os.getpid())
-    if not choice.ok:
-        if choice.reason==REASON_SELECTOR_ERROR:
-            base['error']='selector provider error'
+    if choice is None:
+        base['error'] = selection_record.get('error', 'selector provider error')
         base['secs']=round(time.time()-started,2)
         return base
-    skill=next(s for s in library if s.skill_id==choice.skill_id)
+    base['skill_load'] = {
+        'skill_id': skill.skill_id, 'skill_key': skill.key,
+        'body_chars': len(skill.body), 'mode': 'progressive'
+    }
     agent.rules,agent.no_rules=skill.body,not bool(skill.body)
     adapter=resolve(cfg);adapter.configure(agent)
     result=agent.execute_trial(adapter,{},'')
