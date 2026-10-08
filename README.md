@@ -18,10 +18,12 @@ flowchart LR
   G -->|predicted + train_cards| I[train 经验卡逐卡 Reviewer]
   G -->|empirical| J[val 实测 paired execution]
   G -->|jev| K[val 上 JEV 预测]
+  G -->|sampled| N[val 上配对 Δ 预测 + 随机抽检 PPI 修正 + 判定者]
   H --> L[严格 paired 选择并提交 Skill]
   I --> L
   J --> L
   K --> L
+  N --> L
   L --> E
   L --> M[test：显式独立评测]
 ```
@@ -55,11 +57,11 @@ flowchart LR
 
 - Planner 的每条改动必须附上可核实的**声明**（触发条件 + 动作变化）；
 - Reviewer 每题预测**配对增量** Δ，并单独报告该规则是否会触发；
-- 真实环境随机抽 `--acceptance-sample-size` 道 val 题执行两臂（该值是上限，panel 更小的 family 全量执行；panel 少于 2 题时无法判定，一律拒绝并记为 `insufficient_sample`），用样本上的成对误差修正 panel 全体预测（PPI）；
+- 真实环境随机抽 `--acceptance-sample-size` 道 val 题执行两臂（该值是上限，panel 更小的 family 全量执行；panel 只有 1 题时无法判定，一律拒绝并记为 `insufficient_sample`；panel 为空时整批 hold），用样本上的成对误差修正 panel 全体预测（PPI）；
 - 修正后的单侧置信下界（`--acceptance-confidence`，默认 0.9）大于 0 才接受。判定带 `1e-9` 舍入保护；
 - 独立**判定者**读取每道抽检题的两条执行轨迹，判断两者行为是否不同、首个不同在哪一步、差异是否由该规则引起并符合声明（`--claim-verification off` 可关闭，用于消融）；
-- 双方各有一份记忆：Planner 拿到改动层聚合（不含任何 val 题目），Reviewer 拿到检索式错判案例。分别由 `--planner-memory-mode`、`--reviewer-memory-mode` 控制；
-- 旧的 train-panel Reviewer 校准在该协议下不启用（`--reviewer-update-mode` 默认 `none`）。
+- 双方各有一份记忆：Planner 拿到改动层聚合（不含任何 val 题目），Reviewer 拿到检索式判断案例（高估、低估、正确）。分别由 `--planner-memory-mode`、`--reviewer-memory-mode` 控制；
+- 旧的 train-panel Reviewer 校准在该协议下不启用：`--reviewer-update-mode` 默认且只能为 `none`，显式给其它值会报错。
 
 设计与预注册指标见 [实验计划](docs/EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)。
 
@@ -69,11 +71,11 @@ flowchart LR
 
 | 模式 | 行为 |
 |---|---|
-| `none` | 不收集反馈，Reviewer 始终使用初始 prompt |
+| `none` | 不收集反馈，Reviewer 始终使用初始 prompt；sampled 下默认且只能为此值 |
 | `summary` | 收集反馈并生成 update，但 update 只用于审计 |
-| `rules` | 把程序统计 + Reviewer 压缩出的校准规则放入下一轮 predicted-val Reviewer 的 prompt |
+| `rules` | 把程序统计 + Reviewer 压缩出的校准规则放入下一轮 predicted-val Reviewer 的 prompt；predicted/empirical/jev 的默认值 |
 
-`--reviewer-feedback-size N` 把每个 family 的反馈 panel 固定为前 N 个 train task（0 表示全部）。该协议已由 sampled 取代，仅作为历史参照保留，见[旧实验计划](docs/EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)（deprecated）。
+`--reviewer-feedback-size N` 把每个 family 的反馈 panel 固定为前 N 个 train task（0 表示全部）。该协议已由 sampled 取代，仅作为历史参照保留，见[旧实验计划](docs/EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)（deprecated）。注意：非 sampled 协议下 `--reviewer-update-mode` 的默认值仍是 `rules`，不显式传 `none` 就会启用该校准（包括每轮在 train panel 上的额外真实执行）。
 
 ## 模型角色
 
@@ -123,7 +125,7 @@ flowchart LR
 
 ## 工件与审计
 
-运行目录保存 `discovery/`、`evolution/round-N/`、`l2_proposals/`、`l2_batches/`、`skills.jsonl`、`routes/val/`、`routes/test/` 和 `test/<library-hash>/`。`l2_manifest.json` 冻结 split、配置、代码和模型身份；每轮 audit 会校验 train 覆盖、卡片 hash、候选重放、Skill 版本链及 acceptance scope。
+运行目录保存 `discovery/`、`evolution/round-N/`、`l2_proposals/`、`l2_batches/`、`skills.jsonl`、`routes/val/`、`routes/test/`、`val/`（predicted/sampled 的逐题预测、抽检与判定缓存）和 `test/<library-hash>/`。`l2_manifest.json` 冻结 split、配置、代码和模型身份；每轮 audit 会校验 train 覆盖、卡片 hash、候选重放、Skill 版本链及 acceptance scope。
 
 改变 prompt、模型、split、配置或验收协议必须使用新的运行目录。只改源码时，`--resume` 默认拒绝继续；确认改动不影响协议后可加 `--allow-code-change`，漂移会追加到冻结 manifest 旁的 `code_changes.jsonl`，原 manifest 不改写。恢复只复用当前协议已落盘的逐单元结果。
 

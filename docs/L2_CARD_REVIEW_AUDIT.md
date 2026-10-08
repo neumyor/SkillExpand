@@ -11,7 +11,7 @@
 
 候选、原始响应、repair 响应和完整 diff 都写入 `l2_proposals/`。不合法假设或候选最多定向修正一次；没有有效候选则 batch hold。
 
-## 三种验收模式
+## 验收模式
 
 ### predicted + val（默认）
 
@@ -23,8 +23,8 @@ Reviewer 的最终输出由 JSON Schema 约束为三个字段：`probability_tru
 1 的数字）、`predicted_success`（必须与阈值判断一致）和不超过 80 个字符的
 `reason`。Reviewer 请求单独启用 thinking；executor 的全局 thinking 开关不会
 覆盖它。若模型返回 fenced JSON、前后 commentary、尾随逗号或 Python 风格
-字面量，`_extract_json()` 会提取完整对象；截断对象会触发一次格式修复请求，
-仍然无效则该 task 失败并保留错误工件。
+字面量，`extract_json()` 会提取完整对象；不合格的输出按 `reviewer.predicted_val` 策略重新采样（最多 32 次，
+可用 `EXPE_REVIEWER_ATTEMPTS` 覆盖），用尽后该 task 记为可重试失败并保留错误工件。
 
 ### predicted + train_cards
 
@@ -34,6 +34,10 @@ Reviewer 的最终输出由 JSON Schema 约束为三个字段：`probability_tru
 
 两者也使用冻结 `routes/val/` 和相同 paired task IDs。`empirical` 启动真实 executor，`jev` 调用 JEV 服务。每个候选都和旧 Skill 在相同 task panel 上比较，只有严格提高才接受。
 
+### sampled
+
+配对 Δ 预测 + 随机抽检修正 + 判定者，见 [ARCHITECTURE](ARCHITECTURE.md) 第 4 节；离线审计由 `l2/sampled_audit.py` 执行。
+
 ## 批次工件
 
 `l2_batches/<batch-id>.json` 至少记录：
@@ -42,8 +46,9 @@ Reviewer 的最终输出由 JSON Schema 约束为三个字段：`probability_tru
 - `panel`、`task_ids`、`protocol_hash`
 - 每个候选的 `candidate_id`、`ValidationResult` 或逐卡判断
 - `predicted_requests`、`executions`、选择理由和最终 candidate
+- sampled 批次另记录每个候选的 `claim_id`、`executions`、`reviewer_requests`，以及 `sample_size`、`confidence`、`planner_memory`、`reviewer_memory_version`
 
-`summary.json` 区分 `reviewed_candidates`（train-card review）与 `predicted_val_candidates`；不能把 predicted approval 报成实测提升。
+`summary.json` 区分 `reviewed_candidates`（train-card review）与 `predicted_val_candidates`；不能把 predicted approval 报成实测提升。`predicted_val_candidates` 统计所有 `acceptance.scope == "val"` 的候选，因此也包含 sampled 候选；sampled 的实测数字见 `val_executions` 与 `reviewer_metrics`。
 
 ## 离线审计
 

@@ -6,9 +6,9 @@
 
 - train 经验卡与 val/test 严格隔离；
 - 每个 family 的 train 卡固定分批，尾批也执行；
-- Planner、Editor、Reviewer 的模型角色可以独立配置；
+- Planner、Editor、Reviewer、Verifier（以及 L1 执行器、冷启动、selector）的模型角色可以独立配置；
 - structured 模式使用程序可验证的 section/rule ID edit；
-- predicted-val、empirical 和 JEV 都使用冻结 val route，并和旧 Skill 做 paired comparison；
+- predicted-val、empirical、JEV 和 sampled 都使用冻结 val route，并和旧 Skill 做 paired comparison；
 - test 只做独立评测，不参与候选选择；
 - 每个 task、请求、候选、acceptance 和提交事务逐单元落盘，可断点恢复；
 - round audit 在下一轮或结果分析前执行。

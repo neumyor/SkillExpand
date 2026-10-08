@@ -7,7 +7,7 @@
 | Split | 作用 | 是否可进入 L1/L2 | 是否用于最终报告 |
 |---|---|---:|---:|
 | `train` | 冷启动经验卡、family、初始 Skill，以及每轮 Skill-aware L1 | 是 | 否 |
-| `val` | predicted/empirical/JEV 的候选验收面板 | 仅验收时读取 | 否，结果会被选择过程污染 |
+| `val` | predicted/empirical/JEV/sampled 的候选验收面板（sampled 另在其中抽检执行） | 仅验收时读取 | 否，结果会被选择过程污染 |
 | `test` | 独立路由和单次真实评测 | 否 | 是 |
 
 CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写入 `test/<library-hash>/`。
@@ -29,7 +29,7 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 1. 写入 `evolution/round-N/input.json`，冻结本轮输入 Skill 和 train task 集合。
 2. 用当前 Skill head 在所有 train task 上重新运行 Skill-aware L1；卡片写入 `evolution/round-N/cards/`，每题都有独立 checkpoint。
 3. 按 family、task ID 和固定 batch size 生成 `batches.json`。默认每批最多 50 张卡、1 个候选（`--candidate-count`）。
-4. L2 Planner 读取当前 Skill、本批经验卡和 pattern 候选，提出不同机制的修改假设。
+4. L2 Planner 读取当前 Skill、本批经验卡和 pattern 候选（sampled 协议下另加 Planner 记忆），提出不同机制的修改假设。
 5. `rewrite` 模式由 Editor 生成完整候选 body；`structured` 模式由 Planner 直接输出 schema 约束的单个 edit，程序依据真实 section/rule ID 应用它。description 不可修改。
 6. 相同 body 去重后进入 acceptance。每个 batch 事务写入 `l2_batches/<batch-id>.json`，只有选中的 candidate 才追加到 `skills.jsonl`。
 7. round summary 和离线 audit 完成后，下一轮才允许开始。
@@ -54,7 +54,7 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 
 ### sampled（协同进化协议）
 
-`l2/sampled.py` 是该协议在 L2 层的唯一入口：旧模块（`update.py`、`loop.py`、`audit.py`、`cli.py`、`campaign.py`）各只保留一个分发点，协议逻辑全部在新模块中。
+协议逻辑集中在下表的模块中，`l2/sampled.py` 是 L2 层的入口。旧模块只保留接线：`loop.py` 组装验证器并注入记忆，`editor.py` 拼接声明与记忆契约，`update.py`、`audit.py`、`cli.py`、`campaign.py` 各有少量分发与参数透传。
 
 | 模块 | 职责 |
 |---|---|
@@ -70,16 +70,16 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 流程：
 
 1. **声明**：Planner 在 structured edit 之外必须给出 `claim`（`trigger` 触发条件 + `action_change` 动作变化），作为同一份输出 schema 的一个字段。两项单行、各不超过 400 字符。`claim_id` 由程序计算，写在 batch journal 的 hypothesis 与 proposal 行上，不进入 `Skill` 持久格式；audit 按文本重算并比对，并核对每个候选的验收记录引用的正是其 proposal 的 `claim_id`。
-2. **配对 delta 预测**：`PairedDeltaReviewer` 每题一次调用，输入是"旧规则 → 新规则"这一条改动、改动后的 body、声明，以及（开启时）该题的 Reviewer 记忆块；输出 `trigger_probability` 与 `delta_probability`。两侧 body、声明与记忆块都进入缓存键，每行记录 `memory_hash`。
+2. **配对 delta 预测**：`PairedDeltaReviewer` 每题一次调用，输入是"旧规则 → 新规则"这一条改动、改动后的 body、声明，以及（开启时）该题的 Reviewer 记忆块；输出 `trigger_probability` 与 `delta_probability`。两侧 body、声明与记忆块都进入缓存键；缓存记录（`val/delta_predictions.jsonl`）含 `memory_hash`，journal 行记录 `reviewer_cache_key`。
 3. **抽样与修正**：`ppi.select_sample` 从冻结 val panel 中按 panel key + candidate 确定的种子抽取 `--acceptance-sample-size` 道题（上限：panel 更小的 family 全量执行，实际数量记在 `decision.n_sample`），两臂各真实执行一次，用样本上的成对误差修正 panel 全体预测：
-   `Δ̂ = mean_panel(Δ̂_i) + mean_sample(d_i − Δ̂_i)`。`acceptance.executions` 记录真实 episode 数（两臂 × 抽样题数）。
-4. **判定规则**：修正后的单侧置信下界（Student-t，`--acceptance-confidence`，默认 0.9）必须大于 0（带 `1e-9` 舍入保护）。少于 2 个抽样对时无法给出区间，一律 `insufficient_sample`。
+   `Δ̂ = mean_panel(Δ̂_i) + mean_sample(d_i − Δ̂_i)`。`acceptance.executions` 记录决策所依据的 episode 数（两臂 × 抽样题数，含缓存复用的旧臂）。
+4. **判定规则**：修正后的单侧置信下界（Student-t，`--acceptance-confidence`，默认 0.9）必须大于 0（带 `1e-9` 舍入保护）。少于 2 个抽样对时无法给出区间，一律 `insufficient_sample`；val panel 为空的 family 整批 hold（`hold: frozen val panel is empty`），不预测也不执行。`--acceptance-sample-size` 小于 2 在启动时即被拒绝。
 5. **判定者**：两条轨迹有没有差异、差异在哪里，完全交给 `TrajectoryVerifier` 判断，程序不比较动作序列（自由文本搜索词与家居动作序列都难以用程序可靠比较）。判定者对每道抽样题调用一次，读取两臂的逐步记录（执行器输出 + 环境观察，`claim_check.trajectory_view`），最后一步的观察被去掉，因为它就是成败反馈（如 `Answer is CORRECT`）；其余内容完整传入、不截断——触发条件常常写在观察里（搜索返回的文档、当前可执行动作列表），无标注的截断会让判定者把半页内容当成全部。输出五类之一（`no_difference` / `claim_confirmed` / `claim_not_confirmed` / `unrelated` / `indeterminate`）、首个不同的步骤与理由。`--claim-verification off` 关闭判定者。
-6. **两份记忆**（`l2/memory.py`，只由**当前轮之前**的账本派生）：Planner 得到改动层聚合——各类改动的真实有效率、预测与实测的差距，以及（判定者开启时）"规则被判定者认定触发 n/N、符合声明 n/N"；其渲染不读取任何 val 题目。注意"触发"只算 `claim_confirmed`/`claim_not_confirmed`：轨迹有差异不等于规则触发（`unrelated` 是执行器漂移）。Reviewer 得到检索式案例——高估、低估与正确各优先取一例，排除当前改动与当前题。
+6. **两份记忆**（`l2/memory.py`，只由**当前轮之前**的账本派生）：Planner 得到改动层聚合——按节/操作汇总的有效/无效/证据不足计数、预测与实测的均值，以及（判定者开启时）"触发 k/N（N 为抽检题数）、符合声明 m/k（分母为触发数）"，另逐条列出最近 8 个提案；其渲染不读取任何 val 题目。注意"触发"只算 `claim_confirmed`/`claim_not_confirmed`：轨迹有差异不等于规则触发（`unrelated` 是执行器漂移）。Reviewer 得到检索式案例——同节、同操作，高估、低估与正确各优先取一例，每题最多 3 例，排除当前改动与当前题。
 
-sampled 协议**不使用**旧的 train-panel Reviewer 校准：`reviewer_update_mode` 在该协议下默认且只能为 `none`，否则两套学习信号会同时作用于同一个 Reviewer。
+sampled 协议**不使用**旧的 train-panel Reviewer 校准：`reviewer_update_mode` 在该协议下默认且只能为 `none`（即使关闭 Reviewer 记忆也一样），否则两套学习信号会同时作用于同一个 Reviewer。
 
-每个 batch journal 记录当轮的 `planner_memory` 文本与 `reviewer_memory_version`（Reviewer 记忆覆盖的更早候选数）；审计逐字符重算 Planner 记忆、核对 Reviewer 记忆覆盖范围。round summary 的 `reviewer_metrics` 给出预注册主指标：逐题 Δ-Brier、相对"全部预测 0"基线的 skill score，以及护栏指标（被接受但实测无效的候选数）；审计要求它可由 journal 重算。该指标只报告点值，不计算置信区间。
+每个 batch journal 记录当轮的 `planner_memory` 文本与 `reviewer_memory_version`（Reviewer 记忆覆盖的更早候选数）；审计逐字符重算 Planner 记忆、核对 Reviewer 记忆覆盖范围。round summary 的 `reviewer_metrics` 只覆盖本轮候选，给出 `sampled_pairs`、`candidates`、逐题 Δ-Brier、零基线 Brier、skill score、`accepted` 与 `false_accepts`（被接受但抽检实测无效的候选数）；审计要求它可由 journal 重算。该指标只报告点值，不计算置信区间。
 
 ## 5. test 评测
 
@@ -89,7 +89,7 @@ CLI test 阶段和 `scripts/evaluate_snapshot.py`（评测第 N 轮结束时的�
 
 ## 6. 并发与持久化
 
-冷启动 train L1、family 请求、每轮 train L1 和 val/test task evaluation 可并发。Planner、Editor、batch commit 和 round transition 保持串行；train-card Reviewer 与 predicted-val judge 使用受限 `l2_review_workers` pool。每个请求和每个 task 都先落盘再汇总，目录锁防止重复 writer，恢复依赖 manifest、job lock 和逐单元缓存。
+冷启动 train L1、family 请求、每轮 train L1 和 val/test task evaluation 可并发。Planner、Editor、batch commit 和 round transition 保持串行；train-card Reviewer、predicted-val judge，以及 sampled 的配对 Δ Reviewer、抽检执行与判定者，都使用受限 `l2_review_workers` pool。每个请求和每个 task 都先落盘再汇总，目录锁防止重复 writer，恢复依赖 manifest、job lock 和逐单元缓存。
 
 ## 7. 关键工件
 
@@ -109,13 +109,14 @@ CLI test 阶段和 `scripts/evaluate_snapshot.py`（评测第 N 轮结束时的�
 > 已由 [EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md](EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)（deprecated）
 > 取代；新的协同进化协议见第 4 节 `sampled` 与
 > [EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md](EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)。
-> 本条保留为 `predicted` + `rules` 组合的说明，该组合不再参与主比较。
+> 本条保留为 `predicted` + `rules` 组合的说明，该组合不再参与主比较。注意 `rules` 仍是 predicted/empirical/jev
+> 不传 `--reviewer-update-mode` 时的默认值；主比较的条件需显式指定 `none` 或使用 `sampled`。
 
 `--single-candidate` 把每个 batch 限制为一个候选。`--reviewer-update-mode` 为 `summary` 或 `rules` 时，每轮 L2 结束后 `SerialEvolutionLoop._collect_reviewer_feedback` 在固定的 train family panel（`--reviewer-feedback-size` 截取前 N 题）上，用同一路由各执行一次旧 head 和本轮候选，把预测与真实 paired outcome 写入 `reviewer_feedback.jsonl`。`l2/reviewer_coevolution.py` 据此计算 paired precision、false-positive regression、Brier、ECE，生成版本化的 `reviewer_updates.jsonl`。
 
 - `none`：不收集反馈；
 - `summary`：反馈和 update 只用于审计，Reviewer prompt 保持初始版本；
-- `rules`：Reviewer LLM 把带 feedback ID 的统计压缩成有限规则，作为 calibration block 进入下一轮 predicted-val Reviewer 的 prompt，并计入其 protocol hash。
+- `rules`：Reviewer LLM 把带 feedback ID 的统计压缩成有限规则，作为 calibration block 进入下一轮 predicted-val Reviewer 的 prompt，并计入其 protocol hash。这是 predicted/empirical/jev 的默认值；sampled 下默认且只能为 `none`。
 
 反馈只来自 train；val 只用于当轮验收，test 只用于报告。`audit_round` 校验反馈只引用冻结 train split 中、属于同一 family 的 task，feedback ID 不重复，update 只引用已存在的 feedback，且 version/parent 版本链连续。
 
@@ -132,7 +133,7 @@ reliability                 异常分类与处置、重试/修复策略、单元
 benchmarks                  SearchQA / ALFWorld 环境与任务表
 runtime                     ReAct 执行器、LLM 客户端、JSON 输出解析、通用任务池、prompt 注册表
 l1                          修复循环、经验卡、family 发现、冷启动、冷启动工件导入、L1 worker
-evaluation                  路由、val/test 打分、JEV、快照评测、fixed-Skill worker
+evaluation                  路由、val/test 打分、JEV、配对 Δ Reviewer、PPI、判定者、sampled 单候选验证、快照评测、fixed-Skill worker
 l2                          Planner/Editor/Reviewer、batch 事务、多轮闭环、审计、Reviewer 协同演化、sampled 协议与两份记忆
 campaign, cli               冻结 campaign 启动器；单次运行 CLI
 ```

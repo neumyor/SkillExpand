@@ -55,7 +55,8 @@
 
 | 名称 | 次数 | 用完之后 |
 |---|---:|---|
-| `reviewer.predicted_val`、`reviewer.calibration_rules` | 32（可用 `EXPE_REVIEWER_ATTEMPTS` 覆盖） | 可重试 |
+| `reviewer.predicted_val`、`reviewer.calibration_rules`、`reviewer.delta_review` | 32（可用 `EXPE_REVIEWER_ATTEMPTS` 覆盖） | 可重试 |
+| `verifier.claim` | 8 | 可重试 |
 | `planner.hypotheses`、`reviewer.card` | 2（第 2 次附带 correction） | 可重试 |
 | `discovery.tags`、`discovery.proposals`、`discovery.assignment`、`discovery.initial_skill` | 3（附固定后缀） | 可重试 |
 | `campaign.reviewer_probe` | 3 | 可重试 |
@@ -84,7 +85,7 @@ L1、路由和 fixed-Skill 执行的 worker 结果都带 `failure` 字段：成�
 
 记录中的 `stage` 字段由 collector 写入（如 `evolution-1/l1`、`routing-test`、`fixed-execution`）。
 
-接入位置：冷启动和 evolution 的 L1、val/test 路由、fixed-Skill 执行、predicted-val、JEV。L1 checkpoint 的 `errors[]` 和被中断 trial 的 `failure_category` 也会记录类别。
+接入位置：冷启动和 evolution 的 L1、val/test 路由、fixed-Skill 执行、predicted-val、JEV、sampled 配对 Δ Reviewer（stage `delta-review`）。sampled 判定者不经过 collector，修复用尽的 `RepairExhausted` 直接中止当前 batch（可重试，`--resume` 时从缓存续跑）。L1 checkpoint 的 `errors[]` 和被中断 trial 的 `failure_category` 也会记录类别。
 
 ## 6. 阶段与 campaign
 

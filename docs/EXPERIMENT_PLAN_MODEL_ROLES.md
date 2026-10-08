@@ -24,7 +24,8 @@
 | `cold_start` | `--cold-start-model` | family discovery、初始 Skill synthesis 及冷启动归纳 |
 | `l2_planner` | `--l2-planner-model` | 读取当前 Skill、经验卡和 pattern，提出修改假设 |
 | `l2_editor` | `--l2-editor-model` | rewrite 模式下生成候选 Skill；structured 模式下由程序应用 Planner 的 edit |
-| `l2_reviewer` | `--l2-reviewer-model` | predicted/empirical/JEV 之外的普通 LLM Reviewer 路径中的预测验收 |
+| `l2_reviewer` | `--l2-reviewer-model` | predicted-val / train_cards 的预测验收、sampled 的配对 Δ 预测、旧协议的校准规则压缩 |
+| `l2_verifier` | `--l2-verifier-model` | 仅 sampled 协议：读取抽检题两臂轨迹，判断差异是否由该规则引起并符合声明 |
 | `selector` | `--selector-model` | 为 val/test task 固定 Skill family 路由 |
 
 经验卡提取目前不是一个单独的模型开关：L1 执行、反思/修复和最终 synthesis 属于同一条 L1 agent 流程。因此本实验把 `l1_executor` 作为这个逻辑角色的可观测替代，并在报告中明确这一限制，不能把它声称为“只替换经验卡提取模型”。
@@ -55,7 +56,8 @@
 3. `cold_start-strong`；
 4. `l2_planner-strong`；
 5. `l2_reviewer-strong`；
-6. 可选的 `l2_editor-strong` 和 `selector-strong`，作为边界条件；
+6. 可选的 `l2_editor-strong`、`l2_verifier-strong` 和 `selector-strong`，作为边界条件。矩阵协议固定为
+   `acceptance_mode=predicted`，从不调用判定者，所以 `l2_verifier-strong` 在本矩阵中与 baseline 等价；
 7. 根据第一阶段的最大边际收益，运行一个 all-selected 条件和最多两个有理论依据的二角色组合，检验交互。
 
 冷启动和 Evolve 的模型身份必须在同一条件内保持一致。不能先用一种模型产生冷启动，再无记录地换另一种模型继续 Evolve；若要研究只替换 Evolve 角色，应显式复用冻结冷启动工件，并在 manifest 中记录“冷启动来源条件”和“Evolve 条件”。
@@ -113,7 +115,7 @@ campaign manifest 会冻结 `EXPE_LLM_BASE_URL`；恢复或启动时若当前端
 
 ## 8. 执行编排
 
-矩阵由 `scripts/model_role_matrix.py` 生成。默认只生成 baseline 和四个主要单角色条件；编辑器和 selector 条件必须显式使用 `--include-optional` 加入。每个条件都有独立的 campaign 根目录，不共享运行目录或可写状态。
+矩阵由 `scripts/model_role_matrix.py` 生成。默认只生成 baseline 和四个主要单角色条件；编辑器、判定者和 selector 条件必须显式使用 `--include-optional` 加入。每个条件都有独立的 campaign 根目录，不共享运行目录或可写状态。
 
 先生成并审阅矩阵文件：
 

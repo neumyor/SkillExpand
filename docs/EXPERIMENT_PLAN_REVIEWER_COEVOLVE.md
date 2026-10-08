@@ -1,7 +1,8 @@
 > **DEPRECATED (2026-10-08).** 本文件描述的是旧协议：Reviewer 在 **train** family panel 上取反馈、
 > 以模板化的"失败类别"规则做校准、验收用两侧独立的绝对成功概率相比。该协议已被
 > [EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md](EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)
-> 取代，代码中的 `reviewer_update_mode=rules` 路径仅为历史 run 的审计参照保留。
+> 取代。注意 `reviewer_update_mode=rules` 仍是 predicted/empirical/jev 协议下的 CLI 与 campaign 默认值；
+> 新实验若不想启用它，须显式传 `--reviewer-update-mode none`，或改用 `sampled`（该协议下只能为 `none`）。
 > 本文只作为历史记录，不得据其设计新实验。
 
 # 实验计划：单候选 Reviewer 协同演化

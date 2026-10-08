@@ -25,7 +25,7 @@ L2 的 train-card Reviewer 读取卡片的 `projection()`：它保留 task、exe
 
 ## Skill 角色配置
 
-冷启动、L1 执行器、L2 Planner、rewrite Editor、L2 Reviewer、selector 可以在配置中分别指定模型：
+冷启动、L1 执行器、L2 Planner、rewrite Editor、L2 Reviewer、L2 Verifier（sampled 协议的判定者）、selector 可以在配置中分别指定模型：
 
 ```yaml
 models:
@@ -34,10 +34,11 @@ models:
   l2_planner: planner-model
   l2_editor: editor-model
   l2_reviewer: reviewer-model
+  l2_verifier: verifier-model
   selector: selector-model
 ```
 
-对应 CLI 参数是 `--l1-model`、`--cold-start-model`、`--l2-planner-model`、`--l2-editor-model`、`--l2-reviewer-model` 和 `--selector-model`。
+对应 CLI 参数是 `--l1-model`、`--cold-start-model`、`--l2-planner-model`、`--l2-editor-model`、`--l2-reviewer-model`、`--l2-verifier-model` 和 `--selector-model`。
 
 ## L1 预算
 

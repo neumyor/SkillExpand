@@ -65,4 +65,4 @@ skills, and any effect on final success rates, remain unmeasured.
 
 > 在一次自主尝试中，这个执行器使用该 Skill 是否能成功完成 task？不能观察 rejected answer，也不能反思重试。
 
-输出 `probability_true`、`predicted_success` 和简短理由。程序分别请求旧 Skill 与候选 Skill，固定使用同一 `routes/val/` task group，并以平均概率的严格提升决定候选是否通过。这个预测与 `train_cards` 的经验卡 Reviewer、`empirical` 的 val 实测和 JEV 服务相互独立；工件通过 `acceptance.scope` 记录实际路径。
+输出 `probability_true`、`predicted_success` 和简短理由。程序分别请求旧 Skill 与候选 Skill，固定使用同一 `routes/val/` task group，并以平均概率的严格提升决定候选是否通过。这个预测与 `train_cards` 的经验卡 Reviewer、`empirical` 的 val 实测、JEV 服务和 `sampled` 协议相互独立；工件通过 `acceptance.mode` 与 `acceptance.scope` 记录实际路径。`sampled` 使用另一套配对 Δ prompt（`evaluation/delta_review.py`），直接看到改动前后的规则与 Planner 的声明。
