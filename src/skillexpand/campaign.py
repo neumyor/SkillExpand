@@ -670,7 +670,6 @@ def sampled_contract_probe(root, benchmark, run, cfg):
     from skillexpand.evaluation import validation as VA
     from skillexpand.evaluation.claim_check import TrajectoryVerifier
     from skillexpand.evaluation.delta_review import PairedDeltaReviewer
-    from skillexpand.evaluation.divergence import first_divergence
     from skillexpand.runtime import agent_factory as F
 
     skills = [S.from_dict(S.Skill, item) for item in read(run / 'initial_skills.json')]
@@ -704,14 +703,14 @@ def sampled_contract_probe(root, benchmark, run, cfg):
         cfg, VA.ScoreCache(directory / f'{benchmark}-verifier.jsonl'), workers=1,
         host_factory=lambda task_id, usage_path: F.build_reasoning_host(
             cfg, usage_path, role='l2_verifier'))
-    divergence = first_divergence(
-        ({'action': 'Search[first clue]', 'observation': 'a result'},),
-        ({'action': 'Lookup[second clue]', 'observation': 'a result'},))
     verdict = verifier.verify(
         task_ids[0],
         {'section': 'completion_checks', 'rule_id': 'V2', 'op': 'add', 'before': None,
          'after': 'Before submitting, restate the requested answer type.'},
-        claim, divergence, panel_key)
+        claim,
+        ({'model_text': 'Action 1: Search[first clue]', 'observation': 'a result'},),
+        ({'model_text': 'Action 1: Lookup[second clue]', 'observation': 'a result'},),
+        panel_key)
     report = {'tasks': list(task_ids), 'mean_delta': prediction.mean_delta,
               'mean_trigger': prediction.mean_trigger,
               'verifier_category': verdict['category']}

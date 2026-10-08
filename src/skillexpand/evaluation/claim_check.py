@@ -1,23 +1,24 @@
-"""The independent verifier: does the rule explain the execution difference?
+"""The independent verifier: did the changed rule change the execution, and how?
 
 A claim is only worth stating if someone checks it, and the two parties to the
 proposal are the wrong ones to do so.  The Planner wrote the rule; the Reviewer
 predicted what it would do.  Letting either of them judge whether the prediction
-held would let their own error stand, and the Reviewer's verdict is one of the
-things this evidence is used to score.
+held would let their own error stand.
 
-So the verifier is a third role with a deliberately narrow question and no stake
-in the answer: given the changed rule, the claim, and the first step at which two
-executions stop agreeing, decide whether the rule explains that difference.
+So the verifier is a third role with no stake in the answer.  It reads both
+executions of one task -- without the changed rule and with it -- and decides
+whether they differ in behaviour, where they first do, and whether that
+difference is the one the claim describes.  Comparing two trajectories is left
+to the verifier on purpose: deciding by program whether two free-text searches
+or two household action sequences "differ" needs benchmark-specific
+normalisation and an open-ended list of corner cases.
 
-It never sees the outcome of either attempt.  Everything it is shown -- the task,
-the two actions at the divergence, and the observation *before* the divergence --
-is identical in both runs, so the judgement cannot be read off which run ended
-better.  Whether the change helped is the sampled measurement's question, not
-this one.
+It never sees how either attempt ended: the observation of each run's last step
+-- where the environment reports the result -- is withheld, and no success flag
+is shown.  Whether the change helped is the sampled measurement's question.
 """
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from skillexpand import schema as S
 from skillexpand.runtime import agent_factory as F
@@ -26,22 +27,40 @@ from skillexpand.reliability.errors import InvalidInput
 from skillexpand.reliability.policies import repair_policy
 from skillexpand.reliability.retry import call_with_repair, fresh
 
-#: The four verdicts, in the order the instruction lists them.
-CATEGORIES = ('claim_confirmed', 'claim_not_confirmed', 'unrelated', 'indeterminate')
+#: The verdicts, in the order the instruction lists them.
+CATEGORIES = ('no_difference', 'claim_confirmed', 'claim_not_confirmed', 'unrelated',
+              'indeterminate')
 
 REASON_MAX_CHARS = 2000
+#: Each observation is context for the next step, not evidence in itself.
+OBSERVATION_CHARS = 600
+
+
+def trajectory_view(events: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """One execution as the verifier reads it: what the executor wrote and saw.
+
+    The last observation is dropped because it is where the environment reports
+    the outcome (e.g. "Answer is CORRECT").  Nothing else is interpreted here.
+    """
+    steps = [{'executor': str(event.get('model_text', '')),
+              'observation': str(event.get('observation', ''))[:OBSERVATION_CHARS]}
+             for event in events if isinstance(event, dict)]
+    if steps:
+        steps[-1]['observation'] = ''
+    return steps
 
 
 class TrajectoryVerifier:
     """Frozen, third-party attribution of a trajectory difference to a rule."""
 
-    PROTOCOL = 'claim-verification-v1'
+    PROTOCOL = 'claim-verification-v2'
     RESPONSE_SCHEMA = {
         'type': 'object',
         'additionalProperties': False,
-        'required': ['category', 'reason'],
+        'required': ['category', 'first_difference_step', 'reason'],
         'properties': {
             'category': {'type': 'string', 'enum': list(CATEGORIES)},
+            'first_difference_step': {'type': ['integer', 'null'], 'minimum': 1},
             'reason': {'type': 'string', 'minLength': 1},
         },
     }
@@ -67,56 +86,65 @@ class TrajectoryVerifier:
         })
 
     def prompt(self, task: str, changed_rule: Dict[str, Any], claim: S.Claim,
-               execution_difference: Dict[str, Any]) -> str:
+               without_change: List[Dict[str, str]],
+               with_change: List[Dict[str, str]]) -> str:
         return S._canonical_json({
             'task': task,
             'changed_rule': dict(changed_rule),
             'claim': claim.payload(),
-            'execution_difference': dict(execution_difference),
+            'execution_without_change': without_change,
+            'execution_with_change': with_change,
             'instructions': (
-                'You are an independent verifier. Two executors attempted the same '
-                'task with the same Skill, except that one rule differs: the rule in '
-                'changed_rule. Their executed actions first differ at the step shown '
-                'in execution_difference, which also lists the actions they shared '
-                'before that step and the observation the executor had seen just '
-                'before it. Classify that difference:\n'
-                '- claim_confirmed: the action taken WITH the change is the action the '
-                "claim's action_change describes, in the situation its trigger "
+                'You are an independent verifier. The same executor attempted the same '
+                'task twice with the same Skill, except for the one rule in changed_rule: '
+                'execution_without_change used the rule as it was, execution_with_change '
+                'used it as changed. Each execution lists, step by step, what the executor '
+                'wrote and what it observed. Decide whether the two executions differ in '
+                'behaviour, and classify:\n'
+                '- no_difference: they take the same course of action; wording that does '
+                'not change what is done is not a difference.\n'
+                '- claim_confirmed: they differ, and with the change the executor does what '
+                "the claim's action_change describes, in the situation its trigger "
                 'describes.\n'
-                '- claim_not_confirmed: the change is implicated in the difference, '
-                'but the action is not what the claim describes, or the situation is '
-                'not the one the claim names.\n'
-                '- unrelated: the difference cannot be attributed to this rule at all. '
-                'The executor is a language model, so rewriting one rule can perturb '
-                'a step that rule does not govern; such a difference is unrelated, '
-                'not confirmed.\n'
-                '- indeterminate: the supplied evidence is not enough to decide.\n'
-                'How either attempt ended is deliberately withheld, and no observation '
-                'produced by the differing action is shown. Judge only whether this '
-                'rule explains the difference, never whether the change helped, and '
-                'never guess at success. '
+                '- claim_not_confirmed: they differ because of the changed rule, but not in '
+                'the way the claim describes, or not in the situation it names.\n'
+                '- unrelated: they differ, but not because of this rule. The executor is a '
+                'language model, so changing one rule can perturb behaviour the rule does '
+                'not govern.\n'
+                '- indeterminate: the executions do not show enough to decide.\n'
+                'first_difference_step is the 1-based step of execution_with_change at '
+                'which behaviour first differs, or null for no_difference or when it '
+                'cannot be located. How either attempt ended is deliberately withheld; '
+                'judge only whether and how this rule changed what the executor did, never '
+                'whether the change helped. '
                 f'Return JSON only: {{"category":"<one of {", ".join(CATEGORIES)}>",'
-                f'"reason":"at most {REASON_MAX_CHARS} characters, naming the '
-                'evidenced situation and the two actions"}.'
+                '"first_difference_step":<integer or null>,'
+                f'"reason":"at most {REASON_MAX_CHARS} characters, naming the two '
+                'behaviours that differ, or why they do not"}.'
             ),
-            'output_schema': {'category': f'one of {", ".join(CATEGORIES)}',
-                              'reason': f'string, <= {REASON_MAX_CHARS} characters'},
         })
 
     def _parse_response(self, raw):
         from skillexpand.runtime.json_output import extract_json
-        value = extract_json(raw, required_keys=('category', 'reason'))
-        if set(value) != {'category', 'reason'}:
-            raise ValueError('verifier must return exactly category and reason')
-        if value['category'] not in CATEGORIES:
-            raise ValueError(f"verifier category {value['category']!r} is not one of "
-                             f"{CATEGORIES}")
-        reason = value['reason']
+        keys = ('category', 'first_difference_step', 'reason')
+        value = extract_json(raw, required_keys=keys)
+        if set(value) != set(keys):
+            raise ValueError('verifier must return exactly category, '
+                             'first_difference_step and reason')
+        category, step, reason = (value[key] for key in keys)
+        if category not in CATEGORIES:
+            raise ValueError(f'verifier category {category!r} is not one of {CATEGORIES}')
+        if step is not None and (isinstance(step, bool) or not isinstance(step, int)
+                                 or step < 1):
+            raise ValueError('first_difference_step must be a positive integer or null')
+        if category == 'no_difference' and step is not None:
+            raise ValueError('no_difference cannot name a first difference step')
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError('verifier reason must be a non-empty string')
         if len(reason) > REASON_MAX_CHARS:
             raise ValueError(f'verifier reason exceeds {REASON_MAX_CHARS} characters')
-        return {'category': value['category'], 'reason': reason.strip()}
+        return {'category': category, 'first_difference_step': step,
+                'reason': reason.strip()}
 
     def _call(self, host, prompt):
         from langchain.schema import HumanMessage
@@ -126,11 +154,13 @@ class TrajectoryVerifier:
                             'enable_thinking': True})
 
     def verify(self, task_id: int, changed_rule: Dict[str, Any], claim: S.Claim,
-               divergence: Any, panel_key: str) -> Dict[str, Any]:
-        """One verdict for one divergence; called only when one exists."""
-        payload = divergence.payload()
+               base_events: Sequence[Dict[str, Any]],
+               candidate_events: Sequence[Dict[str, Any]], panel_key: str) -> Dict[str, Any]:
+        """One verdict for one sampled task, from its two executions."""
+        without_change = trajectory_view(base_events)
+        with_change = trajectory_view(candidate_events)
         material = S._canonical_json({'rule': dict(changed_rule), 'claim': claim.payload(),
-                                      'difference': payload})
+                                      'without': without_change, 'with': with_change})
         key = ScoreCache.make_key(self.cfg.benchmark.name, panel_key, task_id,
                                   f'verify:{self.protocol_hash}', material)
         hit = self.cache.get(key)
@@ -146,7 +176,7 @@ class TrajectoryVerifier:
             repair_policy('verifier.claim'),
             fresh(lambda: self._call(
                 host, self.prompt(F.task_text_of(self.cfg, task_id), changed_rule,
-                                  claim, payload))),
+                                  claim, without_change, with_change))),
             self._parse_response)
         record = {'task_id': task_id, 'cache_key': key, 'panel_key': panel_key,
                   'protocol_hash': self.protocol_hash,

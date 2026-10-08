@@ -20,8 +20,7 @@ from skillexpand.l2.editor import SkillEditor
 from skillexpand.evaluation import ppi as PPI
 from skillexpand.evaluation import validation as V
 from skillexpand.evaluation.delta_review import PairedDeltaReviewer
-from skillexpand.evaluation.claim_check import CATEGORIES, TrajectoryVerifier
-from skillexpand.evaluation.divergence import PAYLOAD_KEYS, action_sequence, first_divergence
+from skillexpand.evaluation.claim_check import CATEGORIES, TrajectoryVerifier, trajectory_view
 from skillexpand.evaluation.sampled_validation import SampledDeltaValidator
 from skillexpand.runtime import agent_factory as F
 from skillexpand.persistence.io import AuditFailure
@@ -308,8 +307,8 @@ def structured_skill(body: str, *, version: int = 0) -> S.Skill:
 class StubExecutor:
     """Deterministic stand-in whose candidate fixes, and acts on, listed tasks.
 
-    Actions and outcomes come from the same predicate, so a task that diverges
-    is exactly a task the change acts on -- which is what the verifier's
+    Actions and outcomes come from the same predicate, so a task whose runs
+    differ is exactly a task the change acts on -- which is what the verifier's
     invariants are checked against.
     """
 
@@ -339,7 +338,8 @@ class StubExecutor:
         return {
             task_id: {
                 'task_id': task_id, 'skill_key': skill.key,
-                'events': [{'action': action, 'observation': f'after {action}'}
+                'events': [{'model_text': f'> {action}', 'action': action,
+                            'observation': f'after {action}'}
                            for action in self.actions(skill, task_id)],
             }
             for task_id in task_ids
@@ -355,8 +355,9 @@ class StubVerifyHost:
 
     def llm(self, messages, **kwargs):
         self.prompts.append('\n'.join(str(getattr(m, 'content', m)) for m in messages))
-        return json.dumps({'category': self.category,
-                           'reason': 'the change adds the open step at the divergence'})
+        step = None if self.category == 'no_difference' else 1
+        return json.dumps({'category': self.category, 'first_difference_step': step,
+                           'reason': 'the changed run opens the receptacle first'})
 
 
 class StubReviewHost:
@@ -553,40 +554,6 @@ class SampledBatchJournalTests(unittest.TestCase):
             audit(self.root, batch)
 
 
-class DivergenceTests(unittest.TestCase):
-    def events(self, actions):
-        return tuple({'action': action, 'observation': f'after {action}'}
-                     for action in actions)
-
-    def test_identical_actions_have_no_divergence(self):
-        self.assertIsNone(first_divergence(self.events(['a', 'b']), self.events(['a', 'b'])))
-        self.assertEqual(action_sequence(self.events(['a', 'b'])), ('a', 'b'))
-
-    def test_the_first_differing_step_is_reported_with_its_context(self):
-        base = self.events(['search', 'open', 'finish'])
-        candidate = self.events(['search', 'open', 'take', 'finish'])
-        divergence = first_divergence(base, candidate)
-        self.assertEqual(divergence.step, 3)
-        self.assertEqual(divergence.base_action, 'finish')
-        self.assertEqual(divergence.candidate_action, 'take')
-        self.assertEqual(divergence.prefix_actions, ('search', 'open'))
-        self.assertEqual(divergence.context_observation, 'after open')
-        # Nothing that reveals how either run ended reaches the verifier.
-        self.assertEqual(tuple(divergence.payload()), PAYLOAD_KEYS)
-
-    def test_a_run_that_stops_earlier_is_a_divergence(self):
-        divergence = first_divergence(self.events(['a', 'b']), self.events(['a']))
-        self.assertEqual(divergence.step, 2)
-        self.assertIsNone(divergence.candidate_action)
-        self.assertEqual(divergence.base_action, 'b')
-
-    def test_only_executed_actions_align_the_two_runs(self):
-        base = ({'action': 'a'}, {'observation': 'narration without an action'},
-                {'action': 'b'})
-        candidate = ({'action': 'a'}, {'action': 'b'})
-        self.assertIsNone(first_divergence(base, candidate))
-
-
 class VerificationTests(unittest.TestCase):
     def setUp(self):
         patcher = patch.object(F, 'task_text_of',
@@ -620,58 +587,63 @@ class VerificationTests(unittest.TestCase):
             self.cfg, self.routes, reviewer, StubExecutor(improvement=[1, 3, 5, 7, 9]),
             sample_size=4, confidence=0.9, **kwargs)
 
-    def test_the_verifier_parses_and_caches_its_verdict(self):
+    def test_the_verifier_reads_both_executions_and_caches_its_verdict(self):
         host = StubVerifyHost(category='claim_not_confirmed')
         verifier = self.verifier(host)
-        divergence = first_divergence(
-            ({'action': 'a'},), ({'action': 'b'},))
+        base = ({'model_text': 'Action 1: Search[maker]', 'observation': 'Toyota makes it'},
+                {'model_text': 'Action 2: Finish[Honda]', 'observation': 'Answer is INCORRECT'})
+        candidate = ({'model_text': 'Action 1: Search[Prius maker]', 'observation': 'D1'},
+                     {'model_text': 'Action 2: Finish[Toyota]',
+                      'observation': 'Answer is CORRECT'})
         changed = {'section': 'conditions', 'rule_id': 'C1',
                    'before': 'If exposed, place.', 'after': 'If closed, open then place.'}
-        first = verifier.verify(1, changed, self.claim, divergence, 'panel')
-        second = verifier.verify(1, changed, self.claim, divergence, 'panel')
-        self.assertEqual(first['category'], 'claim_not_confirmed')
+        first = verifier.verify(1, changed, self.claim, base, candidate, 'panel')
+        second = verifier.verify(1, changed, self.claim, base, candidate, 'panel')
+        self.assertEqual((first['category'], first['first_difference_step']),
+                         ('claim_not_confirmed', 1))
         self.assertEqual(len(host.prompts), 1)
-        self.assertEqual(second['category'], first['category'])
-        for expected in ('execution_difference', 'changed_rule', 'deliberately withheld',
-                         'action_without_change'):
-            self.assertIn(expected, host.prompts[0])
+        self.assertEqual(second, first)
+        prompt = host.prompts[0]
+        for expected in ('execution_without_change', 'execution_with_change',
+                         'Search[Prius maker]', 'Toyota makes it', 'deliberately withheld'):
+            self.assertIn(expected, prompt)
+        # The last observation reports the outcome, so neither run shows it.
+        self.assertNotIn('CORRECT', prompt)
+
+    def test_the_trajectory_view_withholds_only_the_final_observation(self):
+        events = ({'model_text': 'a', 'observation': 'first'},
+                  {'model_text': 'b', 'observation': 'You won!'})
+        self.assertEqual(trajectory_view(events),
+                         [{'executor': 'a', 'observation': 'first'},
+                          {'executor': 'b', 'observation': ''}])
+        self.assertEqual(trajectory_view(()), [])
 
     def test_an_unknown_category_is_rejected(self):
         # The parser is checked directly: the repair budget would otherwise make
         # this test sleep through eight backoff waits.
         verifier = self.verifier(StubVerifyHost())
-        with self.assertRaises(ValueError):
-            verifier._parse_response(json.dumps({'category': 'looks_good',
-                                                 'reason': 'fine'}))
-        with self.assertRaises(ValueError):
-            verifier._parse_response(json.dumps({'category': 'unrelated',
-                                                 'reason': ''}))
-        self.assertEqual(
-            verifier._parse_response(json.dumps({'category': 'unrelated',
-                                                 'reason': 'the step is unrelated'}))
-            ['category'], 'unrelated')
+        def parse(category, step, reason='because'):
+            return verifier._parse_response(json.dumps(
+                {'category': category, 'first_difference_step': step, 'reason': reason}))
 
-    def test_verification_covers_exactly_the_observed_differences(self):
+        for bad in (('looks_good', 1), ('unrelated', 1, ''), ('unrelated', 0),
+                    ('no_difference', 2), ('unrelated', True)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                parse(*bad)
+        self.assertEqual(parse('unrelated', 3)['first_difference_step'], 3)
+        self.assertIsNone(parse('no_difference', None)['first_difference_step'])
+
+    def test_verification_covers_exactly_the_sampled_tasks(self):
         host = StubVerifyHost()
         validator = self.validator(verifier=self.verifier(host))
         result = validator.validate(self.base, self.candidate, self.claim,
                                     'panel', 'sample-key')
-        executed = set(result.sample_task_ids)
-        diverged = {task_id for task_id in executed if task_id in {1, 3, 5, 7, 9}}
         self.assertTrue(result.verification_enabled)
-        self.assertEqual({row['task_id'] for row in result.rows
-                          if row['verification'] is not None}, diverged)
-        self.assertEqual(len(host.prompts), len(diverged))
-        for row in result.rows:
-            if not row['sampled']:
-                self.assertIsNone(row['divergence'])
-                self.assertIsNone(row['verification'])
-            elif row['task_id'] in diverged:
-                self.assertEqual(row['divergence']['diverged_at_step'], 1)
-                self.assertIn(row['verification']['category'], CATEGORIES)
-            else:
-                self.assertIsNone(row['divergence'])
-                self.assertIsNone(row['verification'])
+        verified = {row['task_id'] for row in result.rows if row['verification'] is not None}
+        self.assertEqual(verified, set(result.sample_task_ids))
+        self.assertEqual(len(host.prompts), len(result.sample_task_ids))
+        self.assertTrue(all(row['verification']['category'] in CATEGORIES
+                            for row in result.rows if row['verification']))
 
     def test_verification_off_records_no_verdicts_and_never_calls_the_judge(self):
         host = StubVerifyHost()
@@ -682,7 +654,7 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(host.prompts, [])
         self.assertTrue(all(row['verification'] is None for row in result.rows))
 
-    def test_the_audit_requires_a_verdict_for_every_observed_difference(self):
+    def test_the_audit_requires_a_verdict_for_every_sampled_task(self):
         journals = SampledBatchJournalTests('journal')
         journals.setUp()
         record = journals.journal(verifier=self.verifier(StubVerifyHost())).record
@@ -694,23 +666,11 @@ class VerificationTests(unittest.TestCase):
         with self.assertRaises(AuditFailure):
             audit(journals.root, stripped)
 
-    def test_the_audit_rejects_identical_trajectories_with_different_outcomes(self):
-        journals = SampledBatchJournalTests('journal')
-        journals.setUp()
-        record = json.loads(json.dumps(journals.journal().record))
-        rows = record['acceptance']['candidates'][0]['result']['rows']
-        target = next(row for row in rows if row['divergence'] is not None)
-        target['divergence'] = None
-        with self.assertRaises(AuditFailure):
-            audit(journals.root, record)
-
-def change_row(task_id, predicted, measured, *, sampled=True, diverged=False,
-               category=None):
+def change_row(task_id, predicted, measured, *, sampled=True, category=None):
     return {'task_id': task_id, 'delta_probability': predicted,
             'measured_delta': measured, 'sampled': sampled,
-            'divergence': ({'diverged_at_step': 1} if diverged else None),
-            'verification': ({'category': category or 'claim_confirmed',
-                              'reason': 'because'} if diverged else None)}
+            'verification': ({'category': category, 'first_difference_step': None,
+                              'reason': 'because'} if category else None)}
 
 
 def ledger_journal(round_index, candidate_id, *, section='conditions', op='ADD',
@@ -732,7 +692,7 @@ def ledger_journal(round_index, candidate_id, *, section='conditions', op='ADD',
                                                                'lower': lower},
                                                   'rows': rows if rows is not None else [
                                                       change_row(0, 0.6, 1.0,
-                                                                 diverged=True),
+                                                                 category='claim_confirmed'),
                                                       change_row(1, 0.6, 0.0)]}}]},
     }
 
@@ -770,7 +730,7 @@ class MemoryTests(unittest.TestCase):
 
     def test_the_planner_memory_names_no_task_and_only_carries_counts(self):
         root = self.root_with([
-            ledger_journal(1, 'c1', rows=[change_row(0, 0.6, 1.0, diverged=True),
+            ledger_journal(1, 'c1', rows=[change_row(0, 0.6, 1.0, category='claim_confirmed'),
                                           change_row(1, 0.6, 0.0)]),
             ledger_journal(1, 'c2', section='procedure', op='EDIT', accepted=False,
                            rows=[change_row(0, 0.6, 0.0), change_row(1, 0.6, 0.0)]),
@@ -793,8 +753,7 @@ class MemoryTests(unittest.TestCase):
 
     def test_the_reviewer_memory_keeps_over_and_under_estimates_as_cases(self):
         root = self.root_with([
-            ledger_journal(1, 'c1', rows=[change_row(0, 0.8, 0.0, diverged=True,
-                                                     category='claim_confirmed'),
+            ledger_journal(1, 'c1', rows=[change_row(0, 0.8, 0.0, category='claim_confirmed'),
                                           change_row(1, 0.0, 1.0)]),
         ])
         memory = self.reviewer_memory(root)
@@ -809,8 +768,8 @@ class MemoryTests(unittest.TestCase):
 
     def test_retrieval_excludes_the_task_and_the_proposal_under_judgement(self):
         root = self.root_with([
-            ledger_journal(1, 'c1', rows=[change_row(0, 0.8, 0.0, diverged=True),
-                                          change_row(1, 0.8, 0.0, diverged=True)]),
+            ledger_journal(1, 'c1', rows=[change_row(0, 0.8, 0.0, category='claim_confirmed'),
+                                          change_row(1, 0.8, 0.0, category='claim_confirmed')]),
         ])
         memory = self.reviewer_memory(root)
         self.assertEqual(memory.block_for(section='conditions', op='add', task_id=0,
@@ -860,12 +819,12 @@ class MemoryTests(unittest.TestCase):
             SA.audit_memories(root, dict(batch, reviewer_memory_version=2), CONFIG)
 
     def test_claim_statistics_count_only_rules_the_verifier_implicated(self):
-        rows = [change_row(0, 0.6, 1.0, diverged=True, category='claim_confirmed'),
-                change_row(1, 0.6, 0.0, diverged=True, category='unrelated'),
+        rows = [change_row(0, 0.6, 1.0, category='claim_confirmed'),
+                change_row(1, 0.6, 0.0, category='unrelated'),
                 change_row(2, 0.6, 0.0)]
         root = self.root_with([ledger_journal(1, 'c1', rows=rows)])
         change = LED.read_changes(root)[0]
-        # A divergence the verifier calls unrelated is executor drift, not a firing.
+        # A difference the verifier calls unrelated is executor drift, not a firing.
         self.assertEqual(MEM.claim_counts(change), (3, 1, 1))
         self.assertIn('rule fired 1/3', MEM.PlannerMemory((change,)).render())
         self.assertNotIn('rule fired', MEM.PlannerMemory(

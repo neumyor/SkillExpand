@@ -716,7 +716,7 @@ class SerialL2Tests(unittest.TestCase):
         replies = {
             "l2_reviewer": {"trigger_probability": 0.9, "delta_probability": 0.5,
                             "reason": "fires before every answer"},
-            "l2_verifier": {"category": "claim_confirmed",
+            "l2_verifier": {"category": "claim_confirmed", "first_difference_step": 1,
                             "reason": "the extra search precedes Finish"},
         }
 
@@ -741,7 +741,8 @@ class SerialL2Tests(unittest.TestCase):
                 helped = rule in spec.skill_body
                 actions = ["Search[source]", "Finish[Toyota]"] if helped else ["Finish[Honda]"]
                 item = {"task_id": spec.task_id, "success": helped, "steps": len(actions),
-                        "events": [{"action": a, "observation": "seen"} for a in actions],
+                        "events": [{"model_text": a, "action": a, "observation": "seen"}
+                                   for a in actions],
                         "skill_key": spec.skill_key, "failure": None}
                 output.append(item)
                 on_result(item)

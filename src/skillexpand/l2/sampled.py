@@ -81,8 +81,8 @@ CHOICES = {
 _HELP = {
     'acceptance_sample_size': 'Ceiling on executed val tasks per candidate (sampled only)',
     'acceptance_confidence': 'One-sided confidence level of the sampled lower bound',
-    'claim_verification': 'Independent verifier attributing trajectory differences to '
-                          'the claimed rule (sampled only)',
+    'claim_verification': 'Independent verifier comparing the two executions against '
+                          'the claim (sampled only)',
     'planner_memory_mode': "Planner's aggregate history of its own proposals (sampled only)",
     'reviewer_memory_mode': "Reviewer's cases of its own misestimates (sampled only)",
 }

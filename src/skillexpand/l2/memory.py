@@ -16,9 +16,10 @@ but not the same thing, and not in the same form:
   already sees the panel, and a case without its task cannot teach anything
   about when a rule fires.
 
-"The rule fired" always means the verifier implicated the rule, never merely
-that the two trajectories diverged: an LLM executor can drift on a step the rule
-does not govern.  With verification off, claim statistics are not reported.
+"The rule fired" always means the verifier found that the changed rule changed
+the execution, never merely that the two executions differ: an LLM executor can
+drift on a step the rule does not govern.  With verification off, claim
+statistics are not reported.
 
 Nothing here calls a model, so a memory can be recomputed from the journals.
 """
@@ -137,7 +138,7 @@ class ReviewerCase:
     category: Optional[str]
 
     def render(self) -> str:
-        attribution = f'verifier: {self.category}' if self.category else 'no trajectory difference'
+        attribution = f'verifier: {self.category}' if self.category else 'not verified'
         trigger = f' | claimed trigger: "{self.trigger}"' if self.trigger else ''
         return (f'- {self.kind} ({attribution}): task "{self.task}"{trigger} | '
                 f'reviewer predicted {_number(self.predicted_delta)}, '

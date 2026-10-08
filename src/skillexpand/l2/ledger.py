@@ -2,7 +2,7 @@
 
 The ledger is not a file of its own.  It is a read-only view over the batch
 journals, which already hold the claim, the Reviewer's per-task prediction, the
-sampled measurement, the trajectory divergence and the verifier's verdict.
+sampled measurement and the verifier's verdict on the two executions.
 Deriving it rather than writing it keeps a single source of truth: both
 memories and every reported Reviewer metric can be recomputed at any time from
 what was journaled, and none of them can drift from the decisions they describe.
@@ -17,10 +17,9 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 #: decision's rounding guard, so "no effect" and "not accepted" agree.
 EFFECT_TOLERANCE = 1e-9
 
-#: Verifier verdicts under which the changed rule is implicated in the
-#: difference.  A divergence alone does not mean the rule fired: an LLM executor
-#: can drift on a step the rule does not govern, which the verifier labels
-#: ``unrelated``.
+#: Verifier verdicts under which the changed rule changed the execution.  A
+#: difference alone does not mean the rule fired: an LLM executor can drift on a
+#: step the rule does not govern, which the verifier labels ``unrelated``.
 RULE_IMPLICATED = ('claim_confirmed', 'claim_not_confirmed')
 
 
@@ -32,7 +31,6 @@ class ChangeRow:
     predicted_delta: float
     measured_delta: Optional[float]
     sampled: bool
-    diverged: bool
     category: Optional[str]
 
     @property
@@ -112,7 +110,6 @@ def changes_from_journal(journal: Dict[str, Any]) -> Tuple[ChangeRecord, ...]:
                 measured_delta=(None if row.get('measured_delta') is None
                                 else float(row['measured_delta'])),
                 sampled=bool(row.get('sampled')),
-                diverged=row.get('divergence') is not None,
                 category=(row.get('verification') or {}).get('category'),
             )
             for row in result.get('rows', ()))

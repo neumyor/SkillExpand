@@ -9,7 +9,6 @@ numbering follows the audit invariants of
 from skillexpand import schema as S
 from skillexpand.evaluation import ppi as PPI
 from skillexpand.evaluation.claim_check import CATEGORIES
-from skillexpand.evaluation.divergence import PAYLOAD_KEYS
 from skillexpand.l2 import ledger as LED
 from skillexpand.l2 import memory as MEM
 from skillexpand.persistence.io import require
@@ -47,7 +46,7 @@ def audit_claims(batch):
 
 
 def audit_candidate(result, panel, sample_size, confidence, claim_id, base_key):
-    """(1)-(4), (8), (9) for one candidate's recorded validation."""
+    """(1)-(4), (8) for one candidate's recorded validation."""
     require(tuple(int(t) for t in result.get('panel_task_ids', ())) == panel,
             'sampled candidate panel differs from the acceptance panel')
     require(result.get('base_skill_key') == base_key,
@@ -85,24 +84,12 @@ def audit_candidate(result, panel, sample_size, confidence, claim_id, base_key):
     require(isinstance(enabled, bool),
             'sampled result does not record whether verification ran')
     for row in rows:
-        # (9) Every prediction can be traced to its cached request.
+        # (8) Every prediction can be traced to its cached request.
         require(row.get('reviewer_cache_key'), 'Reviewer prediction has no request identity')
-        divergence, verification = row.get('divergence'), row.get('verification')
-        if not row['sampled']:
-            require(divergence is None and verification is None,
-                    'unexecuted task recorded a trajectory difference')
-            continue
-        if divergence is None:
-            # (8) Identical executed actions cannot end differently.
-            require(float(row['measured_delta']) == 0.0,
-                    'identical trajectories produced different outcomes')
-        else:
-            # (4) The verifier is shown nothing that reveals how a run ended.
-            require(set(divergence) == set(PAYLOAD_KEYS),
-                    'trajectory difference carries fields beyond the fixed payload')
-        # (4) The verifier runs exactly where the trajectories differ.
-        require((verification is not None) == (enabled and divergence is not None),
-                'verification does not cover exactly the observed differences')
+        # (4) The verifier reads every sampled task when enabled, and nothing else.
+        verification = row.get('verification')
+        require((verification is not None) == (enabled and row['sampled']),
+                'verification does not cover exactly the sampled tasks')
         if verification is not None:
             require(verification.get('category') in CATEGORIES,
                     'verifier returned an unknown category')

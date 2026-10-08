@@ -25,7 +25,6 @@ from typing import Any, Dict, Optional, Tuple
 from skillexpand import schema as S
 from skillexpand.evaluation import ppi as PPI
 from skillexpand.evaluation.delta_review import change_view
-from skillexpand.evaluation.divergence import first_divergence
 from skillexpand.reliability.errors import InvalidInput
 
 #: Below this many executed pairs the interval cannot be read as evidence.
@@ -47,8 +46,8 @@ class SampledValidation:
     decision: PPI.SampleDecision
     arms: Tuple[S.ArmEvaluation, ...]
     rows: Tuple[Dict[str, Any], ...]
-    #: Whether an independent verifier attributed the divergences.  Recorded so
-    #: the audit can tell "no divergence found" from "verification disabled".
+    #: Whether the independent verifier read the sampled executions.  Recorded so
+    #: the audit can tell an unverified row from a verification that was off.
     verification_enabled: bool = False
 
     @property
@@ -144,30 +143,24 @@ class SampledDeltaValidator:
         decision = PPI.estimate(prediction.deltas, measurements,
                                 confidence=self.confidence)
 
-        # The divergence is a pure function of the two cached executions, so it
-        # is located for every sampled task whether or not a verifier runs: it
-        # is what separates an effect from execution noise, and the audit checks
-        # that identical trajectories never produced different outcomes.
-        base_records = self.executor.records(base_skill, sample, panel_key)
-        candidate_records = self.executor.records(candidate_skill, sample, panel_key)
-        divergences = {
-            task_id: first_divergence(base_records[task_id].get('events') or (),
-                                      candidate_records[task_id].get('events') or ())
-            for task_id in sample}
+        # The verifier reads both executions of every sampled task, back from the
+        # cache the decision rested on; nothing is executed again.
         verifications = {}
         if self.verifier is not None:
             changed_rule = change_view(base_skill, candidate_skill)
+            base_records = self.executor.records(base_skill, sample, panel_key)
+            candidate_records = self.executor.records(candidate_skill, sample, panel_key)
             verifications = {
-                task_id: self.verifier.verify(task_id, changed_rule, claim, divergence,
-                                              panel_key)
-                for task_id, divergence in divergences.items() if divergence is not None}
+                task_id: self.verifier.verify(
+                    task_id, changed_rule, claim, base_records[task_id].get('events') or (),
+                    candidate_records[task_id].get('events') or (), panel_key)
+                for task_id in sample}
 
         prediction_by_task = {int(row['task_id']): row for row in prediction.rows}
         rows = []
         for task_id in panel:
             predicted = prediction_by_task[task_id]
             sampled = task_id in measurements
-            divergence = divergences.get(task_id) if sampled else None
             rows.append({
                 'task_id': task_id,
                 'delta_probability': float(predicted['delta_probability']),
@@ -178,8 +171,7 @@ class SampledDeltaValidator:
                 'measured_delta': (measurements[task_id] if sampled else None),
                 'from_cache': bool(predicted.get('from_cache', False)),
                 'reviewer_cache_key': str(predicted['cache_key']),
-                'divergence': (divergence.payload() if divergence is not None else None),
-                'verification': (verifications.get(task_id) if sampled else None),
+                'verification': verifications.get(task_id),
             })
         return SampledValidation(
             skill_id=base_skill.skill_id,

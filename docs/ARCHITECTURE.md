@@ -61,9 +61,8 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 | `l2/sampled.py` | 开关与默认值（`DEFAULTS`/`CHOICES`，CLI、campaign、`EvolutionConfig` 共用）、组合校验、claim 解析、接受决策、每轮记忆、journal/summary 字段 |
 | `evaluation/delta_review.py` | 配对 Δ Reviewer |
 | `evaluation/ppi.py` | 抽样与 PPI 估计（纯函数） |
-| `evaluation/divergence.py` | 首个分歧步（纯函数） |
-| `evaluation/claim_check.py` | 独立判定者 |
-| `evaluation/sampled_validation.py` | 单个候选的预测 → 抽检 → 分歧 → 判定 |
+| `evaluation/claim_check.py` | 独立判定者：读取两臂轨迹，判断有无差异、首个不同步骤、是否符合声明 |
+| `evaluation/sampled_validation.py` | 单个候选的预测 → 抽检 → 判定 |
 | `l2/ledger.py` | 账本：从 batch journal 派生的 (改动 × 题) 行，以及预注册的 Reviewer 指标 |
 | `l2/memory.py` | 由账本派生的两份记忆 |
 | `l2/sampled_audit.py` | 离线审计（对应实验计划第 7 节的不变量） |
@@ -75,8 +74,8 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 3. **抽样与修正**：`ppi.select_sample` 从冻结 val panel 中按 panel key + candidate 确定的种子抽取 `--acceptance-sample-size` 道题（上限：panel 更小的 family 全量执行，实际数量记在 `decision.n_sample`），两臂各真实执行一次，用样本上的成对误差修正 panel 全体预测：
    `Δ̂ = mean_panel(Δ̂_i) + mean_sample(d_i − Δ̂_i)`。`acceptance.executions` 记录真实 episode 数（两臂 × 抽样题数）。
 4. **判定规则**：修正后的单侧置信下界（Student-t，`--acceptance-confidence`，默认 0.9）必须大于 0（带 `1e-9` 舍入保护）。少于 2 个抽样对时无法给出区间，一律 `insufficient_sample`。
-5. **分歧与判定者**：每道抽样题都计算首个分歧步（纯函数，与判定者开关无关）；两条动作序列完全相同而结果不同时，审计判为执行串扰并使该 run 作废。只有存在分歧时才调用 `TrajectoryVerifier`，四类结论（`claim_confirmed` / `claim_not_confirmed` / `unrelated` / `indeterminate`）。判定者输入固定为 `divergence.PAYLOAD_KEYS`：分歧步、之前的共同动作、分歧前（两臂相同）的 observation、两侧动作——**不含轨迹长度等可推出成绩的字段**。`--claim-verification off` 关闭判定者。
-6. **两份记忆**（`l2/memory.py`，只由**当前轮之前**的账本派生）：Planner 得到改动层聚合——各类改动的真实有效率、预测与实测的差距，以及（判定者开启时）"规则被判定者认定触发 n/N、符合声明 n/N"；其渲染不读取任何 val 题目。注意"触发"只算 `claim_confirmed`/`claim_not_confirmed`：轨迹分歧不等于规则触发（`unrelated` 是执行器漂移）。Reviewer 得到检索式案例——高估、低估与正确各优先取一例，排除当前改动与当前题。
+5. **判定者**：两条轨迹有没有差异、差异在哪里，完全交给 `TrajectoryVerifier` 判断，程序不比较动作序列（自由文本搜索词与家居动作序列都难以用程序可靠比较）。判定者对每道抽样题调用一次，读取两臂的逐步记录（执行器输出 + 环境观察，`claim_check.trajectory_view`），最后一步的观察被去掉，因为它就是成败反馈（如 `Answer is CORRECT`）。输出五类之一（`no_difference` / `claim_confirmed` / `claim_not_confirmed` / `unrelated` / `indeterminate`）、首个不同的步骤与理由。`--claim-verification off` 关闭判定者。
+6. **两份记忆**（`l2/memory.py`，只由**当前轮之前**的账本派生）：Planner 得到改动层聚合——各类改动的真实有效率、预测与实测的差距，以及（判定者开启时）"规则被判定者认定触发 n/N、符合声明 n/N"；其渲染不读取任何 val 题目。注意"触发"只算 `claim_confirmed`/`claim_not_confirmed`：轨迹有差异不等于规则触发（`unrelated` 是执行器漂移）。Reviewer 得到检索式案例——高估、低估与正确各优先取一例，排除当前改动与当前题。
 
 sampled 协议**不使用**旧的 train-panel Reviewer 校准：`reviewer_update_mode` 在该协议下默认且只能为 `none`，否则两套学习信号会同时作用于同一个 Reviewer。
 
