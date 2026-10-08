@@ -29,6 +29,7 @@ worker counts.  It does not start ALFWorld or the two-benchmark supervisor.
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -52,6 +53,44 @@ def write_json(path, value):
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
     os.replace(temp, path)
+
+
+def content_hash(payload):
+    """Match skillexpand.schema.content_hash without importing the runtime."""
+    canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'), default=str)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:12]
+
+
+def refresh_run_manifest(output_root, output_run, reason):
+    """Re-sign a newly staged run against the code copied into that root.
+
+    A run manifest is an identity record, not a cache.  Copying an old record
+    after changing the frozen source tree makes the next cold-start fail before
+    any task runs.  This helper only operates while constructing a new staging
+    root; existing task output is never re-signed in place.
+    """
+    output_root, output_run = Path(output_root), Path(output_run)
+    path = output_run / 'manifest.json'
+    manifest = read_json(path)
+    source = output_root / 'code' / 'src' / 'skillexpand'
+    old_code = dict(manifest.get('code', {}))
+    new_code = {
+        str(p.relative_to(source)): content_hash(p.read_text())
+        for p in sorted(source.rglob('*.py'))
+    }
+    manifest['code'] = new_code
+    write_json(path, manifest)
+    changed = sorted(k for k in set(old_code) | set(new_code)
+                     if old_code.get(k) != new_code.get(k))
+    write_json(output_run / 'repair-migration.json', {
+        'status': 'complete',
+        'reason': reason,
+        'old_code': old_code,
+        'new_code': new_code,
+        'changed_code': changed,
+        'created': time.time(),
+    })
+    return changed
 
 
 @contextmanager
@@ -189,11 +228,14 @@ def prepare_shell(source_root, output_root, include_preflight, resume=False):
         output_root / "inputs" / f"{BENCHMARK}-tasks.json"
     )
     write_json(config_path, config)
-    # Keep the cold-start identity consistent with that relocated config.
+    # Keep the cold-start identity consistent with that relocated config and
+    # the code copied into this new staging root.
     run_manifest_path = output_run / "manifest.json"
     run_manifest = read_json(run_manifest_path)
     run_manifest["config"] = config
     write_json(run_manifest_path, run_manifest)
+    refresh_run_manifest(output_root, output_run,
+                         reason='stage new repair run with current frozen code')
     return output_root, output_run
 
 
