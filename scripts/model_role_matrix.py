@@ -28,7 +28,7 @@ ROLES = (
     "selector",
 )
 PRIMARY_ROLES = ("l1_executor", "cold_start", "l2_planner", "l2_reviewer")
-OPTIONAL_ROLES = ("l2_editor", "selector")
+OPTIONAL_ROLES = ("l2_editor", "l2_verifier", "selector")
 SCHEMA = 1
 ROLE_FLAGS = {
     "l1_executor": "--l1-model",

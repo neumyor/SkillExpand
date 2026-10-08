@@ -238,6 +238,31 @@ class SamplingEstimateTests(unittest.TestCase):
         decision = PPI.estimate(panel, sample, confidence=0.9)
         self.assertAlmostEqual(decision.point, 0.0)
 
+    def test_the_sample_size_is_capped_by_the_panel_it_draws_from(self):
+        self.assertEqual(PPI.effective_sample_size(160, 16), 16)
+        self.assertEqual(PPI.effective_sample_size(3, 16), 3)
+        self.assertEqual(PPI.effective_sample_size(1, 16), 1)
+        for bad in ((0, 4), (3, 0)):
+            with self.assertRaises(ValueError):
+                PPI.effective_sample_size(*bad)
+
+    def test_a_panel_smaller_than_the_ceiling_is_measured_whole(self):
+        # ALFWorld families carry a handful of val tasks: the protocol degrades
+        # to a plain measurement there instead of sampling a subset.
+        panel = {task_id: 0.4 for task_id in range(3)}
+        sample = {task_id: float(task_id == 0) for task_id in range(3)}
+        self.assertEqual(PPI.select_sample(tuple(panel), 16, 'k'), (0, 1, 2))
+        decision = PPI.estimate(panel, sample, confidence=0.9)
+        self.assertEqual(decision.n_sample, 3)
+
+    def test_a_panel_below_the_minimum_cannot_decide(self):
+        # One val task is the degenerate case: the estimate reduces to that
+        # single measurement, carries no spread, and must not be accepted.
+        decision = PPI.estimate({0: 0.9}, {0: 1.0}, confidence=0.9)
+        self.assertFalse(decision.accepted)
+        self.assertEqual(decision.reason, 'insufficient_sample')
+        self.assertIsNone(decision.lower)
+
     def test_an_unbounded_sample_yields_no_decision(self):
         panel = {t: 0.3 for t in range(4)}
         decision = PPI.estimate(panel, {0: 1.0}, confidence=0.9)

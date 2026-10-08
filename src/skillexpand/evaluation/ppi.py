@@ -32,6 +32,21 @@ from skillexpand import schema as S
 DECISION_TOLERANCE = 1e-9
 
 
+def effective_sample_size(panel_size: int, requested: int) -> int:
+    """How many tasks of one panel are executed.
+
+    The requested size is a ceiling, not a target: a family whose val panel is
+    smaller than that executes the whole panel, so the protocol degrades to a
+    plain measurement there rather than sampling with replacement or borrowing
+    another family's tasks.  The effective count is what the decision records.
+    """
+    if panel_size < 1:
+        raise ValueError('a panel must hold at least one task')
+    if requested < 1:
+        raise ValueError('sample size must be positive')
+    return min(int(requested), int(panel_size))
+
+
 def select_sample(task_ids: Sequence[int], size: int, key: str) -> Tuple[int, ...]:
     """Choose the executed subset deterministically from a protocol key.
 
@@ -50,7 +65,7 @@ def select_sample(task_ids: Sequence[int], size: int, key: str) -> Tuple[int, ..
         raise ValueError('sample selection needs a protocol key')
     if size < 1:
         raise ValueError('sample size must be positive')
-    take = min(int(size), len(ids))
+    take = effective_sample_size(len(ids), size)
     seed = int(S.content_hash({'sample': key, 'panel': list(ids)}), 16)
     chosen = random.Random(seed).sample(ids, take)
     return tuple(sorted(chosen))

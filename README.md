@@ -55,7 +55,7 @@ flowchart LR
 
 - Planner 的每条改动必须附上可核实的**声明**（触发条件 + 动作变化）；
 - Reviewer 每题预测**配对增量** Δ，并单独报告该规则是否会触发；
-- 真实环境随机抽 `--acceptance-sample-size` 道 val 题执行两臂，用样本上的成对误差修正 panel 全体预测（PPI）；
+- 真实环境随机抽 `--acceptance-sample-size` 道 val 题执行两臂（该值是上限，panel 更小的 family 全量执行；panel 少于 2 题时无法判定，一律拒绝并记为 `insufficient_sample`），用样本上的成对误差修正 panel 全体预测（PPI）；
 - 修正后的单侧置信下界（`--acceptance-confidence`，默认 0.9）大于 0 才接受。判定带 `1e-9` 舍入保护；
 - 独立**判定者**只在两条执行轨迹出现分歧时介入，判断这处差异是否由该规则引起、是否符合声明（`--claim-verification off` 可关闭，用于消融）；
 - 双方各有一份记忆：Planner 拿到改动层聚合（不含任何 val 题目），Reviewer 拿到检索式错判案例。分别由 `--planner-memory-mode`、`--reviewer-memory-mode` 控制。

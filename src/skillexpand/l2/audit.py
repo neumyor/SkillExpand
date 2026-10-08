@@ -113,6 +113,12 @@ def audit_sampled_batch(batch):
         expected = PPI.select_sample(panel, sample_size, result.get('sample_key', ''))
         require(sample == expected,
                 'executed sample is not the one the recorded key selects')
+        # The requested size is a ceiling: a family with a smaller panel is
+        # measured whole, and the recorded count must show that rather than the
+        # requested number.
+        require(int((result.get('decision') or {}).get('n_sample', -1))
+                == PPI.effective_sample_size(len(panel), sample_size),
+                'executed count is not the per-panel effective sample size')
 
         rows = list(result.get('rows', ()))
         require([int(r['task_id']) for r in rows] == list(panel),

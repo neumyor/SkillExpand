@@ -152,8 +152,11 @@
 
 - **执行非确定性**：直接决定分歧检测与"触发"判断能否成立。先用小样本实测复现率，再决定是否启用第 4 步。
 - **判定者自身误差**：只影响记忆与信誉，不影响是否接受；但必须报告其一致率，并说明它最多影响哪些结论。
-- **样本量**：ALFWorld 每个 family 的 val 只有 3–5 题，抽样会退化为全量执行；SearchQA 小 family 为 11–15 题。
-  小 panel 上 PPI 相对实测的节省有限，需在报告中按 family 规模分层说明。
+- **样本量**：抽样规模按 family 自适应——`--acceptance-sample-size` 是上限，panel 更小的 family 直接全量执行
+  （`evaluation/ppi.effective_sample_size`，实际数量记在每个候选的 `decision.n_sample`，审计会核对它等于
+  `min(请求值, panel 大小)`）。ALFWorld 每个 family 的 val 只有 3–5 题，因此那里 PPI 相对实测没有节省，
+  报告需按 family 规模分层说明。panel 小于 2 题时无法给出区间，候选一律以 `insufficient_sample` 拒绝，
+  这必须如实计入该 family 的接受率，而不是当作"没有改动值得接受"。
 - **交互轮数**：信誉与记忆需要多轮才能显现。若总轮数过少，Planner 一侧学不到东西，此时应报告"无效应"而非
   挑选数据。
 - **共同盲区**：Planner 与 Reviewer 默认同模型，错误可能高度相关。判定者与真实抽检是唯一的独立信号，不可省。

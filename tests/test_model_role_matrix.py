@@ -33,9 +33,15 @@ def test_primary_matrix_is_baseline_plus_four_single_role_conditions():
 
 def test_optional_conditions_are_explicitly_opt_in():
     plan = M.build_plan("base", "strong", include_optional=True)
-    assert [item["name"] for item in plan["conditions"]][-2:] == [
-        "l2_editor-strong", "selector-strong"
+    assert [item["name"] for item in plan["conditions"]][-3:] == [
+        "l2_editor-strong", "l2_verifier-strong", "selector-strong"
     ]
+    # The verifier condition must replace the verifier alone.
+    verifier = next(item for item in plan["conditions"]
+                    if item["name"] == "l2_verifier-strong")
+    assert verifier["replaced_roles"] == ["l2_verifier"]
+    assert verifier["models"]["l2_verifier"] == "strong"
+    assert verifier["models"]["l2_reviewer"] == "base"
 
 
 def test_prepare_commands_use_existing_campaign_flags(tmp_path):

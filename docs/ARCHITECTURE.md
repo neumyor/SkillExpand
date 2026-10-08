@@ -58,7 +58,7 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 
 1. **声明**：Planner 在 structured edit 之外必须给出 `claim`（`trigger` 触发条件 + `action_change` 动作变化），两项单行、各不超过 400 字符。`claim_id` 由程序计算，写在 batch journal 的 hypothesis 行上，不进入 `Skill` 持久格式；audit 会按文本重算并比对。
 2. **配对 delta 预测**：`evaluation/delta_review.PairedDeltaReviewer` 每题一次调用，输入是"旧规则 → 新规则"这一条改动、改动后的 body 和声明，输出 `trigger_probability` 与 `delta_probability`（配对增量），不再对旧/新 Skill 各报一个绝对成功率再相减。声明、改动、改后 body 都进入缓存身份，换声明即换缓存。
-3. **抽样与修正**：`evaluation/ppi` 从冻结 val panel 中按 panel key + candidate 确定的种子抽取 `--acceptance-sample-size` 道题，两臂各真实执行一次（旧 head 的结果按 body 缓存复用），用样本上的成对误差修正 panel 全体预测：
+3. **抽样与修正**：`evaluation/ppi` 从冻结 val panel 中按 panel key + candidate 确定的种子抽取 `--acceptance-sample-size` 道题（该值是上限：panel 更小的 family 全量执行，实际数量记在 `decision.n_sample` 并由 audit 校验），两臂各真实执行一次（旧 head 的结果按 body 缓存复用），用样本上的成对误差修正 panel 全体预测：
    `Δ̂ = mean_panel(Δ̂_i) + mean_sample(d_i − Δ̂_i)`。
 4. **判定规则**：修正后的单侧置信下界（Student-t，`--acceptance-confidence`，默认 0.9）必须大于 0；比对带 `1e-9` 的舍入保护，避免浮点残差把"零改进"判成改进。Reviewer 越准，样本误差的方差越小，同样置信度需要的执行次数越少。
 5. **独立判定者**：`evaluation/divergence.first_divergence` 在两条执行的动作序列上找首个分歧步；只有存在分歧时才调用 `evaluation/claim_check.TrajectoryVerifier`，它在四种结论中选择（`claim_confirmed` / `claim_not_confirmed` / `unrelated` / `indeterminate`）。判定者冻结、不看成绩、看不到 Reviewer 预测，输入里的 context observation 取自分歧点之前（两臂相同），分歧动作本身产生的 observation 不给出。`--claim-verification off` 关闭该步骤，用于单独度量其贡献。
