@@ -125,10 +125,11 @@ def audit_batch(root, batch, config):
     acceptance = batch.get('acceptance') or {}
     require(acceptance.get('mode') == 'sampled', 'sampled acceptance mode is missing')
     results = list(acceptance.get('candidates', ()))
+    if not claims or not acceptance.get('task_ids'):
+        require(not results, 'sampled acceptance scored a candidate it could not measure')
+        return
     require({row.get('candidate_id') for row in results} == set(claims),
             'sampled acceptance does not cover exactly the proposed candidates')
-    if not results:
-        return
     require(acceptance.get('scope') == 'val', 'sampled acceptance scope is missing')
     require(int(acceptance.get('sample_size', 0)) == int(config['acceptance_sample_size'])
             and float(acceptance.get('confidence', 0)) == float(config['acceptance_confidence']),

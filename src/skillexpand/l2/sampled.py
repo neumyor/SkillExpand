@@ -171,8 +171,11 @@ def accept(validator, base_skill: S.Skill, ordered: Sequence[S.CandidateSkill],
         acceptance = dict(acceptance_record)
     else:
         panel_key = f'val:{validator.routes.fingerprint}:{base_skill.skill_id}'
+        panel = sorted(int(t) for t in validator.routes.groups[base_skill.skill_id])
         results = []
-        for candidate in ordered:
+        # A family the selector routed no val task to cannot be measured; it
+        # holds, as under the older protocols, instead of halting the run.
+        for candidate in (ordered if panel else ()):
             claim = claims[candidate.candidate_id]
             validation = validator.validate(
                 base_skill, candidate.skill, claim, panel_key,
@@ -191,7 +194,7 @@ def accept(validator, base_skill: S.Skill, ordered: Sequence[S.CandidateSkill],
             'protocol_hash': validator.protocol_hash,
             'sample_size': validator.sample_size,
             'confidence': validator.confidence,
-            'task_ids': sorted(int(t) for t in validator.routes.groups[base_skill.skill_id]),
+            'task_ids': panel,
             'candidate_ids': [candidate.candidate_id for candidate in ordered],
             'candidates': results,
             'executions': sum(row['executions'] for row in results),
@@ -206,9 +209,12 @@ def accept(validator, base_skill: S.Skill, ordered: Sequence[S.CandidateSkill],
                                             row['result']['decision']['point'],
                                             row['id'])) if approved else None
     selected = winner['id'] if winner else None
-    reason = ('sampled_approved: corrected delta clears zero' if winner else
-              'hold: ' + (results[0]['result']['decision']['reason']
-                          if results else 'no candidate'))
+    if winner:
+        reason = 'sampled_approved: corrected delta clears zero'
+    elif not acceptance['task_ids']:
+        reason = 'hold: frozen val panel is empty'
+    else:
+        reason = 'hold: ' + results[0]['result']['decision']['reason']
     return {
         'selection_method': 'sampled_paired_delta',
         'reviews': [],

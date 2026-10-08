@@ -690,7 +690,25 @@ class SerialL2Tests(unittest.TestCase):
                 self.plan = S.SplitPlan.make(assignment, "searchqa", 42)
                 self._sampled_round(val_tasks)
 
-    def _sampled_round(self, val_tasks):
+    def test_sampled_second_round_shows_both_memories_and_audits(self):
+        """Round two is the first round in which both memories hold anything."""
+        from skillexpand.l2.audit import audit_round
+        self.plan = S.SplitPlan.make({0: "train", 1: "val", 2: "val", 3: "test"},
+                                     "searchqa", 42)
+        driver, calls = self._sampled_round((1, 2), rounds=2)
+        self.assertEqual([audit_round(self.root, r)["review_approved"] for r in (1, 2)],
+                         [1, 0])
+        second = next(b for b in (json.loads(p.read_text())
+                                  for p in (self.root / "l2_batches").glob("*.json"))
+                      if b["round"] == 2)
+        self.assertEqual(second["reviewer_memory_version"], 1)
+        self.assertIn("completion_checks/add: 1 proposal(s) -> 1 effective",
+                      second["planner_memory"])
+        self.assertNotIn("Prius", second["planner_memory"])
+        reviewer_prompt = json.loads(calls["l2_reviewer"][-1][-1].content)
+        self.assertIn("Prius", reviewer_prompt["reviewer_memory"])
+
+    def _sampled_round(self, val_tasks, rounds=1):
         from skillexpand.l2.audit import audit_round
         driver = self.prepared(batch_size=50, skill_edit_mode="structured",
                                acceptance_mode="sampled", candidate_count=1,
@@ -751,7 +769,9 @@ class SerialL2Tests(unittest.TestCase):
         with patch.object(PL, "run_generic", side_effect=units), patch.object(
                 F, "build_reasoning_host", side_effect=factory), patch.object(
                 L.FrozenRoutes, "run", return_value=Routes()):
-            result = driver.run_evolutions(1)
+            result = driver.run_evolutions(rounds)
+        if rounds > 1:
+            return driver, calls
 
         n = len(val_tasks)
         accepted = int(n >= 2)

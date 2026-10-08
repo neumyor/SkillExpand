@@ -504,6 +504,14 @@ class SampledBatchJournalTests(unittest.TestCase):
         self.assertEqual(result.record['proposals'][0]['claim'], claim)
         audit(self.root, result.record)
 
+    def test_a_family_without_val_tasks_holds_instead_of_halting(self):
+        self.routes.groups['searchqa.f'] = ()
+        result = self.journal()
+        self.assertIsNone(result.candidate)
+        self.assertEqual(result.record['reason'], 'hold: frozen val panel is empty')
+        self.assertEqual(result.record['acceptance']['candidates'], [])
+        audit(self.root, result.record)
+
     def test_a_change_the_sample_contradicts_is_rejected(self):
         result = self.journal(delta=0.9, improvement=())
         self.assertIsNone(result.candidate)
