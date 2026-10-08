@@ -611,10 +611,13 @@ class VerificationTests(unittest.TestCase):
         self.assertNotIn('CORRECT', prompt)
 
     def test_the_trajectory_view_withholds_only_the_final_observation(self):
-        events = ({'model_text': 'a', 'observation': 'first'},
+        # Long observations (three search documents, an admissible-command menu)
+        # reach the verifier whole: only the outcome-bearing last one is dropped.
+        page = 'D1 ' + 'x' * 5000 + ' Admissible actions: open fridge 1'
+        events = ({'model_text': 'a', 'observation': page},
                   {'model_text': 'b', 'observation': 'You won!'})
         self.assertEqual(trajectory_view(events),
-                         [{'executor': 'a', 'observation': 'first'},
+                         [{'executor': 'a', 'observation': page},
                           {'executor': 'b', 'observation': ''}])
         self.assertEqual(trajectory_view(()), [])
 
@@ -630,6 +633,8 @@ class VerificationTests(unittest.TestCase):
                     ('no_difference', 2), ('unrelated', True)):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse(*bad)
+        # Length is not a format error: a long reason must not exhaust retries.
+        self.assertEqual(len(parse('unrelated', 1, 'r' * 5000)['reason']), 5000)
         self.assertEqual(parse('unrelated', 3)['first_difference_step'], 3)
         self.assertIsNone(parse('no_difference', None)['first_difference_step'])
 

@@ -31,19 +31,19 @@ from skillexpand.reliability.retry import call_with_repair, fresh
 CATEGORIES = ('no_difference', 'claim_confirmed', 'claim_not_confirmed', 'unrelated',
               'indeterminate')
 
-REASON_MAX_CHARS = 2000
-#: Each observation is context for the next step, not evidence in itself.
-OBSERVATION_CHARS = 600
 
 
 def trajectory_view(events: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
     """One execution as the verifier reads it: what the executor wrote and saw.
 
     The last observation is dropped because it is where the environment reports
-    the outcome (e.g. "Answer is CORRECT").  Nothing else is interpreted here.
+    the outcome (e.g. "Answer is CORRECT").  Nothing else is shortened or
+    interpreted: a trigger condition often lives in an observation (a document
+    returned by a search, the commands currently admissible), and an unmarked
+    cut would let the verifier judge a partial page as if it were complete.
     """
     steps = [{'executor': str(event.get('model_text', '')),
-              'observation': str(event.get('observation', ''))[:OBSERVATION_CHARS]}
+              'observation': str(event.get('observation', ''))}
              for event in events if isinstance(event, dict)]
     if steps:
         steps[-1]['observation'] = ''
@@ -53,7 +53,7 @@ def trajectory_view(events: Sequence[Dict[str, Any]]) -> List[Dict[str, str]]:
 class TrajectoryVerifier:
     """Frozen, third-party attribution of a trajectory difference to a rule."""
 
-    PROTOCOL = 'claim-verification-v2'
+    PROTOCOL = 'claim-verification-v3'
     RESPONSE_SCHEMA = {
         'type': 'object',
         'additionalProperties': False,
@@ -119,8 +119,8 @@ class TrajectoryVerifier:
                 'whether the change helped. '
                 f'Return JSON only: {{"category":"<one of {", ".join(CATEGORIES)}>",'
                 '"first_difference_step":<integer or null>,'
-                f'"reason":"at most {REASON_MAX_CHARS} characters, naming the two '
-                'behaviours that differ, or why they do not"}.'
+                '"reason":"one or two sentences naming the two behaviours that differ, '
+                'or why they do not"}.'
             ),
         })
 
@@ -141,8 +141,6 @@ class TrajectoryVerifier:
             raise ValueError('no_difference cannot name a first difference step')
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError('verifier reason must be a non-empty string')
-        if len(reason) > REASON_MAX_CHARS:
-            raise ValueError(f'verifier reason exceeds {REASON_MAX_CHARS} characters')
         return {'category': category, 'first_difference_step': step,
                 'reason': reason.strip()}
 
