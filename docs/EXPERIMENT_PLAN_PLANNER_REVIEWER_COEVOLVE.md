@@ -162,10 +162,12 @@ ALFWorld 的动作序列都难以用程序可靠比较，硬做会引入大量�
 5. **两份记忆**：Planner 聚合记忆与 Reviewer 案例记忆的构建、注入与版本化；审计第 5、6 条。
 6. **接线**：CLI、campaign、manifest、文档。
 7. **预检**：小样本全链路 smoke、上述全部不变量、对照条件核对，通过后才允许完整运行。
-   注意 campaign 自带的 preflight 只有 4 题（2 train / 1 val / 1 test），每个 val panel 最多 1 题，候选
-   必然以 `insufficient_sample` 或空 panel 结束，**PPI 下界的接受路径不会被跑到**；判定者会在真实轨迹上
-   运行，`sampled_contract_probe` 另用合成改动探测 Reviewer 与判定者的输出格式。接受路径需要另做一次
-   至少 2 道 val 题的小样本运行。
+   campaign 的 preflight split 只有 4 题（2 train / 1 val / 1 test），每个 val panel 最多 1 题，evolve 阶段
+   的候选必然以 `insufficient_sample` 或空 panel 结束，跑不到 PPI 下界。因此 sampled campaign 的
+   `independent-check` 额外运行 `campaign.sampled_acceptance_probe`：用一条固定的通用改动和声明，把全部 4 道
+   preflight 题（均取自完整 train，不暴露任何 val/test 题）作为 panel，按冻结的抽样上限、置信水平和判定者
+   开关执行一次真实的 sampled 验收——真实的配对 Δ 预测、两臂真实执行、真实轨迹上的判定者——再用
+   `sampled_audit` 重放；没有得到 PPI 下界或审计不通过都会让检查失败。改动是否被接受不作判定。
 
 ## 9. 风险与失效条件
 

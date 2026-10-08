@@ -656,13 +656,25 @@ PROBE_CORRECTION = (
     'evidence ID and one changed rule ID.')
 
 
-def sampled_contract_probe(root, benchmark, run, cfg):
-    """Validate the sampled protocol's two model contracts on the preflight run.
+#: The probe edit is generic on purpose: it must apply to any initial Skill of
+#: either benchmark, and whether it helps is not what the probe checks.
+PROBE_EDIT = {'op': 'add', 'section': 'completion_checks', 'target_id': None,
+              'text': 'Before the final action, check that the latest observation supports it.'}
+PROBE_CLAIM = ('the executor is about to take its final action',
+               'it re-reads the latest observation before acting')
 
-    The card-Reviewer probe covers a component this protocol never calls, and the
-    preflight stage may propose nothing at all -- in which case its Reviewer and
-    verifier are never invoked.  A long run must not be the first thing that
-    discovers either contract cannot be satisfied.
+
+def sampled_acceptance_probe(root, benchmark, run, cfg, manifest):
+    """Run one real sampled validation on the preflight tasks and audit it.
+
+    The preflight split has a single val task, so its evolve stages can only
+    end in ``insufficient_sample`` or an empty-panel hold: the PPI bound, the
+    two-arm execution over a real sample and the verifier on real trajectories
+    would otherwise first run in the full campaign.  This probe drives exactly
+    that path on all preflight tasks -- every one drawn from full train, so no
+    val or test task is exposed -- with the frozen sample ceiling, confidence
+    and verifier switch, then replays the result through the sampled audit.
+    Whether the generic probe edit is accepted is deliberately not asserted.
     """
     from types import SimpleNamespace
     from skillexpand import schema as S
@@ -670,51 +682,65 @@ def sampled_contract_probe(root, benchmark, run, cfg):
     from skillexpand.evaluation import validation as VA
     from skillexpand.evaluation.claim_check import TrajectoryVerifier
     from skillexpand.evaluation.delta_review import PairedDeltaReviewer
+    from skillexpand.evaluation.sampled_validation import SampledDeltaValidator
+    from skillexpand.l2.sampled_audit import audit_candidate
     from skillexpand.runtime import agent_factory as F
 
     skills = [S.from_dict(S.Skill, item) for item in read(run / 'initial_skills.json')]
     base = sorted(skills, key=lambda item: item.skill_id)[0]
-    body = SS.render(SS.apply_edit(
-        SS.from_legacy(base.body),
-        {'op': 'add', 'section': 'completion_checks', 'target_id': None,
-         'text': 'Before submitting, restate the requested answer type.'}))
     candidate = S.Skill(base.skill_id, base.family_id, base.version + 1, base.name,
-                        base.description, body)
-    claim = S.Claim('the task asks for a named entity',
-                    'state the answer type before submitting')
-    groups = read(run / 'routes' / 'val' / 'complete.json')['groups']
-    task_ids = tuple(int(t) for t in groups.get(base.skill_id, ()))
-    if not task_ids:
-        assignment = read(root / 'inputs' / f'{benchmark}-preflight-split.json')['assignment']
-        task_ids = tuple(sorted(int(t) for t, part in assignment.items()
-                                if part == 'val'))[:1]
-    if not task_ids:
-        raise AuditFailure(f'{benchmark}: preflight has no val task to probe with')
-    directory = root / 'preflight' / 'sampled-probe'
-    routes = SimpleNamespace(groups={base.skill_id: task_ids},
-                             fingerprint='preflight-probe')
-    panel_key = f'probe:{benchmark}'
-    reviewer = PairedDeltaReviewer(
-        cfg, routes, VA.ScoreCache(directory / f'{benchmark}-reviewer.jsonl'), workers=1,
-        host_factory=lambda task_id, usage_path: F.build_reasoning_host(
-            cfg, usage_path, role='l2_reviewer'))
-    prediction = reviewer.predict(base, candidate, claim, task_ids, panel_key)
-    verifier = TrajectoryVerifier(
-        cfg, VA.ScoreCache(directory / f'{benchmark}-verifier.jsonl'), workers=1,
-        host_factory=lambda task_id, usage_path: F.build_reasoning_host(
-            cfg, usage_path, role='l2_verifier'))
-    verdict = verifier.verify(
-        task_ids[0],
-        {'section': 'completion_checks', 'rule_id': 'V2', 'op': 'add', 'before': None,
-         'after': 'Before submitting, restate the requested answer type.'},
-        claim,
-        ({'model_text': 'Action 1: Search[first clue]', 'observation': 'a result'},),
-        ({'model_text': 'Action 1: Lookup[second clue]', 'observation': 'a result'},),
-        panel_key)
-    report = {'tasks': list(task_ids), 'mean_delta': prediction.mean_delta,
-              'mean_trigger': prediction.mean_trigger,
-              'verifier_category': verdict['category']}
-    save(directory / f'{benchmark}.json', report)
+                        base.description,
+                        SS.render(SS.apply_edit(SS.from_legacy(base.body), PROBE_EDIT)))
+    claim = S.Claim(*PROBE_CLAIM)
+    panel = tuple(range(len(F.task_table(cfg))))
+    routes = SimpleNamespace(groups={base.skill_id: panel}, fingerprint='preflight-probe')
+    directory = root / 'preflight' / 'sampled-probe' / benchmark
+
+    def host(role):
+        return lambda task_id, usage_path: F.build_reasoning_host(cfg, usage_path, role=role)
+
+    verifier = None
+    if manifest['claim_verification'] == 'on':
+        verifier = TrajectoryVerifier(cfg, VA.ScoreCache(directory / 'verifications.jsonl'),
+                                      workers=1, host_factory=host('l2_verifier'))
+    validator = SampledDeltaValidator(
+        cfg, routes,
+        PairedDeltaReviewer(cfg, routes, VA.ScoreCache(directory / 'delta_predictions.jsonl'),
+                            workers=1, host_factory=host('l2_reviewer')),
+        VA.FixedSkillScorer(cfg, VA.ScoreCache(directory / 'sampled_scores.jsonl'), routes, 1),
+        sample_size=manifest['acceptance_sample_size'],
+        confidence=manifest['acceptance_confidence'], verifier=verifier)
+    # Fixed-Skill workers are spawned processes that read the run's frozen
+    # config and task file from the environment, as a CLI stage would set them.
+    saved = {key: os.environ.get(key) for key in ('EXPE_CONFIG_FILE', 'EXPE_TASK_FILE')}
+    os.environ.update(EXPE_CONFIG_FILE=str(run / 'config.json'),
+                      EXPE_TASK_FILE=str(cfg.benchmark.task_file))
+    try:
+        panel_key = f'probe:{benchmark}'
+        result = validator.validate(base, candidate, claim, panel_key,
+                                    sample_key=f'sampled:{panel_key}:probe')
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    recorded = result.to_dict()
+    try:
+        audit_candidate(recorded, panel, validator.sample_size, validator.confidence,
+                        claim.claim_id, base.key)
+    except AuditFailure as exc:
+        raise AuditFailure(f'{benchmark}: sampled probe failed its audit: {exc}') from exc
+    decision = recorded['decision']
+    if decision['lower'] is None:
+        raise AuditFailure(f'{benchmark}: sampled probe produced no PPI bound '
+                           f'({decision["reason"]})')
+    report = {'panel': list(panel), 'sample': list(result.sample_task_ids),
+              'executions': result.executions, 'reviewer_requests': result.reviewer_requests,
+              'decision': decision,
+              'verifier_categories': sorted(row['verification']['category']
+                                            for row in recorded['rows'] if row['verification'])}
+    save(directory / 'report.json', report)
     return report
 
 
@@ -789,11 +815,10 @@ def independent_checks(root):
                              'reviewer_format_correction': corrected,
                              'full_plan': plan}
         # The sampled protocol never calls the card reviewer probed above, and
-        # the preflight stage may propose nothing at all -- so its own reviewer
-        # and verifier contracts are checked here instead.
+        # the preflight split cannot reach its acceptance path; drive it here.
         if manifest['acceptance_mode'] == 'sampled':
-            checks[benchmark]['sampled_contracts'] = sampled_contract_probe(
-                root, benchmark, run, cfg)
+            checks[benchmark]['sampled_acceptance'] = sampled_acceptance_probe(
+                root, benchmark, run, cfg, manifest)
     save(root / 'preflight/independent-checks.json',
          {'status': 'passed', 'manifest_hash': digest(root / 'manifest.json'), 'checks': checks})
     return checks

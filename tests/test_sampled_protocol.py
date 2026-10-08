@@ -854,6 +854,82 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual((metrics['accepted'], metrics['false_accepts']), (1, 0))
 
 
+class SampledAcceptanceProbeTests(unittest.TestCase):
+    """The preflight probe must reach the PPI acceptance path on real executions."""
+
+    def setUp(self):
+        from skillexpand.runtime import parallel as PL
+        self.PL = PL
+        tmp = Path(tempfile.mkdtemp())
+        tasks = tmp / 'tasks.json'
+        tasks.write_text(json.dumps([{'question': f'Find the maker of Prius {i}',
+                                      'answers': ['Toyota'], 'context': '[DOC] Toyota.'}
+                                     for i in range(4)]))
+        self.cfg = F.load_config('searchqa')
+        self.cfg.benchmark.task_file = str(tasks)
+        self.cfg.models = {role: 'stub' for role in self.cfg.models}
+        self.root = tmp / 'campaign'
+        self.run = self.root / 'preflight' / 'searchqa' / 'run'
+        self.run.mkdir(parents=True)
+        base = structured_skill(SS.render(SS.from_sections({
+            'procedure': ['Search the named item.'], 'conditions': [],
+            'completion_checks': []})))
+        (self.run / 'initial_skills.json').write_text(json.dumps([S.to_dict(base)]))
+        self.manifest = dict(SM.DEFAULTS, acceptance_sample_size=3)
+        self.calls = {'executions': 0, 'l2_reviewer': 0, 'l2_verifier': 0}
+
+    def units(self, specs, worker, workers, on_result, **kwargs):
+        output = []
+        for spec in specs:
+            self.calls['executions'] += 1
+            helped = C.PROBE_EDIT['text'] in spec.skill_body
+            actions = ['Search[source]', 'Finish[Toyota]'] if helped else ['Finish[Honda]']
+            item = {'task_id': spec.task_id, 'success': helped, 'steps': len(actions),
+                    'events': [{'model_text': a, 'action': a, 'observation': 'seen'}
+                               for a in actions],
+                    'skill_key': spec.skill_key, 'failure': None}
+            output.append(item)
+            on_result(item)
+        return output
+
+    def host(self, cfg, path, role=None):
+        replies = {'l2_reviewer': {'trigger_probability': 0.9, 'delta_probability': 0.8,
+                                   'reason': 'fires before the final action'},
+                   'l2_verifier': {'category': 'claim_confirmed', 'first_difference_step': 1,
+                                   'reason': 'the changed run searches before Finish'}}
+
+        def llm(messages, **kwargs):
+            self.calls[role] += 1
+            return json.dumps(replies[role])
+        return SimpleNamespace(token_counter=len, llm=llm)
+
+    def probe(self):
+        with patch.object(self.PL, 'run_generic', side_effect=self.units), \
+                patch.object(F, 'build_reasoning_host', side_effect=self.host):
+            return C.sampled_acceptance_probe(self.root, 'searchqa', self.run, self.cfg,
+                                              self.manifest)
+
+    def test_the_probe_bounds_a_real_sample_and_replays_without_requests(self):
+        report = self.probe()
+        self.assertEqual(report['panel'], [0, 1, 2, 3])
+        self.assertEqual(len(report['sample']), 3)
+        self.assertEqual(report['executions'], 6)
+        self.assertIsNotNone(report['decision']['lower'])
+        self.assertTrue(report['decision']['accepted'])
+        self.assertEqual(report['verifier_categories'], ['claim_confirmed'] * 3)
+        self.assertEqual(self.calls, {'executions': 6, 'l2_reviewer': 4, 'l2_verifier': 3})
+        # A rerun of independent-check is served from the probe's own caches.
+        self.assertEqual(self.probe(), report)
+        self.assertEqual(self.calls, {'executions': 6, 'l2_reviewer': 4, 'l2_verifier': 3})
+        self.assertNotIn('EXPE_CONFIG_FILE', __import__('os').environ)
+
+    def test_verification_off_is_honoured(self):
+        self.manifest['claim_verification'] = 'off'
+        report = self.probe()
+        self.assertEqual(report['verifier_categories'], [])
+        self.assertEqual(self.calls['l2_verifier'], 0)
+
+
 class SampledCampaignTests(unittest.TestCase):
     """A campaign must freeze the whole protocol before any stage runs."""
 
