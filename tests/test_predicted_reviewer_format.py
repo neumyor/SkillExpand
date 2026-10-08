@@ -43,7 +43,6 @@ def test_truncated_json_is_rejected_and_echo_cannot_become_review():
 
 @pytest.mark.parametrize("payload,error", [
     ({"probability_true": 0.8, "predicted_success": False, "reason": "ok"}, "disagrees"),
-    ({"probability_true": 0.8, "predicted_success": True, "reason": "x" * 81}, "too long"),
     ({"probability_true": 1.2, "predicted_success": True, "reason": "ok"}, "outside"),
     ({"probability_true": "0.8", "predicted_success": True, "reason": "ok"}, "numeric"),
     ({"probability_true": 0.8, "predicted_success": True, "reason": "ok", "task": "echo"}, "exactly three"),
@@ -51,6 +50,12 @@ def test_truncated_json_is_rejected_and_echo_cannot_become_review():
 def test_predicted_review_validates_schema_and_consistency(payload, error):
     with pytest.raises(ValueError, match=error):
         scorer()._parse(json.dumps(payload))
+
+
+def test_reason_at_new_limit_is_accepted():
+    payload = {"probability_true": 0.8, "predicted_success": True,
+               "reason": "x" * 512}
+    assert scorer()._parse(json.dumps(payload))["reason"] == payload["reason"]
 
 
 def test_format_retry_preserves_thinking_and_json_schema():
@@ -67,11 +72,52 @@ def test_format_retry_preserves_thinking_and_json_schema():
     result, attempts = reviewer._review(SimpleNamespace(llm=llm), "task prompt")
     assert attempts == 2
     assert result["probability_true"] == 0.3
-    assert "FORMAT CORRECTION" in calls[1][0]
+    assert calls[1][0] == calls[0][0]
     for _, kwargs in calls:
         assert kwargs["request_kwargs"]["enable_thinking"] is True
         assert kwargs["request_kwargs"]["response_format"]["type"] == "json_schema"
         assert kwargs["stop"] == []
+
+
+def test_prompt_contains_provider_json_keyword_and_exact_fields():
+    prompt = scorer().prompt("Question", SimpleNamespace(description="d", body="b"))
+    assert "json" in prompt.lower()
+    assert "probability_true" in prompt
+    assert "predicted_success" in prompt
+    assert "reason" in prompt
+
+
+def test_provider_request_errors_are_not_retried_as_format_errors():
+    reviewer = scorer()
+    calls = []
+
+    class InvalidRequestError(Exception):
+        pass
+
+    def llm(messages, **kwargs):
+        calls.append((messages, kwargs))
+        raise InvalidRequestError("invalid response format")
+
+    with pytest.raises(InvalidRequestError):
+        reviewer._review(SimpleNamespace(llm=llm), "task prompt")
+    assert len(calls) == 1
+
+
+def test_long_reason_is_accepted_without_changing_prediction():
+    reviewer = scorer()
+    calls = []
+
+    def llm(messages, **kwargs):
+        calls.append((messages[-1].content, kwargs))
+        return json.dumps({"probability_true": 0.8,
+                           "predicted_success": True,
+                           "reason": "x" * (reviewer.REASON_MAX_CHARS + 40)})
+
+    result, attempts = reviewer._review(SimpleNamespace(llm=llm), "task prompt")
+    assert attempts == 1
+    assert result["probability_true"] == 0.8
+    assert result["predicted_success"] is True
+    assert len(result["reason"]) == reviewer.REASON_MAX_CHARS + 40
 
 
 def test_request_kwargs_are_reviewer_local_and_restored():

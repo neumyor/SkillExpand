@@ -12,6 +12,7 @@ from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
 from skillexpand import schema as S
 from skillexpand.persistence.artifacts import provider_signature
+from skillexpand.runtime.reviewer_retry import ReviewerOutputError, retry_reviewer
 
 #: Why a validation run failed to produce a usable score.
 REASON_NOT_MEASURED = "validation_not_measured"
@@ -98,6 +99,31 @@ class ScoreCache:
             key = record.get("cache_key")
             if key and key not in self._by_key:
                 self._by_key[key] = record
+
+
+class PredictedValidationError(RuntimeError):
+    """A predicted-validation panel with task-local failures.
+
+    Successful tasks are already durable in ``ScoreCache``.  Keeping the failed
+    task IDs on the exception lets the stage supervisor retry the missing work
+    instead of treating the whole panel as an opaque, non-resumable failure.
+    """
+
+    def __init__(self, errors: Sequence[Dict[str, Any]], expected_task_ids: Sequence[int]):
+        self.errors = tuple(dict(error) for error in errors)
+        self.failed_task_ids = tuple(sorted(int(error["task_id"]) for error in self.errors))
+        self.expected_task_ids = tuple(sorted(int(task_id) for task_id in expected_task_ids))
+        details = ", ".join(
+            f"{item['task_id']}:{item.get('error', 'unknown error')}"
+            for item in self.errors[:3]
+        )
+        omitted = len(self.errors) - 3
+        if omitted > 0:
+            details += f", ... ({omitted} more; see evaluation_errors)"
+        super().__init__(
+            f"Incomplete predicted validation ({len(self.errors)} failed task(s)"
+            f"): {details}"
+        )
 
 
 @dataclass
@@ -416,7 +442,26 @@ class PredictedSkillScorer:
     """
 
     PROTOCOL = "predicted-val-skill-success-v2-json-schema"
-    REASON_MAX_CHARS = 80
+    REVIEW_OUTPUT_CONTRACT = (
+        "Your visible final answer MUST be exactly one JSON object with only "
+        "probability_true, predicted_success, and reason. "
+    )
+    # The reason is audit metadata; keep it bounded without rejecting otherwise
+    # valid reviewer decisions from providers that do not enforce maxLength.
+    REASON_MAX_CHARS = 8192
+    FORMAT_RETRIES = 31
+    # Keep the cache identity compatible with the completed portion of the run.
+    # Formatting tolerance is a parser/recovery change, not a new prediction arm.
+    CACHE_RESPONSE_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["probability_true", "predicted_success", "reason"],
+        "properties": {
+            "probability_true": {"type": "number", "minimum": 0, "maximum": 1},
+            "predicted_success": {"type": "boolean"},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 80},
+        },
+    }
     RESPONSE_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -424,7 +469,7 @@ class PredictedSkillScorer:
         "properties": {
             "probability_true": {"type": "number", "minimum": 0, "maximum": 1},
             "predicted_success": {"type": "boolean"},
-            "reason": {"type": "string", "minLength": 1, "maxLength": REASON_MAX_CHARS},
+            "reason": {"type": "string", "minLength": 1},
         },
     }
 
@@ -441,21 +486,25 @@ class PredictedSkillScorer:
         }
 
     def __init__(self, cfg, routes, cache, workers=8, judge_factory=None,
-                 threshold=0.5):
+                 threshold=0.5, calibration_block="", reviewer_prompt_version=0):
         self.cfg = cfg
         self.routes = routes
         self.cache = cache
         self.workers = max(1, int(workers))
         self.judge_factory = judge_factory
         self.threshold = float(threshold)
+        self.calibration_block = str(calibration_block or "")
+        self.reviewer_prompt_version = int(reviewer_prompt_version)
         if not 0.0 <= self.threshold <= 1.0:
             raise ValueError("prediction threshold must be between 0 and 1")
         self.protocol_hash = S.content_hash({
             "protocol": self.PROTOCOL,
-            "response_schema": self.RESPONSE_SCHEMA,
+            "response_schema": self.CACHE_RESPONSE_SCHEMA,
             "benchmark": cfg.benchmark.name,
             "routes": routes.fingerprint,
             "threshold": self.threshold,
+            "reviewer_prompt_version": self.reviewer_prompt_version,
+            "calibration_block": self.calibration_block,
         })
 
     def prompt(self, task: str, skill: S.Skill) -> str:
@@ -467,22 +516,30 @@ class PredictedSkillScorer:
                 "executor will complete this task successfully with one autonomous "
                 "attempt using this Skill. Do not assume rejected answers can be "
                 "retried and do not use any execution trace. You may reason internally "
-                "for as long as needed. Your visible final answer MUST be exactly one "
-                "JSON object with only probability_true, predicted_success, and reason. "
+                "for as long as needed. "
+                f"{self.REVIEW_OUTPUT_CONTRACT}"
                 "Do not output markdown, analysis, a task/skill echo, or any other key. "
                 f"probability_true is a number in [0,1]; predicted_success is true "
                 f"exactly when probability_true >= {self.threshold:.6g}; reason is a "
-                "concise string of at most 80 characters."
+                f"concise string of at most {self.REASON_MAX_CHARS} characters."
             ),
             "output_schema": {
                 "probability_true": "number in [0,1]",
                 "predicted_success": "boolean",
-                "reason": "string, <= 80 characters",
+                "reason": f"string, <= {self.REASON_MAX_CHARS} characters",
             },
         }
+        if self.calibration_block:
+            payload["calibration_block"] = self.calibration_block
         return json.dumps(payload, ensure_ascii=False)
 
     def _parse(self, raw):
+        try:
+            return self._parse_response(raw)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ReviewerOutputError(str(exc)) from exc
+
+    def _parse_response(self, raw):
         from skillexpand.l1.family_discovery import _extract_json
         value = _extract_json(raw, required_keys=("probability_true", "predicted_success", "reason"))
         if set(value) != {"probability_true", "predicted_success", "reason"}:
@@ -506,8 +563,6 @@ class PredictedSkillScorer:
             raise ValueError("Predicted reviewer reason must be a string")
         if not reason.strip():
             raise ValueError("Predicted reviewer reason must not be empty")
-        if len(reason) > self.REASON_MAX_CHARS:
-            raise ValueError("Predicted reviewer reason is too long")
         return {
             "probability_true": probability,
             "predicted_success": predicted_success,
@@ -540,18 +595,9 @@ class PredictedSkillScorer:
             return host.llm(messages, stop=[], replace_newline=False)
 
     def _review(self, host, prompt):
-        raw = self._call(host, prompt)
-        try:
-            return self._parse(raw), 1
-        except Exception as first_error:
-            correction = (
-                prompt + "\n\nFORMAT CORRECTION: your previous visible answer did not "
-                "match the required schema (" + str(first_error) + "). Return only "
-                "the single JSON object now; do not repeat the input or your analysis."
-            )
-            repaired = self._call(host, correction)
-            parsed = self._parse(repaired)
-            return parsed, 2
+        attempts = int(os.environ.get("EXPE_REVIEWER_ATTEMPTS", self.FORMAT_RETRIES + 1))
+        return retry_reviewer(lambda: self._call(host, prompt), self._parse,
+                              attempts=attempts)
 
     def score(self, skill, task_ids, panel_key):
         task_ids = tuple(sorted(int(t) for t in task_ids))
@@ -595,13 +641,29 @@ class PredictedSkillScorer:
                     try:
                         record = futures[task_id].result()
                     except Exception as exc:
-                        errors.append({"task_id": task_id,
-                                       "error": f"{type(exc).__name__}: {exc}"})
+                        message = " ".join(str(exc).split())
+                        if len(message) > 240:
+                            message = message[:237] + "..."
+                        error = {
+                            "task_id": task_id,
+                            "cache_key": keys[task_id],
+                            "error": f"{type(exc).__name__}: {message}",
+                        }
+                        from skillexpand.l1.runner import save
+                        save(self.cache.path.parent / "evaluation_errors" /
+                             (keys[task_id] + ".json"), error)
+                        errors.append(error)
                     else:
                         self.cache.put(keys[task_id], record)
                         records[task_id] = record
-        if errors or set(records) != set(task_ids):
-            raise RuntimeError(f"Incomplete predicted validation ({len(errors)} failed task(s))")
+        missing = sorted(set(task_ids) - set(records))
+        if missing:
+            known = {int(error["task_id"]) for error in errors}
+            for task_id in missing:
+                if task_id not in known:
+                    errors.append({"task_id": task_id, "error": "missing result"})
+        if errors:
+            raise PredictedValidationError(errors, task_ids)
         return PredictedPanelScore(
             skill.key, skill.body, task_ids,
             tuple(records[t] for t in task_ids),
@@ -636,5 +698,26 @@ class PredictedSkillScorer:
             },
             passed=passed,
             reasons=() if passed else ("predicted_val_no_gain",),
-            pairs=paired.pairs, returned_to_editor=False,
+            pairs=paired.pairs,
+            prediction_rows=tuple(
+                {
+                    "task_id": int(task_id),
+                    "base_probability": float(base_row["probability_true"]),
+                    "candidate_probability": float(candidate_row["probability_true"]),
+                    "base_predicted_success": bool(base_row["predicted_success"]),
+                    "candidate_predicted_success": bool(candidate_row["predicted_success"]),
+                    "predicted_improve": (
+                        float(candidate_row["probability_true"])
+                        > float(base_row["probability_true"])
+                    ),
+                    "base_reason": str(base_row.get("reason", "")),
+                    "candidate_reason": str(candidate_row.get("reason", "")),
+                    "reviewer_protocol_hash": str(candidate_row.get("protocol_hash", "")),
+                    "reviewer_prompt_version": self.reviewer_prompt_version,
+                }
+                for task_id, base_row, candidate_row in zip(
+                    base.task_ids, base.predictions, candidate.predictions
+                )
+            ),
+            returned_to_editor=False,
         )

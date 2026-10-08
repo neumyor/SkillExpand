@@ -335,12 +335,15 @@ def execute_routed(spec,cfg):
     from skillexpand.l1.adapters import resolve
     started=time.time()
     library=[S.from_dict(S.Skill,s) for s in spec.skill_library]
+    selector_usage = (str(spec.usage_path) + '.selector'
+                      if spec.usage_path else None)
+    selector_host = F.build_reasoning_host(cfg, selector_usage, role='selector')
+    choice=SkillSelector(selector_host).select(F.task_text_of(cfg,spec.task_id),library)
     agent=F.build_agent(cfg,task_idx=spec.task_id,rules=None,fewshot_strategy='none',
                         agent_cls=RepairAgent,max_reflection_depth=0)
     if spec.usage_path:
         from skillexpand.persistence.usage import attach_usage
         attach_usage([agent.llm,agent.long_context_llm],spec.usage_path)
-    choice=SkillSelector(agent).select(F.task_text_of(cfg,spec.task_id),library)
     base=dict(record_type='unit',unit_id=spec.unit_id,task_id=spec.task_id,family='heldout',
         role=spec.role,arm_id=spec.arm_id,mode=spec.mode,repeat=spec.repeat,
         selection=asdict(choice),skill_key=None,success=False,steps=0,terminated=False,

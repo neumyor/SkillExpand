@@ -1,7 +1,9 @@
 """Probe the fresh family taxonomy and forced-choice assignment artifacts."""
 import argparse
 import json
+import os
 from pathlib import Path
+import runpy
 
 from langchain.schema import HumanMessage
 from omegaconf import OmegaConf
@@ -22,6 +24,9 @@ def main():
     parser.add_argument('--root', type=Path, required=True)
     args = parser.parse_args()
     root = args.root.resolve()
+    campaign = runpy.run_path(str(root / 'code/run_campaign.py'))
+    campaign['verify'](root)
+    os.environ.update(campaign['environment'](root))
 
     search = root / 'full/searchqa/run/discovery'
     tag_paths = sorted((search / 'tags').glob('*.json'), key=lambda path: int(path.stem))
@@ -52,7 +57,8 @@ def main():
                             'Omitted actions are not absent actions; success does not validate every '
                             'intermediate action. Assisted traces do not establish autonomous ability.'),
     }
-    host = F.build_reasoning_host(cfg, root / 'preflight/family-recovery-34.usage.json')
+    host = F.build_reasoning_host(
+        cfg, root / 'preflight/family-recovery-34.usage.json', role='cold_start')
 
     def ask(prompt):
         value = host.llm([HumanMessage(content=(

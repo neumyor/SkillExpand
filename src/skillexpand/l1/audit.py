@@ -6,6 +6,16 @@ from pathlib import Path
 from skillexpand.l1 import learning as L, protocol as P
 
 
+# These errors are emitted by the provider callback for an individual failed
+# attempt before GPTWrapper retries the same logical request. They do not make
+# a completed checkpoint invalid; abandoned requests and unknown errors do.
+TRANSIENT_PROVIDER_ERRORS = frozenset({
+    'Timeout', 'TimeoutError', 'APIError', 'APIConnectionError',
+    'RateLimitError', 'ServiceUnavailableError', 'ConnectionError',
+    'RemoteDisconnected',
+})
+
+
 def require(condition, message):
     if not condition:
         raise ValueError(message)
@@ -104,7 +114,7 @@ def audit_usage(checkpoint, data=None):
     usage = json.loads(path.read_text())
     rows = [json.loads(line) for line in path.with_suffix('.requests.jsonl').read_text().splitlines()]
     pending, finished = set(), set()
-    starts = ends = errors = 0
+    starts = ends = errors = transient_errors = nonretryable_errors = abandoned = 0
     tokens = dict(prompt_tokens=0, completion_tokens=0, total_tokens=0)
     for row in rows:
         rid = row['run_id']
@@ -118,6 +128,12 @@ def audit_usage(checkpoint, data=None):
             finished.add(rid)
             if row['event'] in ('error', 'abandoned'):
                 errors += 1
+                if row['event'] == 'abandoned':
+                    abandoned += 1
+                elif row.get('error_type') in TRANSIENT_PROVIDER_ERRORS:
+                    transient_errors += 1
+                else:
+                    nonretryable_errors += 1
             else:
                 ends += 1
                 reported = (row.get('provider') or {}).get('token_usage')
@@ -147,7 +163,19 @@ def audit_usage(checkpoint, data=None):
         if 'repair' in synthesis:
             verify_response(synthesis['repair']['input'], synthesis['repair']['raw'],
                             'extraction repair')
-    return dict(requests=starts, failed_requests=errors, tokens_complete=errors == 0, **tokens)
+    return dict(
+        requests=starts,
+        failed_requests=errors,
+        transient_errors=transient_errors,
+        nonretryable_errors=nonretryable_errors,
+        abandoned_requests=abandoned,
+        # Token totals remain incomplete whenever a provider attempt failed.
+        tokens_complete=errors == 0,
+        # Checkpoint integrity is still auditable when those failures were
+        # transient attempts followed by a successful retry.
+        audit_complete=(not pending and abandoned == 0 and nonretryable_errors == 0),
+        **tokens,
+    )
 
 
 def main():

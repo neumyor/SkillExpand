@@ -80,7 +80,8 @@ class SkillPatchRunner:
     def __init__(self, editor, reviewer, audit_dir, read_only=False,
                  reviewer_factory=None, acceptance_mode="predicted",
                  val_scorer=None, jev_scorer=None,
-                 predicted_review_scope="val", predicted_scorer=None):
+                 predicted_review_scope="val", predicted_scorer=None,
+                 single_candidate=False):
         self.editor, self.reviewer, self.audit_dir = editor, reviewer, Path(audit_dir)
         self.read_only = read_only
         self.reviewer_factory = reviewer_factory
@@ -100,9 +101,12 @@ class SkillPatchRunner:
         self.val_scorer = val_scorer
         self.jev_scorer = jev_scorer
         self.predicted_scorer = predicted_scorer
+        self.single_candidate = bool(single_candidate)
 
     def run(self, base_skill, experiences, candidate_count=3, batch_patterns=(),
             l2_review_workers=1, acceptance_record=None):
+        if self.single_candidate and candidate_count != 1:
+            raise ValueError("single_candidate protocol requires candidate_count=1")
         experiences = tuple(experiences)
         if (
             candidate_count < 1
@@ -131,6 +135,7 @@ class SkillPatchRunner:
                 "skill_edit_mode": self.editor.skill_edit_mode,
                 "acceptance_mode": self.acceptance_mode,
                 "predicted_review_scope": self.predicted_review_scope,
+                "single_candidate": self.single_candidate,
                 "acceptance_protocol": acceptance_protocol,
             }
         )
@@ -156,6 +161,7 @@ class SkillPatchRunner:
             "base_skill_key": base_skill.key,
             "selection_method": "batch_card_review",
             "requested_candidates": candidate_count,
+            "single_candidate": self.single_candidate,
             "skill_edit_mode": self.editor.skill_edit_mode,
             "acceptance_mode": self.acceptance_mode,
             "predicted_review_scope": self.predicted_review_scope,

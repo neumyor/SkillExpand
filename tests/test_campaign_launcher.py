@@ -1,5 +1,6 @@
 """Supervisor control-flow tests without network calls or benchmark execution."""
 import importlib.util
+import json
 from pathlib import Path
 import time
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ def campaign(tmp_path, monkeypatch):
     monkeypatch.setattr(C, 'health', lambda root: {})
     monkeypatch.setattr(C, 'audit_stage', lambda *args: {'integrity': 'passed'})
     monkeypatch.setattr(C, 'RETRY_DELAYS', (0, 0, 0))
+    monkeypatch.setenv('EXPE_STAGE_ATTEMPTS', '4')
     return tmp_path
 
 
@@ -106,6 +108,27 @@ def test_validation_errors_do_not_retry_due_to_old_network_error(campaign):
     assert not C.retryable_failure(RuntimeError('L1 interrupted'), campaign / 'run', time.time() + 10)
 
 
+def test_predicted_validation_failure_is_retryable(campaign):
+    exc = RuntimeError('Incomplete predicted validation (1 failed task(s); task_ids=[7])')
+    assert C.retryable_failure(exc, campaign / 'run', 0)
+
+
+def test_default_recovery_survives_more_than_four_stage_failures(campaign, monkeypatch):
+    monkeypatch.delenv('EXPE_STAGE_ATTEMPTS')
+    calls = fake_processes(monkeypatch, campaign, lambda stage, attempt:
+        {'status': 'failed', 'retryable': True} if stage == 'cold-start' and attempt < 10
+        else {'status': 'complete', 'retryable': False})
+    assert C.run_job(campaign, 'preflight', 'searchqa') == 0
+    assert calls[:10] == [('cold-start', n) for n in range(1, 11)]
+    assert calls[10:] == [('evolve-1', 1), ('evolve-2', 1)]
+
+
+def test_reviewer_update_failure_is_retryable_but_integrity_error_is_not(campaign):
+    from skillexpand.runtime.reviewer_retry import ReviewerUpdateError
+    assert C.retryable_failure(ReviewerUpdateError('output budget exhausted'), campaign / 'run', 0)
+    assert not C.retryable_failure(ValueError('unknown frozen task'), campaign / 'run', 0)
+
+
 def test_input_validation_rejects_missing_tasks_and_unknown_roles():
     with pytest.raises(ValueError):
         C.validate_inputs([{}, {}, {}], {'assignment': {'0': 'train', '1': 'test'}})
@@ -133,8 +156,10 @@ def test_campaign_runtime_uses_local_configuration(tmp_path, monkeypatch):
         path.mkdir()
         monkeypatch.setenv(name, str(path))
     monkeypatch.setenv('EXPE_LLM_MODEL', 'test-model')
+    monkeypatch.setenv('EXPE_LLM_BASE_URL', 'https://llm.example.invalid/v1')
     settings = C.configured_runtime()
     assert settings['model'] == 'test-model'
+    assert settings['llm_base_url'] == 'https://llm.example.invalid/v1'
     assert settings['python'] == str(venv_python)
     assert settings['alfworld_config'] == str(files['ALFWORLD_CONFIG'])
 
@@ -142,7 +167,6 @@ def test_campaign_runtime_uses_local_configuration(tmp_path, monkeypatch):
         request_interval_seconds=C.REQUEST_INTERVAL_SECONDS,
         timeouts={'request': 300, 'request_retries': 2,
                   'environment': 120, 'worker_progress': 3600}))
-    monkeypatch.setenv('EXPE_LLM_BASE_URL', 'https://llm.example.invalid/v1')
     monkeypatch.setenv('OPENAI_API_KEY', 'test-only-secret')
     environment = C.environment(tmp_path)
     assert environment['OPENAI_API_KEY'] == 'test-only-secret'
@@ -152,9 +176,80 @@ def test_campaign_runtime_uses_local_configuration(tmp_path, monkeypatch):
     assert 'test-only-secret' not in (tmp_path / 'manifest.json').read_text()
 
 
+def test_environment_rejects_endpoint_drift(tmp_path, monkeypatch):
+    manifest = {
+        'llm_base_url': 'https://frozen.example/v1',
+        'timeouts': {'request': 300, 'request_retries': 2, 'environment': 120,
+                     'worker_progress': 3600},
+        'model': 'base', 'models': {}, 'overlay': str(tmp_path),
+        'alfworld_data': str(tmp_path), 'alfworld_config': str(tmp_path / 'cfg'),
+        'alfworld_bench_src': str(tmp_path), 'python': str(tmp_path / 'python'),
+        'request_interval_seconds': C.REQUEST_INTERVAL_SECONDS,
+    }
+    C.save(tmp_path / 'manifest.json', manifest)
+    (tmp_path / 'cfg').touch()
+    (tmp_path / 'python').touch()
+    monkeypatch.setenv('EXPE_LLM_BASE_URL', 'https://current.example/v1')
+    monkeypatch.setenv('OPENAI_API_KEY', 'test-only-secret')
+    with pytest.raises(ValueError, match='endpoint differs'):
+        C.environment(tmp_path)
+
+
+def test_usage_ledger_audit_requires_terminal_tokenized_requests(tmp_path):
+    log = tmp_path / 'usage' / 'planner.requests.jsonl'
+    log.parent.mkdir()
+    log.write_text('\n'.join([
+        json.dumps({'event': 'start', 'run_id': 'r1'}),
+        json.dumps({'event': 'end', 'run_id': 'r1',
+                    'provider': {'token_usage': {
+                        'prompt_tokens': 2, 'completion_tokens': 3, 'total_tokens': 5}}}),
+    ]) + '\n')
+    result = C.audit_usage_ledgers(tmp_path)
+    assert result['tokens_complete'] is True
+    assert result['total_tokens'] == 5
+    log.write_text(json.dumps({'event': 'start', 'run_id': 'r2'}) + '\n')
+    assert C.audit_usage_ledgers(tmp_path)['tokens_complete'] is False
+
+
 def test_campaign_requires_local_configuration(monkeypatch):
-    for name in ('EXPE_LLM_MODEL', 'ALFWORLD_PYTHON', 'EXPE_CAMPAIGN_OVERLAY',
+    for name in ('EXPE_LLM_MODEL', 'EXPE_LLM_BASE_URL', 'ALFWORLD_PYTHON', 'EXPE_CAMPAIGN_OVERLAY',
                  'ALFWORLD_DATA', 'ALFWORLD_CONFIG', 'ALFWORLD_BENCH_SRC'):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(ValueError, match='ALFWORLD_PYTHON'):
         C.configured_runtime()
+
+
+def test_health_probes_each_distinct_role_model(tmp_path, monkeypatch):
+    models = {role: 'base' for role in C.role_models({'models': {}})}
+    models['l2_reviewer'] = 'strong'
+    C.save(tmp_path / 'manifest.json', {'models': models})
+    monkeypatch.setattr(C, 'environment', lambda root: {
+        'EXPE_LLM_BASE_URL': 'https://llm.example.invalid/v1',
+        'OPENAI_API_KEY': 'test-only-secret',
+    })
+    seen = []
+
+    class Response:
+        def __init__(self, model):
+            self.model = model
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({'model': self.model, 'choices': [
+                {'message': {'content': 'OK'}}]}).encode()
+
+    def urlopen(request, timeout):
+        model = json.loads(request.data)['model']
+        seen.append(model)
+        return Response(model)
+
+    monkeypatch.setattr(C.urllib.request, 'urlopen', urlopen)
+    result = C.health(tmp_path)
+    assert seen == ['base', 'strong']
+    assert result['models']['l2_reviewer'] == 'strong'
+    assert {item['requested_model'] for item in result['probes']} == {'base', 'strong'}
