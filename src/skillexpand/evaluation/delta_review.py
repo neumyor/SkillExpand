@@ -136,16 +136,12 @@ class PairedDeltaReviewer:
         }
 
     def __init__(self, cfg, routes, cache, workers: int = 8,
-                 host_factory: Optional[Callable] = None, memory_version: int = 0):
+                 host_factory: Optional[Callable] = None):
         self.cfg = cfg
         self.routes = routes
         self.cache = cache
         self.workers = max(1, int(workers))
         self.host_factory = host_factory
-        # The memory is retrieved per task, so it cannot live in the protocol
-        # hash.  It travels in the cache identity instead, which is what has to
-        # change when the same task is asked again with different cases.
-        self.memory_version = int(memory_version)
         self.protocol_hash = S.content_hash({
             'protocol': self.PROTOCOL,
             'response_schema': self.RESPONSE_SCHEMA,
@@ -244,8 +240,10 @@ class PairedDeltaReviewer:
         task_ids = tuple(sorted(int(t) for t in task_ids))
         if not task_ids or not set(task_ids) <= set(self.routes.groups[base_skill.skill_id]):
             raise JournalConflict('Predicted tasks must belong to the frozen Skill route group')
-        # The cache identity carries both bodies and the claim: the same proposal
-        # is never re-asked, and a different proposal is never served a stale row.
+        # The cache identity carries both bodies, the claim and the task's memory
+        # block: the same request is never re-asked, and a request with different
+        # memory is never served a stale row.  The memory is retrieved per task,
+        # so it belongs here rather than in the protocol hash.
         blocks = dict(memory_blocks or {})
         material = S._canonical_json({'base': base_skill.body, 'candidate': candidate_skill.body,
                                       'claim': claim.payload()})
@@ -278,9 +276,7 @@ class PairedDeltaReviewer:
                     'candidate_skill_key': candidate_skill.key, 'claim_id': claim.claim_id,
                     'cache_key': keys[task_id], 'panel_key': panel_key,
                     'protocol_hash': self.protocol_hash,
-                    'memory_version': self.memory_version,
-                    'memory_cases': (blocks.get(task_id, '').count('\n- ') + 1
-                                     if blocks.get(task_id) else 0),
+                    'memory_hash': S.content_hash(blocks.get(task_id, '')),
                     'format_attempts': attempts,
                     'response_format': 'json_schema', **result}
 

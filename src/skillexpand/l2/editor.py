@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from langchain.schema import HumanMessage, SystemMessage
 from skillexpand import schema as S
+from skillexpand.reliability.errors import InvalidInput
 from skillexpand.reliability.policies import repair_policy
 from skillexpand.reliability.retry import call_with_repair, fresh
 from skillexpand.runtime.json_output import extract_json
@@ -412,14 +413,15 @@ class SkillEditor:
                        "target_id:existing rule ID or null, text:one concise rule}. "
                        "This is a hard output schema: return JSON only as "
                        "{\"hypotheses\":[{\"mechanism\":\"...\",\"change\":\"...\","
+                       + (SM.CLAIM_FIELD if claim_required else "") +
                        "\"evidence\":[{\"card_id\":\"...\",\"evidence_id\":\"...\"}],"
                        "\"edit\":{\"op\":\"add|replace\",\"section\":\"procedure|conditions|completion_checks\","
                        "\"target_id\":\"P1|C1|V1|null\",\"text\":\"one concise rule\"}}]}. "
                        "For no supported change return {\"hypotheses\":[]}.")
         if claim_required:
-            SM.validate_protocol('sampled', self.skill_edit_mode)
-            # The claim contract belongs to the sampled protocol, so it is
-            # appended only when that protocol is active: the older paths keep
+            if self.skill_edit_mode != "structured":
+                raise InvalidInput("A claim is defined over one structured rule edit")
+            # Appended only under the sampled protocol, so the older paths keep
             # an unchanged prompt and therefore an unchanged protocol identity.
             system += SM.CLAIM_CONTRACT
         if planner_memory:

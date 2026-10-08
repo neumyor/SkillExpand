@@ -24,6 +24,10 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 OBSERVATION_CHARS = 400
 #: How many identical actions before the divergence to show the verifier.
 CONTEXT_STEPS = 2
+#: Everything the verifier is shown.  Fixed so the audit can prove that no
+#: field revealing how a run ended was added later.
+PAYLOAD_KEYS = ('diverged_at_step', 'actions_before', 'context_observation',
+                'action_without_change', 'action_with_change')
 
 
 def action_sequence(events: Sequence[Dict[str, Any]]) -> Tuple[str, ...]:
@@ -66,18 +70,16 @@ class Divergence:
     candidate_action: Optional[str]
     prefix_actions: Tuple[str, ...]
     context_observation: str
-    base_steps: int
-    candidate_steps: int
 
     def payload(self) -> Dict[str, Any]:
+        # Trajectory lengths are deliberately absent: how long a run lasted is
+        # a proxy for how it ended, which the verifier must not see.
         return {
             'diverged_at_step': self.step,
             'actions_before': list(self.prefix_actions),
             'context_observation': self.context_observation,
             'action_without_change': self.base_action,
             'action_with_change': self.candidate_action,
-            'steps_without_change': self.base_steps,
-            'steps_with_change': self.candidate_steps,
         }
 
 
@@ -105,6 +107,4 @@ def first_divergence(base_events: Sequence[Dict[str, Any]],
         candidate_action=candidate[step] if step < len(candidate) else None,
         prefix_actions=base[max(0, step - context_steps):step],
         context_observation=_last_observation_before(base_events, step),
-        base_steps=len(base),
-        candidate_steps=len(candidate),
     )

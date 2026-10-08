@@ -56,52 +56,17 @@ class SampledValidation:
         return self.decision.accepted
 
     @property
-    def task_ids(self) -> Tuple[int, ...]:
-        return self.panel_task_ids
-
-    @property
     def reasons(self) -> Tuple[str, ...]:
         return () if self.passed else (self.decision.reason,)
 
-    def metrics(self) -> Dict[str, Optional[float]]:
-        return dict(self.decision.metrics(),
-                    mean_predicted_delta=self.mean_predicted_delta,
-                    mean_trigger_probability=self.mean_trigger_probability,
-                    reviewer_from_cache=float(self.reviewer_from_cache),
-                    reviewer_measured=float(self.reviewer_measured))
+    @property
+    def executions(self) -> int:
+        """Paired episodes the decision rests on: both arms of every sampled task."""
+        return 2 * self.decision.n_sample
 
     @property
-    def mean_predicted_delta(self) -> Optional[float]:
-        if not self.rows:
-            return None
-        return sum(float(row['delta_probability']) for row in self.rows) / len(self.rows)
-
-    @property
-    def mean_trigger_probability(self) -> Optional[float]:
-        if not self.rows:
-            return None
-        return sum(float(row['trigger_probability']) for row in self.rows) / len(self.rows)
-
-    @property
-    def reviewer_from_cache(self) -> int:
-        return sum(1 for row in self.rows if row.get('from_cache'))
-
-    @property
-    def reviewer_measured(self) -> int:
-        return sum(1 for row in self.rows if not row.get('from_cache'))
-
-    @property
-    def sample_outcomes(self) -> Dict[int, float]:
-        """Measured candidate-minus-base success on each executed task."""
-        rates = {}
-        for arm in self.arms:
-            rates[arm.arm_id] = arm.by_task_rate()
-        base = rates.get(S.ARM_BASE, {})
-        candidate = rates.get(S.ARM_CANDIDATE, {})
-        shared = sorted(set(base) & set(candidate))
-        if set(shared) != set(self.sample_task_ids):
-            raise InvalidInput('Sampled arms do not cover the executed sample')
-        return {t: candidate[t] - base[t] for t in shared}
+    def reviewer_requests(self) -> int:
+        return sum(1 for row in self.rows if not row['from_cache'])
 
     def to_dict(self) -> Dict[str, Any]:
         return S.to_dict(self)
@@ -128,6 +93,8 @@ class SampledDeltaValidator:
         self.verifier = verifier
         # Duck-typed on purpose: the memory is built by the layer that owns the
         # journals, and this module only asks it for the cases of one change type.
+        # It stays out of the protocol hash, which identifies the L2 proposal
+        # cache across rounds; each prediction's cache key carries its own block.
         self.reviewer_memory = reviewer_memory
         self.protocol_hash = S.content_hash({
             'protocol': 'sampled-delta-acceptance',
@@ -136,9 +103,6 @@ class SampledDeltaValidator:
             'sample_size': self.sample_size,
             'confidence': self.confidence,
             'verifier': getattr(verifier, 'protocol_hash', None),
-            'reviewer_memory': (
-                None if reviewer_memory is None
-                else getattr(reviewer_memory, 'version', 0)),
         })
 
     def validate(self, base_skill: S.Skill, candidate_skill: S.Skill, claim: S.Claim,
@@ -180,21 +144,23 @@ class SampledDeltaValidator:
         decision = PPI.estimate(prediction.deltas, measurements,
                                 confidence=self.confidence)
 
-        # Attribution runs only where the two executions actually differ, and it
-        # reads those executions back from the cache rather than rerunning them.
-        divergences, verifications, changed_rule = {}, {}, None
+        # The divergence is a pure function of the two cached executions, so it
+        # is located for every sampled task whether or not a verifier runs: it
+        # is what separates an effect from execution noise, and the audit checks
+        # that identical trajectories never produced different outcomes.
+        base_records = self.executor.records(base_skill, sample, panel_key)
+        candidate_records = self.executor.records(candidate_skill, sample, panel_key)
+        divergences = {
+            task_id: first_divergence(base_records[task_id].get('events') or (),
+                                      candidate_records[task_id].get('events') or ())
+            for task_id in sample}
+        verifications = {}
         if self.verifier is not None:
             changed_rule = change_view(base_skill, candidate_skill)
-            base_records = self.executor.records(base_skill, sample, panel_key)
-            candidate_records = self.executor.records(candidate_skill, sample, panel_key)
-            for task_id in sample:
-                divergence = first_divergence(
-                    base_records[task_id].get('events') or (),
-                    candidate_records[task_id].get('events') or ())
-                divergences[task_id] = divergence
-                if divergence is not None:
-                    verifications[task_id] = self.verifier.verify(
-                        task_id, changed_rule, claim, divergence, panel_key)
+            verifications = {
+                task_id: self.verifier.verify(task_id, changed_rule, claim, divergence,
+                                              panel_key)
+                for task_id, divergence in divergences.items() if divergence is not None}
 
         prediction_by_task = {int(row['task_id']): row for row in prediction.rows}
         rows = []
@@ -211,6 +177,7 @@ class SampledDeltaValidator:
                 'sampled': sampled,
                 'measured_delta': (measurements[task_id] if sampled else None),
                 'from_cache': bool(predicted.get('from_cache', False)),
+                'reviewer_cache_key': str(predicted['cache_key']),
                 'divergence': (divergence.payload() if divergence is not None else None),
                 'verification': (verifications.get(task_id) if sampled else None),
             })

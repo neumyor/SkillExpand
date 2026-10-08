@@ -20,7 +20,6 @@ import subprocess
 import time
 import urllib.request
 
-from skillexpand.evaluation.sampled_validation import MIN_SAMPLE_SIZE
 from skillexpand.l2 import sampled as SM
 from skillexpand.persistence import io as IO
 from skillexpand.reliability.errors import (
@@ -210,27 +209,21 @@ def validate_inputs(tasks, split):
 def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predicted', models=None,
             autonomous_attempts=4, supervised_attempts=1,
             predicted_review_scope='val', candidate_count=1,
-            single_candidate=False, reviewer_update_mode='rules',
-            reviewer_feedback_size=0, acceptance_sample_size=16,
-            acceptance_confidence=0.9, claim_verification='on',
-            planner_memory_mode='aggregate', reviewer_memory_mode='cases'):
+            single_candidate=False, reviewer_update_mode=None,
+            reviewer_feedback_size=0, **sampled_options):
     if skill_edit_mode not in ('rewrite', 'structured'):
         raise InvalidInput('Unknown Skill edit mode')
     if acceptance_mode not in ('predicted', 'empirical', 'jev', 'sampled'):
         raise InvalidInput('Unknown acceptance mode')
-    # The sampled protocol is defined over one structured rule change.
-    SM.validate_protocol(acceptance_mode, skill_edit_mode)
-    if acceptance_sample_size < MIN_SAMPLE_SIZE:
-        raise InvalidInput(
-            f'acceptance_sample_size must be at least {MIN_SAMPLE_SIZE}')
-    if not 0.0 < acceptance_confidence < 1.0:
-        raise InvalidInput('acceptance_confidence must lie strictly between 0 and 1')
-    if claim_verification not in ('on', 'off'):
-        raise InvalidInput('claim_verification must be on or off')
-    if planner_memory_mode not in ('off', 'aggregate'):
-        raise InvalidInput('Unknown planner memory mode')
-    if reviewer_memory_mode not in ('off', 'cases'):
-        raise InvalidInput('Unknown reviewer memory mode')
+    if reviewer_update_mode is None:
+        reviewer_update_mode = SM.default_reviewer_update_mode(acceptance_mode)
+    unknown = set(sampled_options) - set(SM.DEFAULTS)
+    if unknown:
+        raise InvalidInput(f'Unknown campaign option(s): {sorted(unknown)}')
+    sampled_options = {**SM.DEFAULTS, **sampled_options}
+    SM.validate_options(dict(sampled_options, acceptance_mode=acceptance_mode,
+                             skill_edit_mode=skill_edit_mode,
+                             reviewer_update_mode=reviewer_update_mode))
     if predicted_review_scope not in ('val', 'train_cards'):
         raise InvalidInput('Unknown predicted review scope')
     if candidate_count < 1 or (single_candidate and candidate_count != 1):
@@ -282,11 +275,7 @@ def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predict
         'single_candidate': single_candidate,
         'reviewer_update_mode': reviewer_update_mode,
         'reviewer_feedback_size': reviewer_feedback_size,
-        'acceptance_sample_size': acceptance_sample_size,
-        'acceptance_confidence': acceptance_confidence,
-        'claim_verification': claim_verification,
-        'planner_memory_mode': planner_memory_mode,
-        'reviewer_memory_mode': reviewer_memory_mode,
+        **sampled_options,
         'skill_edit_mode': skill_edit_mode, 'acceptance_mode': acceptance_mode,
         'predicted_review_scope': predicted_review_scope,
         'benchmarks': details,
@@ -327,14 +316,11 @@ def verify(root):
             int(manifest['supervised_attempts']) < 0 or
             manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
         raise FrozenProtocolChanged('Unexpected campaign protocol')
-    if manifest['acceptance_mode'] == 'sampled':
-        if (int(manifest['acceptance_sample_size']) < MIN_SAMPLE_SIZE
-                or not 0.0 < float(manifest['acceptance_confidence']) < 1.0
-                or manifest['skill_edit_mode'] != 'structured'
-                or manifest['claim_verification'] not in ('on', 'off')
-                or manifest['planner_memory_mode'] not in ('off', 'aggregate')
-                or manifest['reviewer_memory_mode'] not in ('off', 'cases')):
-            raise FrozenProtocolChanged('Unexpected sampled acceptance protocol')
+    try:
+        SM.validate_options({key: manifest[key] for key in (
+            *SM.DEFAULTS, 'acceptance_mode', 'skill_edit_mode', 'reviewer_update_mode')})
+    except (InvalidInput, KeyError) as exc:
+        raise FrozenProtocolChanged(f'Unexpected sampled acceptance protocol: {exc}') from exc
     for key, kind in (('python', 'file'), ('overlay', 'dir'), ('alfworld_data', 'dir'),
                       ('alfworld_config', 'file'), ('alfworld_bench_src', 'dir')):
         path = Path(manifest[key])
@@ -445,12 +431,9 @@ def stage_args(root, mode, benchmark, stage):
     args += ['--reviewer-update-mode', manifest['reviewer_update_mode']]
     if manifest['reviewer_feedback_size']:
         args += ['--reviewer-feedback-size', str(manifest['reviewer_feedback_size'])]
-    if manifest['acceptance_mode'] == 'sampled':
-        args += ['--acceptance-sample-size', str(manifest['acceptance_sample_size'])]
-        args += ['--acceptance-confidence', str(manifest['acceptance_confidence'])]
-        args += ['--claim-verification', manifest['claim_verification']]
-        args += ['--planner-memory-mode', manifest['planner_memory_mode']]
-        args += ['--reviewer-memory-mode', manifest['reviewer_memory_mode']]
+    if manifest['acceptance_mode'] == SM.MODE:
+        for key in SM.DEFAULTS:
+            args += ['--' + key.replace('_', '-'), str(manifest[key])]
     models = manifest['models']
     for flag, key in (('--l1-model', 'l1_executor'), ('--cold-start-model', 'cold_start'),
                       ('--l2-planner-model', 'l2_planner'), ('--l2-editor-model', 'l2_editor'),
@@ -941,21 +924,13 @@ def main():
                         choices=('predicted', 'empirical', 'jev', 'sampled'),
                         default='predicted',
                         help='Skill acceptance mode frozen when preparing a campaign')
-    parser.add_argument('--acceptance-sample-size', type=int, default=16,
-                        help='Executed val tasks per candidate under sampled acceptance')
-    parser.add_argument('--acceptance-confidence', type=float, default=0.9,
-                        help='One-sided confidence level of the sampled lower bound')
-    parser.add_argument('--claim-verification', choices=('on', 'off'), default='on',
-                        help='Independent verification of the claimed rule effect')
-    parser.add_argument('--planner-memory-mode', choices=('off', 'aggregate'),
-                        default='aggregate')
-    parser.add_argument('--reviewer-memory-mode', choices=('off', 'cases'),
-                        default='cases')
+    SM.add_arguments(parser)
     parser.add_argument('--predicted-review-scope', choices=('val', 'train_cards'), default='val',
                         help='Evidence scope for predicted acceptance')
     parser.add_argument('--candidate-count', type=int, default=1)
     parser.add_argument('--single-candidate', action='store_true')
-    parser.add_argument('--reviewer-update-mode', choices=('none', 'summary', 'rules'), default='rules')
+    parser.add_argument('--reviewer-update-mode', choices=('none', 'summary', 'rules'),
+                        help='Default: rules, or none under sampled acceptance')
     parser.add_argument('--reviewer-feedback-size', type=int, default=0)
     parser.add_argument('--autonomous-attempts', type=int, default=4)
     parser.add_argument('--supervised-attempts', type=int, default=1)
@@ -981,11 +956,7 @@ def main():
                          single_candidate=args.single_candidate,
                          reviewer_update_mode=args.reviewer_update_mode,
                          reviewer_feedback_size=args.reviewer_feedback_size,
-                         acceptance_sample_size=args.acceptance_sample_size,
-                         acceptance_confidence=args.acceptance_confidence,
-                         claim_verification=args.claim_verification,
-                         planner_memory_mode=args.planner_memory_mode,
-                         reviewer_memory_mode=args.reviewer_memory_mode)
+                         **SM.options_from(args))
         print(json.dumps({'root': str(root), 'benchmarks': result['benchmarks'], 'models': result['models']}))
     elif args.action == 'check':
         result = verify(root)

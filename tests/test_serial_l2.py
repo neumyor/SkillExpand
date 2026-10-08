@@ -673,6 +673,106 @@ class SerialL2Tests(unittest.TestCase):
             L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root),
                                   L.EvolutionConfig(batch_size=50, skill_edit_mode='rewrite'))
 
+    def test_sampled_round_runs_end_to_end_resumes_and_audits_offline(self):
+        """One full sampled round through the real loop, journal and round audit.
+
+        Every unit test of the sampled modules passes with stubs; this is the
+        test that proves the pieces are actually wired together.  A one-task
+        val panel cannot bound the estimate and must hold; a two-task panel
+        whose sample agrees must install the candidate.
+        """
+        for val_tasks in ((2,), (1, 2)):
+            with self.subTest(val_tasks=val_tasks):
+                self.tearDown()
+                self.setUp()
+                assignment = {0: "train", 1: "train", 2: "val", 3: "test"}
+                assignment.update({t: "val" for t in val_tasks})
+                self.plan = S.SplitPlan.make(assignment, "searchqa", 42)
+                self._sampled_round(val_tasks)
+
+    def _sampled_round(self, val_tasks):
+        from skillexpand.l2.audit import audit_round
+        driver = self.prepared(batch_size=50, skill_edit_mode="structured",
+                               acceptance_mode="sampled", candidate_count=1,
+                               predicted_review_scope="val", reviewer_update_mode=None,
+                               acceptance_sample_size=2)
+        calls = {"l2_reviewer": [], "l2_verifier": []}
+        rule = "inspect the supporting source before Finish."
+
+        def planner(messages, **kw):
+            payload = json.loads(messages[-1].content)
+            if isinstance(payload, list):
+                return json.dumps({"patterns": []})
+            card = payload["cards"][0]
+            return json.dumps({"hypotheses": [{
+                "mechanism": "inspect evidence", "change": "Add a source check",
+                "claim": {"trigger": "an answer is about to be submitted",
+                          "action_change": "search the source before Finish"},
+                "evidence": [{"card_id": card["card_id"],
+                              "evidence_id": card["evidence"][0]["id"]}],
+                "edit": {"op": "add", "section": "completion_checks",
+                         "target_id": None, "text": rule}}]})
+
+        replies = {
+            "l2_reviewer": {"trigger_probability": 0.9, "delta_probability": 0.5,
+                            "reason": "fires before every answer"},
+            "l2_verifier": {"category": "claim_confirmed",
+                            "reason": "the extra search precedes Finish"},
+        }
+
+        def factory(cfg, path, role=None):
+            if role in replies:
+                def llm(messages, **kw):
+                    calls[role].append(messages)
+                    return json.dumps(replies[role])
+                return SimpleNamespace(token_counter=len, llm=llm)
+            return SimpleNamespace(token_counter=len, llm=planner)
+
+        class Routes:
+            fingerprint = "val-routes"
+            groups = {skill.skill_id: val_tasks for skill in driver.initial}
+
+        def units(specs, worker, workers, on_result, **kw):
+            if worker is LW.execute_experience:
+                return self.units(specs, worker, workers, on_result, **kw)
+            self.assertIs(worker, EW.execute_fixed)
+            output = []
+            for spec in specs:
+                helped = rule in spec.skill_body
+                actions = ["Search[source]", "Finish[Toyota]"] if helped else ["Finish[Honda]"]
+                item = {"task_id": spec.task_id, "success": helped, "steps": len(actions),
+                        "events": [{"action": a, "observation": "seen"} for a in actions],
+                        "skill_key": spec.skill_key, "failure": None}
+                output.append(item)
+                on_result(item)
+            return output
+
+        with patch.object(PL, "run_generic", side_effect=units), patch.object(
+                F, "build_reasoning_host", side_effect=factory), patch.object(
+                L.FrozenRoutes, "run", return_value=Routes()):
+            result = driver.run_evolutions(1)
+
+        n = len(val_tasks)
+        accepted = int(n >= 2)
+        self.assertEqual(driver.config.reviewer_update_mode, "none")
+        self.assertEqual(result["review_approved_updates"], accepted)
+        self.assertEqual(driver.skill_heads()[0].version, accepted)
+        self.assertEqual(result["val_executions"], 2 * n)
+        self.assertEqual((len(calls["l2_reviewer"]), len(calls["l2_verifier"])), (n, n))
+        self.assertEqual(result["reviewer_metrics"]["sampled_pairs"], n)
+        batch = json.loads(next((self.root / "l2_batches").glob("*.json")).read_text())
+        decision = batch["acceptance"]["candidates"][0]["result"]["decision"]
+        self.assertEqual(decision["reason"], "accepted" if accepted else "insufficient_sample")
+        self.assertEqual((batch["planner_memory"], batch["reviewer_memory_version"]), ("", 0))
+        self.assertFalse((self.root / "reviewer_feedback.jsonl").exists())
+        self.assertEqual(audit_round(self.root, 1)["review_approved"], accepted)
+        restored = L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root),
+                                         driver.config)
+        with patch.object(F, "build_reasoning_host", side_effect=AssertionError("resume model")), \
+                patch.object(PL, "run_generic", side_effect=AssertionError("resume execution")), \
+                patch.object(L.FrozenRoutes, "run", return_value=Routes()):
+            self.assertEqual(restored.run_evolutions(1), result)
+
     def test_structured_editor_rejects_whole_body_response(self):
         driver = self.prepared(skill_edit_mode='structured')
         host = SimpleNamespace(token_counter=len,
@@ -691,10 +791,11 @@ class SerialL2Tests(unittest.TestCase):
                          ("structured", "rules"))
         self.assertEqual([len(b) for b in L.family_task_batches(range(123), 50)], [50, 50, 23])
         parsed = evolve.build_parser().parse_args(["--run-dir", "x"])
-        self.assertEqual(
-            (parsed.candidate_count, parsed.skill_edit_mode, parsed.reviewer_update_mode),
-            (1, "structured", "rules"),
-        )
+        self.assertEqual((parsed.candidate_count, parsed.skill_edit_mode), (1, "structured"))
+        # The Reviewer calibration default follows the acceptance protocol.
+        self.assertIsNone(parsed.reviewer_update_mode)
+        self.assertEqual(L.EvolutionConfig(acceptance_mode="sampled").reviewer_update_mode,
+                         "none")
         self.assertEqual(
             (parsed.acceptance_mode, parsed.predicted_review_scope), ("predicted", "val")
         )

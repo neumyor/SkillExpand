@@ -54,17 +54,33 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 
 ### sampled（协同进化协议）
 
-`l2/sampled.py` 定义该协议，全部实现与旧路径分开：
+`l2/sampled.py` 是该协议在 L2 层的唯一入口：旧模块（`update.py`、`loop.py`、`audit.py`、`cli.py`、`campaign.py`）各只保留一个分发点，协议逻辑全部在新模块中。
 
-1. **声明**：Planner 在 structured edit 之外必须给出 `claim`（`trigger` 触发条件 + `action_change` 动作变化），两项单行、各不超过 400 字符。`claim_id` 由程序计算，写在 batch journal 的 hypothesis 行上，不进入 `Skill` 持久格式；audit 会按文本重算并比对。
-2. **配对 delta 预测**：`evaluation/delta_review.PairedDeltaReviewer` 每题一次调用，输入是"旧规则 → 新规则"这一条改动、改动后的 body 和声明，输出 `trigger_probability` 与 `delta_probability`（配对增量），不再对旧/新 Skill 各报一个绝对成功率再相减。声明、改动、改后 body 都进入缓存身份，换声明即换缓存。
-3. **抽样与修正**：`evaluation/ppi` 从冻结 val panel 中按 panel key + candidate 确定的种子抽取 `--acceptance-sample-size` 道题（该值是上限：panel 更小的 family 全量执行，实际数量记在 `decision.n_sample` 并由 audit 校验），两臂各真实执行一次（旧 head 的结果按 body 缓存复用），用样本上的成对误差修正 panel 全体预测：
-   `Δ̂ = mean_panel(Δ̂_i) + mean_sample(d_i − Δ̂_i)`。
-4. **判定规则**：修正后的单侧置信下界（Student-t，`--acceptance-confidence`，默认 0.9）必须大于 0；比对带 `1e-9` 的舍入保护，避免浮点残差把"零改进"判成改进。Reviewer 越准，样本误差的方差越小，同样置信度需要的执行次数越少。
-5. **独立判定者**：`evaluation/divergence.first_divergence` 在两条执行的动作序列上找首个分歧步；只有存在分歧时才调用 `evaluation/claim_check.TrajectoryVerifier`，它在四种结论中选择（`claim_confirmed` / `claim_not_confirmed` / `unrelated` / `indeterminate`）。判定者冻结、不看成绩、看不到 Reviewer 预测，输入里的 context observation 取自分歧点之前（两臂相同），分歧动作本身产生的 observation 不给出。`--claim-verification off` 关闭该步骤，用于单独度量其贡献。
-6. **两份记忆**：`l2/memory.py` 从 batch journal 派生。Planner 得到"改动层聚合"——各类改动的真实有效率、声明触发与兑现次数、Reviewer 预测与实测的差距；该记录类型只有数字和固定词表，**不含任何 val 题目文本或 task id**。Reviewer 得到检索式案例——被高估（看似有用实则无用）与被低估（看似无用实则有用的）val 题案例，每例附判定结论与实测差值，检索固定为一类一例且排除当前改动与当前题。`--planner-memory-mode`、`--reviewer-memory-mode` 可分别关闭。
+| 模块 | 职责 |
+|---|---|
+| `l2/sampled.py` | 开关与默认值（`DEFAULTS`/`CHOICES`，CLI、campaign、`EvolutionConfig` 共用）、组合校验、claim 解析、接受决策、每轮记忆、journal/summary 字段 |
+| `evaluation/delta_review.py` | 配对 Δ Reviewer |
+| `evaluation/ppi.py` | 抽样与 PPI 估计（纯函数） |
+| `evaluation/divergence.py` | 首个分歧步（纯函数） |
+| `evaluation/claim_check.py` | 独立判定者 |
+| `evaluation/sampled_validation.py` | 单个候选的预测 → 抽检 → 分歧 → 判定 |
+| `l2/ledger.py` | 账本：从 batch journal 派生的 (改动 × 题) 行，以及预注册的 Reviewer 指标 |
+| `l2/memory.py` | 由账本派生的两份记忆 |
+| `l2/sampled_audit.py` | 离线审计（对应实验计划第 7 节的不变量） |
 
-评审记忆只由**当前轮之前**的 batch journal 派生（`before_round`）。每个 batch 的 journal 记录当轮使用的 Planner 记忆文本与 Reviewer 记忆覆盖的候选数，`audit_round` 会重算：Planner 记忆必须逐字符等于账本聚合的结果，Reviewer 记忆必须恰好覆盖更早轮次的提案。
+流程：
+
+1. **声明**：Planner 在 structured edit 之外必须给出 `claim`（`trigger` 触发条件 + `action_change` 动作变化），作为同一份输出 schema 的一个字段。两项单行、各不超过 400 字符。`claim_id` 由程序计算，写在 batch journal 的 hypothesis 与 proposal 行上，不进入 `Skill` 持久格式；audit 按文本重算并比对，并核对每个候选的验收记录引用的正是其 proposal 的 `claim_id`。
+2. **配对 delta 预测**：`PairedDeltaReviewer` 每题一次调用，输入是"旧规则 → 新规则"这一条改动、改动后的 body、声明，以及（开启时）该题的 Reviewer 记忆块；输出 `trigger_probability` 与 `delta_probability`。两侧 body、声明与记忆块都进入缓存键，每行记录 `memory_hash`。
+3. **抽样与修正**：`ppi.select_sample` 从冻结 val panel 中按 panel key + candidate 确定的种子抽取 `--acceptance-sample-size` 道题（上限：panel 更小的 family 全量执行，实际数量记在 `decision.n_sample`），两臂各真实执行一次，用样本上的成对误差修正 panel 全体预测：
+   `Δ̂ = mean_panel(Δ̂_i) + mean_sample(d_i − Δ̂_i)`。`acceptance.executions` 记录真实 episode 数（两臂 × 抽样题数）。
+4. **判定规则**：修正后的单侧置信下界（Student-t，`--acceptance-confidence`，默认 0.9）必须大于 0（带 `1e-9` 舍入保护）。少于 2 个抽样对时无法给出区间，一律 `insufficient_sample`。
+5. **分歧与判定者**：每道抽样题都计算首个分歧步（纯函数，与判定者开关无关）；两条动作序列完全相同而结果不同时，审计判为执行串扰并使该 run 作废。只有存在分歧时才调用 `TrajectoryVerifier`，四类结论（`claim_confirmed` / `claim_not_confirmed` / `unrelated` / `indeterminate`）。判定者输入固定为 `divergence.PAYLOAD_KEYS`：分歧步、之前的共同动作、分歧前（两臂相同）的 observation、两侧动作——**不含轨迹长度等可推出成绩的字段**。`--claim-verification off` 关闭判定者。
+6. **两份记忆**（`l2/memory.py`，只由**当前轮之前**的账本派生）：Planner 得到改动层聚合——各类改动的真实有效率、预测与实测的差距，以及（判定者开启时）"规则被判定者认定触发 n/N、符合声明 n/N"；其渲染不读取任何 val 题目。注意"触发"只算 `claim_confirmed`/`claim_not_confirmed`：轨迹分歧不等于规则触发（`unrelated` 是执行器漂移）。Reviewer 得到检索式案例——高估、低估与正确各优先取一例，排除当前改动与当前题。
+
+sampled 协议**不使用**旧的 train-panel Reviewer 校准：`reviewer_update_mode` 在该协议下默认且只能为 `none`，否则两套学习信号会同时作用于同一个 Reviewer。
+
+每个 batch journal 记录当轮的 `planner_memory` 文本与 `reviewer_memory_version`（Reviewer 记忆覆盖的更早候选数）；审计逐字符重算 Planner 记忆、核对 Reviewer 记忆覆盖范围。round summary 的 `reviewer_metrics` 给出预注册主指标：逐题 Δ-Brier、相对"全部预测 0"基线的 skill score，以及护栏指标（被接受但实测无效的候选数）；审计要求它可由 journal 重算。置信区间需按候选聚类 bootstrap，属于离线分析。
 
 ## 5. test 评测
 

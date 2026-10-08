@@ -17,156 +17,8 @@ from skillexpand.l1.adapters import resolve
 from omegaconf import OmegaConf
 from skillexpand import structured_skill as SS
 from skillexpand.l2 import reviewer_coevolution as RC
+from skillexpand.l2 import sampled_audit
 
-
-
-
-def audit_memories(root, batch):
-    """Both memories must be exactly the views the ledger yields at this round.
-
-    The Planner's memory is checkable in full: it is recomputed here and compared
-    character for character, so any task text that found its way into it would
-    make the two differ.  The Reviewer's is checkable by coverage: it may draw on
-    every proposal from an earlier round and on nothing else.
-    """
-    from skillexpand.l2 import memory as MEM
-
-    round_index = int(batch.get('round', 0))
-    if round_index < 1:
-        return
-    changes = MEM.read_changes(root, before_round=round_index)
-    expected = MEM.PlannerMemory(changes).render()
-    require(batch.get('planner_memory', '') == expected,
-            'journaled Planner memory is not the aggregate the ledger yields')
-    require(batch.get('reviewer_memory_candidates', -1)
-            == len({change.candidate_id for change in changes}),
-            'journaled Reviewer memory does not cover exactly the earlier proposals')
-
-def audit_sampled_batch(batch):
-    """Replay a sampled-acceptance batch from its journal alone.
-
-    Three things must hold, and each of them is a way the protocol could quietly
-    stop being the protocol: the claim must still bind the proposal, the executed
-    subset must be the one the frozen key selects out of the frozen panel, and
-    the recorded decision must be recomputable from the recorded per-task rows.
-    """
-    from skillexpand.evaluation import ppi as PPI
-
-    hypotheses = batch.get('hypotheses', ())
-    require(hypotheses, 'sampled batch recorded no hypotheses')
-    for row in hypotheses:
-        # The claim binds the proposal to what the verifier will check, and its
-        # id is assigned by the program.  A journal that lost or rewrote the
-        # claim cannot be replayed, so the mismatch is fatal here.
-        claim = row.get('claim')
-        require(isinstance(claim, dict), 'sampled hypothesis has no claim')
-        require(set(claim) == {'trigger', 'action_change', 'claim_id'},
-                'sampled claim has an unexpected shape')
-        try:
-            rebuilt = S.Claim(claim['trigger'], claim['action_change'])
-        except (ValueError, TypeError) as exc:
-            require(False, f'sampled claim is invalid: {exc}')
-        require(claim['claim_id'] == rebuilt.claim_id,
-                'claim id does not match the claim text it accompanies')
-    materialized = [row for row in batch.get('proposals', ())
-                    if row.get('edit', {}).get('candidate')]
-    require(all(row.get('claim') is not None for row in materialized),
-            'sampled proposal materialized a candidate without a claim')
-
-    acceptance = batch.get('acceptance') or {}
-    if not materialized:
-        require(not acceptance.get('candidates'),
-                'sampled acceptance scored candidates that were never proposed')
-        return
-    require(acceptance.get('mode') == 'sampled', 'sampled acceptance mode is missing')
-    require(acceptance.get('scope') == 'val', 'sampled acceptance scope is missing')
-    panel = tuple(int(t) for t in acceptance.get('task_ids', ()))
-    require(panel, 'sampled acceptance recorded an empty val panel')
-    require(tuple(sorted(panel)) == panel, 'sampled acceptance panel is not in fixed order')
-    confidence = acceptance.get('confidence')
-    require(isinstance(confidence, (int, float)) and 0.0 < float(confidence) < 1.0,
-            'sampled acceptance recorded an invalid confidence level')
-    sample_size = int(acceptance.get('sample_size', 0))
-    require(sample_size >= 2, 'sampled acceptance recorded an unusable sample size')
-    require(int(acceptance.get('executions', 0)) > 0,
-            'sampled acceptance recorded no executed episode')
-    require(int(acceptance.get('predicted_requests', 0)) > 0,
-            'sampled acceptance recorded no reviewer request')
-
-    proposed = {row['edit']['candidate']['candidate_id'] for row in materialized}
-    results = list(acceptance.get('candidates', ()))
-    require({row.get('candidate_id') for row in results} == proposed,
-            'sampled acceptance does not cover every proposed candidate')
-    for row in results:
-        result = row.get('result') or {}
-        require(tuple(int(t) for t in result.get('panel_task_ids', ())) == panel,
-                'sampled candidate panel differs from the acceptance panel')
-        require(result.get('base_skill_key') == batch['base_skill_key'],
-                'sampled base Skill differs from the batch head')
-        require(result.get('claim_id'),
-                'sampled candidate is not bound to a claim')
-        sample = tuple(int(t) for t in result.get('sample_task_ids', ()))
-        require(sample, 'sampled candidate recorded no executed sample')
-        require(len(set(sample)) == len(sample), 'sampled candidate repeated a task')
-        require(set(sample) <= set(panel),
-                'sampled candidate executed a task outside the frozen panel')
-        expected = PPI.select_sample(panel, sample_size, result.get('sample_key', ''))
-        require(sample == expected,
-                'executed sample is not the one the recorded key selects')
-        # The requested size is a ceiling: a family with a smaller panel is
-        # measured whole, and the recorded count must show that rather than the
-        # requested number.
-        require(int((result.get('decision') or {}).get('n_sample', -1))
-                == PPI.effective_sample_size(len(panel), sample_size),
-                'executed count is not the per-panel effective sample size')
-
-        rows = list(result.get('rows', ()))
-        require([int(r['task_id']) for r in rows] == list(panel),
-                'sampled per-task rows do not cover the panel in fixed order')
-        measured = {int(r['task_id']): float(r['measured_delta'])
-                    for r in rows if r.get('sampled')}
-        require(set(measured) == set(sample),
-                'sampled rows disagree with the executed sample')
-        predictions = {int(r['task_id']): float(r['delta_probability'])
-                       for r in rows}
-        decision = PPI.estimate(predictions, measured, confidence=float(confidence))
-        recorded = result.get('decision') or {}
-        require(bool(recorded.get('accepted')) == decision.accepted,
-                'recorded sampled decision is not the one the rows imply')
-        for key, value in (('point', decision.point), ('lower', decision.lower)):
-            require(abs(float(recorded.get(key, 0.0)) - float(value)) < 1e-9,
-                    f'recorded sampled {key} does not match the recomputed estimate')
-
-        # Attribution is a diagnostic, and two invariants keep it one: it must
-        # only ever describe a difference that was actually observed, and it must
-        # cover every observed difference when it is enabled -- a partial panel
-        # would let the weakest cases drop out.
-        from skillexpand.evaluation.claim_check import CATEGORIES
-
-        enabled = result.get('verification_enabled')
-        require(isinstance(enabled, bool),
-                'sampled result does not record whether verification ran')
-        for task_row in rows:
-            divergence = task_row.get('divergence')
-            verification = task_row.get('verification')
-            if not task_row.get('sampled'):
-                require(divergence is None and verification is None,
-                        'unexecuted task recorded a trajectory difference')
-                continue
-            require(verification is None or divergence is not None,
-                    'verification recorded without an execution difference')
-            if not enabled:
-                require(verification is None,
-                        'verification recorded although it was disabled')
-                continue
-            require((divergence is None) == (verification is None),
-                    'an observed execution difference was left unverified')
-            if verification is not None:
-                require(verification.get('category') in CATEGORIES,
-                        'verifier returned an unknown category')
-                require(isinstance(verification.get('reason'), str)
-                        and verification['reason'].strip(),
-                        'verifier returned an empty reason')
 
 def audit_batch(root, batch, base, cards):
     """Replay cached decisions without any model, environment, or file writes."""
@@ -244,8 +96,7 @@ def audit_batch(root, batch, base, cards):
             require(isinstance(result_value.get('metrics', {}).get('success_delta'), (int, float)),
                     'predicted val candidate lacks success delta')
     if acceptance_mode == 'sampled':
-        audit_sampled_batch(batch)
-        audit_memories(root, batch)
+        sampled_audit.audit_batch(root, batch, config)
     if mode == 'structured':
         candidates = []
         for proposal in batch.get('proposals', []):
@@ -365,7 +216,8 @@ def audit_round(root, round_index):
                 'approval/candidate mismatch')
         require(batch['outcome'] != 'review_approved' or
                 bool(batch['reviews']) or
-                (expected_acceptance_mode == 'predicted' and expected_predicted_scope == 'val'),
+                (expected_acceptance_mode == 'predicted' and expected_predicted_scope == 'val')
+                or expected_acceptance_mode == 'sampled',
                 'approval without reviews')
         audit_batch(root, batch, base, [cards[t] for t in batch['task_ids']])
         require(batch.get('card_hashes'), 'round batch has no card hashes')
@@ -413,6 +265,11 @@ def audit_round(root, round_index):
                 }
                 require(candidate_ids == proposed_ids,
                         'empirical acceptance does not cover every proposed candidate')
+        elif expected_mode == 'sampled':
+            # Coverage, replay and memories were checked by sampled_audit above.
+            require(batch.get('empirically_validated') is False
+                    and batch.get('jev_validated') is False,
+                    'sampled acceptance was mislabeled as another validation')
         else:
             require(batch.get('empirically_validated') is False,
                     'JEV acceptance was mislabeled as empirical validation')
@@ -448,6 +305,8 @@ def audit_round(root, round_index):
         if expected_mode == 'predicted':
             require(summary.get('val_executions') == 0,
                     'val execution leaked into predicted evolution')
+        elif expected_mode == 'sampled':
+            sampled_audit.audit_summary(summary, journals, protocol['config'])
         elif expected_mode == 'jev':
             expected_jev_validated = bool(journals) and all(
                 bool(b.get('acceptance', {}).get('candidates')) for b in journals

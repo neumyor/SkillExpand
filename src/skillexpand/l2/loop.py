@@ -1,6 +1,7 @@
 """Serial train-batch editing with selectable predictive, empirical, or JEV acceptance."""
 
 import json
+from typing import Optional
 from dataclasses import dataclass, replace
 from pathlib import Path
 from skillexpand.runtime import agent_factory as F
@@ -26,12 +27,10 @@ from skillexpand.evaluation.routing import FrozenRoutes
 from skillexpand.evaluation import validation as VA
 from skillexpand.evaluation.jev import JevSkillScorer
 from skillexpand.l2 import reviewer_coevolution as RC
-from skillexpand.l2 import memory as MEM
 from skillexpand.l2 import sampled as SM
 from skillexpand.evaluation.claim_check import TrajectoryVerifier
 from skillexpand.evaluation.delta_review import PairedDeltaReviewer
-from skillexpand.evaluation.sampled_validation import (
-    MIN_SAMPLE_SIZE, SampledDeltaValidator)
+from skillexpand.evaluation.sampled_validation import SampledDeltaValidator
 
 
 @dataclass
@@ -47,13 +46,15 @@ class EvolutionConfig:
     acceptance_mode: str = "predicted"
     predicted_review_scope: str = "val"
     single_candidate: bool = False
-    reviewer_update_mode: str = "rules"
+    #: ``None`` resolves to the protocol's default: the older calibration for the
+    #: older protocols, none for sampled (which has its own Reviewer memory).
+    reviewer_update_mode: Optional[str] = None
     reviewer_feedback_size: int = 0
-    acceptance_sample_size: int = 16
-    acceptance_confidence: float = 0.9
-    claim_verification: str = "on"
-    planner_memory_mode: str = "aggregate"
-    reviewer_memory_mode: str = "cases"
+    acceptance_sample_size: int = SM.DEFAULTS["acceptance_sample_size"]
+    acceptance_confidence: float = SM.DEFAULTS["acceptance_confidence"]
+    claim_verification: str = SM.DEFAULTS["claim_verification"]
+    planner_memory_mode: str = SM.DEFAULTS["planner_memory_mode"]
+    reviewer_memory_mode: str = SM.DEFAULTS["reviewer_memory_mode"]
 
     def __post_init__(self):
         if min(self.batch_size, self.candidate_count, self.evolve_l1_workers,
@@ -69,23 +70,13 @@ class EvolutionConfig:
             raise InvalidInput("Unknown predicted review scope")
         if self.single_candidate and self.candidate_count != 1:
             raise InvalidInput("single_candidate protocol requires candidate_count=1")
+        if self.reviewer_update_mode is None:
+            self.reviewer_update_mode = SM.default_reviewer_update_mode(self.acceptance_mode)
         if self.reviewer_update_mode not in ("none", "summary", "rules"):
             raise InvalidInput("Unknown reviewer update mode")
         if self.reviewer_feedback_size < 0:
             raise InvalidInput("reviewer_feedback_size must be nonnegative")
-        if self.acceptance_sample_size < MIN_SAMPLE_SIZE:
-            raise InvalidInput(
-                f"acceptance_sample_size must be at least {MIN_SAMPLE_SIZE}")
-        if not 0.0 < self.acceptance_confidence < 1.0:
-            raise InvalidInput("acceptance_confidence must lie strictly between 0 and 1")
-        if self.claim_verification not in ("on", "off"):
-            raise InvalidInput("claim_verification must be 'on' or 'off'")
-        if self.planner_memory_mode not in ("off", "aggregate"):
-            raise InvalidInput("Unknown planner memory mode")
-        if self.reviewer_memory_mode not in ("off", "cases"):
-            raise InvalidInput("Unknown reviewer memory mode")
-        # The sampled protocol is only checkable against one rule change.
-        SM.validate_protocol(self.acceptance_mode, self.skill_edit_mode)
+        SM.validate_options(self.to_dict())
 
     def to_dict(self):
         return S.to_dict(self)
@@ -208,39 +199,18 @@ class SerialEvolutionLoop:
         return RC.render_calibration_block(update.summary, rules), update.reviewer_prompt_version
 
 
-
-    def _change_ledger(self, round_index):
-        """Everything the protocol already recorded, from rounds that finished."""
-        return MEM.read_changes(self.paths.root, before_round=round_index)
-
-    def _planner_memory(self, round_index):
-        if (self.config.planner_memory_mode != "aggregate"
-                or self.config.acceptance_mode != "sampled"):
-            return ""
-        return MEM.PlannerMemory(self._change_ledger(round_index)).render()
-
-    def _reviewer_memory(self, round_index):
-        if (self.config.reviewer_memory_mode != "cases"
-                or self.config.acceptance_mode != "sampled"):
-            return None
-        changes = self._change_ledger(round_index)
-        if not changes:
-            return None
-        return MEM.ReviewerMemory.build(
-            changes, task_text=lambda task_id: F.task_text_of(self.cfg, task_id))
-
-    def _ensure_sampled_validator(self, round_index):
+    def _ensure_sampled_validator(self, round_index, reviewer_memory):
         """Paired delta predictions corrected by a random val sample.
 
         Rebuilt when the round changes, because the Reviewer's memory is drawn
         from the rounds that finished before this one.
         """
-        if self.config.acceptance_mode != "sampled":
+        if self.config.acceptance_mode != SM.MODE:
             return None
         if (self.sampled_validator is not None
                 and self.sampled_validator_round == round_index):
             return self.sampled_validator
-        self.sampled_routes = FrozenRoutes(
+        routes = FrozenRoutes(
             self.cfg, self.plan, self.initial, self.paths.root / "routes",
             S.SPLIT_VAL, self.config.l2_review_workers
         ).run()
@@ -249,19 +219,17 @@ class SerialEvolutionLoop:
             # Ordinary configured L2 reviewer model, same as the older protocols.
             return self._reasoning_host("l2_reviewer", usage_path)
 
-        reviewer_memory = self._reviewer_memory(round_index)
         reviewer = PairedDeltaReviewer(
             self.cfg,
-            self.sampled_routes,
+            routes,
             VA.ScoreCache(self.paths.root / "val" / "delta_predictions.jsonl"),
             self.config.l2_review_workers,
             host_factory=host_factory,
-            memory_version=(getattr(reviewer_memory, "version", 0)),
         )
         executor = VA.FixedSkillScorer(
             self.cfg,
             VA.ScoreCache(self.paths.root / "val" / "sampled_scores.jsonl"),
-            self.sampled_routes,
+            routes,
             self.config.l2_review_workers,
         )
         verifier = None
@@ -276,7 +244,7 @@ class SerialEvolutionLoop:
                 host_factory=verifier_factory,
             )
         self.sampled_validator = SampledDeltaValidator(
-            self.cfg, self.sampled_routes, reviewer, executor,
+            self.cfg, routes, reviewer, executor,
             sample_size=self.config.acceptance_sample_size,
             confidence=self.config.acceptance_confidence,
             verifier=verifier,
@@ -421,7 +389,11 @@ class SerialEvolutionLoop:
                     self.paths.root / "usage" / f"reviewer-{skill.skill_id}-{card_key}.json")
                 return CardReviewer(host)
 
-        planner_memory = self._planner_memory(batch["round"])
+        planner_memory, reviewer_memory = "", None
+        if self.config.acceptance_mode == SM.MODE:
+            planner_memory, reviewer_memory = SM.round_memories(
+                self.paths.root, batch["round"], self.config,
+                task_text=lambda task_id: F.task_text_of(self.cfg, task_id))
         runner = UP.SkillPatchRunner(
             ED.SkillEditor(planner_host, self.config.skill_edit_mode,
                            editor_host=editor_host),
@@ -433,7 +405,8 @@ class SerialEvolutionLoop:
             val_scorer=self._ensure_val_scorer(),
             jev_scorer=self._ensure_jev_scorer(),
             predicted_scorer=self._ensure_predicted_scorer(),
-            sampled_validator=self._ensure_sampled_validator(batch["round"]),
+            sampled_validator=self._ensure_sampled_validator(batch["round"],
+                                                             reviewer_memory),
             single_candidate=self.config.single_candidate,
             planner_memory=planner_memory,
         )
@@ -455,10 +428,8 @@ class SerialEvolutionLoop:
             candidate=S.to_dict(result.candidate) if result.candidate else None,
             # Recorded so the audit can recompute what each memory held rather
             # than take its absence of leaked task text on trust.
-            planner_memory=planner_memory,
-            reviewer_memory_candidates=len({
-                change.candidate_id
-                for change in self._change_ledger(batch["round"])}),
+            **(SM.journal_fields(planner_memory, reviewer_memory)
+               if self.config.acceptance_mode == SM.MODE else {}),
         )
         save(path, value)
         self._restore(value)
@@ -839,23 +810,12 @@ class SerialEvolutionLoop:
             "jev_requests": sum(
                 int(r.get("acceptance", {}).get("jev_requests", 0)) for r in records
             ),
-            "planner_memory_mode": self.config.planner_memory_mode,
-            "reviewer_memory_mode": self.config.reviewer_memory_mode,
-            "claim_verification": self.config.claim_verification,
-            "sampled_candidates": sum(
-                len(r.get("acceptance", {}).get("candidates", ()))
-                for r in records
-                if r.get("acceptance", {}).get("mode") == "sampled"
-            ),
-            "sampled_executions": sum(
-                int(r.get("acceptance", {}).get("executions", 0))
-                for r in records
-                if r.get("acceptance", {}).get("mode") == "sampled"
-            ),
             "predicted_val_requests": sum(
                 int(r.get("acceptance", {}).get("predicted_requests", 0))
                 for r in records
             ),
             "description_frozen": True,
             "l3_enabled": False,
+            **(SM.summary_fields(self.config, records)
+               if self.config.acceptance_mode == SM.MODE else {}),
         }

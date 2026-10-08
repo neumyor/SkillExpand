@@ -21,16 +21,26 @@ from skillexpand.evaluation import ppi as PPI
 from skillexpand.evaluation import validation as V
 from skillexpand.evaluation.delta_review import PairedDeltaReviewer
 from skillexpand.evaluation.claim_check import CATEGORIES, TrajectoryVerifier
-from skillexpand.evaluation.divergence import action_sequence, first_divergence
+from skillexpand.evaluation.divergence import PAYLOAD_KEYS, action_sequence, first_divergence
 from skillexpand.evaluation.sampled_validation import SampledDeltaValidator
 from skillexpand.runtime import agent_factory as F
 from skillexpand.persistence.io import AuditFailure
 from skillexpand import campaign as C
 from skillexpand.reliability.errors import FrozenProtocolChanged, InvalidInput
-from skillexpand.l2.audit import audit_memories, audit_sampled_batch
+from skillexpand.l2 import ledger as LED
 from skillexpand.l2 import memory as MEM
+from skillexpand.l2 import sampled_audit as SA
 
 EVIDENCE_ID = 't1:e1'
+
+#: The frozen protocol switches the offline audits replay against.
+CONFIG = dict(SM.DEFAULTS, acceptance_sample_size=4)
+
+
+def audit(root, record, round_index=1):
+    """Audit a runner record as the loop journals it (round and memories added)."""
+    SA.audit_batch(root, dict(record, round=round_index, planner_memory='',
+                              reviewer_memory_version=0), CONFIG)
 
 
 def fake_experience(task_id=1, body_claims=()):
@@ -150,17 +160,25 @@ class ClaimTests(unittest.TestCase):
         experience = fake_experience()
 
         editor.plan(base, [experience], 1, batch_patterns=())
-        self.assertNotIn('falsifiable claim', host.prompt)
+        self.assertNotIn('action_change', host.prompt)
 
         editor.plan(base, [experience], 1, batch_patterns=(), claim_required=True)
-        self.assertIn('falsifiable claim', host.prompt)
-        self.assertIn('action_change', host.prompt)
+        # The claim sits inside the structured hard schema, not in a second one.
+        self.assertIn('"change":"...",' + SM.CLAIM_FIELD, host.prompt)
 
-    def test_sampled_requires_structured_editing(self):
-        SM.validate_protocol('sampled', 'structured')
-        SM.validate_protocol('predicted', 'rewrite')
-        with self.assertRaises(InvalidInput):
-            SM.validate_protocol('sampled', 'rewrite')
+    def test_sampled_requires_structured_editing_and_no_train_calibration(self):
+        def options(**overrides):
+            return {**SM.DEFAULTS, 'acceptance_mode': 'sampled',
+                    'skill_edit_mode': 'structured', 'reviewer_update_mode': 'none',
+                    **overrides}
+
+        SM.validate_options(options())
+        SM.validate_options(options(acceptance_mode='predicted', skill_edit_mode='rewrite',
+                                    reviewer_update_mode='rules'))
+        for bad in ({'skill_edit_mode': 'rewrite'}, {'reviewer_update_mode': 'rules'},
+                    {'acceptance_sample_size': 1}, {'claim_verification': 'maybe'}):
+            with self.subTest(**bad), self.assertRaises(InvalidInput):
+                SM.validate_options(options(**bad))
 
 
 class SamplingEstimateTests(unittest.TestCase):
@@ -456,14 +474,15 @@ class SampledBatchJournalTests(unittest.TestCase):
                              'open it before placing the object')
         self.planner = _PlannerHost(self.claim)
 
-    def journal(self, *, delta=0.6, improvement=(1, 3, 5, 7, 9), sample_size=4):
+    def journal(self, *, delta=0.6, improvement=(1, 3, 5, 7, 9), sample_size=4,
+                verifier=None):
         reviewer = PairedDeltaReviewer(
             SimpleNamespace(benchmark=SimpleNamespace(name='searchqa', task_file='x')),
             self.routes, V.ScoreCache(self.root / 'predictions.jsonl'), workers=1,
             host_factory=lambda task_id, usage_path: StubReviewHost(delta=delta))
         validator = SampledDeltaValidator(
             SimpleNamespace(), self.routes, reviewer, StubExecutor(improvement),
-            sample_size=sample_size, confidence=0.9)
+            sample_size=sample_size, confidence=0.9, verifier=verifier)
         runner = UP.SkillPatchRunner(
             SkillEditor(self.planner, skill_edit_mode='structured'), None,
             self.root / 'l2_proposals', acceptance_mode='sampled',
@@ -482,13 +501,13 @@ class SampledBatchJournalTests(unittest.TestCase):
         claim = result.record['hypotheses'][0]['claim']
         self.assertEqual(claim['claim_id'], self.claim.claim_id)
         self.assertEqual(result.record['proposals'][0]['claim'], claim)
-        audit_sampled_batch(result.record)
+        audit(self.root, result.record)
 
     def test_a_change_the_sample_contradicts_is_rejected(self):
         result = self.journal(delta=0.9, improvement=())
         self.assertIsNone(result.candidate)
         self.assertEqual(result.record['outcome'], 'hold')
-        audit_sampled_batch(result.record)
+        audit(self.root, result.record)
 
     def test_the_audit_rejects_a_sample_that_the_key_does_not_select(self):
         result = self.journal()
@@ -496,14 +515,14 @@ class SampledBatchJournalTests(unittest.TestCase):
         row = batch['acceptance']['candidates'][0]['result']
         row['sample_task_ids'] = [t for t in PANEL if t not in row['sample_task_ids']][:4]
         with self.assertRaises(AuditFailure):
-            audit_sampled_batch(batch)
+            audit(self.root, batch)
 
     def test_the_audit_rejects_a_decision_the_rows_contradict(self):
         result = self.journal()
         batch = json.loads(json.dumps(result.record))
         batch['acceptance']['candidates'][0]['result']['decision']['accepted'] = False
         with self.assertRaises(AuditFailure):
-            audit_sampled_batch(batch)
+            audit(self.root, batch)
 
     def test_a_later_round_learns_only_from_journaled_earlier_ones(self):
         first = self.journal()
@@ -511,7 +530,7 @@ class SampledBatchJournalTests(unittest.TestCase):
         batches.mkdir(exist_ok=True)
         (batches / 'r1.json').write_text(json.dumps(dict(first.record, round=1)))
 
-        changes = MEM.read_changes(self.root, before_round=2)
+        changes = LED.read_changes(self.root, before_round=2)
         self.assertEqual(len(changes), 1)
         # The scripted Planner adds a Conditions rule, which is the type the
         # ledger must report and the history must be grouped by.
@@ -519,20 +538,19 @@ class SampledBatchJournalTests(unittest.TestCase):
         memory = MEM.PlannerMemory(changes).render()
         self.assertIn('conditions/add', memory)
 
-        batch = {'round': 2, 'planner_memory': memory,
-                 'reviewer_memory_candidates': 1}
-        audit_memories(self.root, batch)
+        batch = {'round': 2, 'planner_memory': memory, 'reviewer_memory_version': 1}
+        SA.audit_memories(self.root, batch, CONFIG)
         # The same ledger read without the round filter would describe a panel
         # the next round has not seen yet, so the audit must notice.
         with self.assertRaises(AuditFailure):
-            audit_memories(self.root, dict(batch, reviewer_memory_candidates=0))
+            SA.audit_memories(self.root, dict(batch, reviewer_memory_version=0), CONFIG)
 
     def test_the_audit_rejects_a_batch_without_claims(self):
         result = self.journal()
         batch = json.loads(json.dumps(result.record))
         batch['hypotheses'][0].pop('claim')
         with self.assertRaises(AuditFailure):
-            audit_sampled_batch(batch)
+            audit(self.root, batch)
 
 
 class DivergenceTests(unittest.TestCase):
@@ -553,7 +571,8 @@ class DivergenceTests(unittest.TestCase):
         self.assertEqual(divergence.candidate_action, 'take')
         self.assertEqual(divergence.prefix_actions, ('search', 'open'))
         self.assertEqual(divergence.context_observation, 'after open')
-        self.assertEqual((divergence.base_steps, divergence.candidate_steps), (3, 4))
+        # Nothing that reveals how either run ended reaches the verifier.
+        self.assertEqual(tuple(divergence.payload()), PAYLOAD_KEYS)
 
     def test_a_run_that_stops_earlier_is_a_divergence(self):
         divergence = first_divergence(self.events(['a', 'b']), self.events(['a']))
@@ -664,28 +683,26 @@ class VerificationTests(unittest.TestCase):
         self.assertTrue(all(row['verification'] is None for row in result.rows))
 
     def test_the_audit_requires_a_verdict_for_every_observed_difference(self):
-        validator = self.validator(verifier=self.verifier(StubVerifyHost()))
-        result = validator.validate(self.base, self.candidate, self.claim,
-                                    'panel', 'sample-key').to_dict()
-        batch = {
-            'base_skill_key': self.base.key,
-            'hypotheses': [dict(hypothesis(), claim=self.claim.to_dict())],
-            'proposals': [{'claim': self.claim.to_dict(),
-                           'edit': {'candidate': {'candidate_id': 'c1'}}}],
-            'acceptance': {'mode': 'sampled', 'scope': 'val',
-                           'task_ids': list(PANEL), 'sample_size': 4,
-                           'confidence': 0.9, 'executions': 4,
-                           'predicted_requests': len(PANEL),
-                           'candidates': [{'candidate_id': 'c1', 'result': result}]},
-        }
-        audit_sampled_batch(batch)
-        stripped = json.loads(json.dumps(batch))
+        journals = SampledBatchJournalTests('journal')
+        journals.setUp()
+        record = journals.journal(verifier=self.verifier(StubVerifyHost())).record
+        audit(journals.root, record)
+        stripped = json.loads(json.dumps(record))
         rows = stripped['acceptance']['candidates'][0]['result']['rows']
         target = next(row for row in rows if row['verification'] is not None)
         target['verification'] = None
         with self.assertRaises(AuditFailure):
-            audit_sampled_batch(stripped)
+            audit(journals.root, stripped)
 
+    def test_the_audit_rejects_identical_trajectories_with_different_outcomes(self):
+        journals = SampledBatchJournalTests('journal')
+        journals.setUp()
+        record = json.loads(json.dumps(journals.journal().record))
+        rows = record['acceptance']['candidates'][0]['result']['rows']
+        target = next(row for row in rows if row['divergence'] is not None)
+        target['divergence'] = None
+        with self.assertRaises(AuditFailure):
+            audit(journals.root, record)
 
 def change_row(task_id, predicted, measured, *, sampled=True, diverged=False,
                category=None):
@@ -703,7 +720,8 @@ def ledger_journal(round_index, candidate_id, *, section='conditions', op='ADD',
         'round': round_index, 'batch_id': f'b{round_index}-{candidate_id}',
         'family_id': 'f', 'task_ids': [0, 1],
         'hypotheses': [{'claim': {'trigger': trigger, 'action_change': 'open it'}}],
-        'proposals': [{'edit': {'candidate': {'candidate_id': candidate_id,
+        'proposals': [{'claim': {'trigger': trigger, 'action_change': 'open it'},
+                       'edit': {'candidate': {'candidate_id': candidate_id,
                                               'edits': [{'op': op, 'section': section,
                                                          'target_id': None,
                                                          'text': 'rule'}]}}}],
@@ -730,9 +748,9 @@ class MemoryTests(unittest.TestCase):
     def test_the_ledger_is_read_oldest_first_and_only_before_a_round(self):
         root = self.root_with([ledger_journal(2, 'c2'), ledger_journal(1, 'c1'),
                                ledger_journal(3, 'c3')])
-        changes = MEM.read_changes(root, before_round=2)
+        changes = LED.read_changes(root, before_round=2)
         self.assertEqual([change.candidate_id for change in changes], ['c1'])
-        self.assertEqual([change.candidate_id for change in MEM.read_changes(root)],
+        self.assertEqual([change.candidate_id for change in LED.read_changes(root)],
                          ['c1', 'c2', 'c3'])
 
     def test_a_change_is_classified_by_what_the_sample_measured(self):
@@ -744,8 +762,8 @@ class MemoryTests(unittest.TestCase):
             ledger_journal(1, 'c3', accepted=False, rows=[change_row(0, 0.6, 0.5),
                                                           change_row(1, 0.6, 0.3)]),
         ])
-        verdicts = {change.candidate_id: change.verdict
-                    for change in MEM.read_changes(root)}
+        verdicts = {change.candidate_id: MEM.verdict(change)
+                    for change in LED.read_changes(root)}
         self.assertEqual(verdicts, {'c1': MEM.VERDICT_EFFECTIVE,
                                     'c2': MEM.VERDICT_NO_EFFECT,
                                     'c3': MEM.VERDICT_INSUFFICIENT})
@@ -757,7 +775,7 @@ class MemoryTests(unittest.TestCase):
             ledger_journal(1, 'c2', section='procedure', op='EDIT', accepted=False,
                            rows=[change_row(0, 0.6, 0.0), change_row(1, 0.6, 0.0)]),
         ])
-        text = MEM.PlannerMemory(MEM.read_changes(root)).render()
+        text = MEM.PlannerMemory(LED.read_changes(root)).render()
         self.assertIn('conditions/add', text)
         self.assertIn('procedure/replace', text)
         self.assertIn('no measured effect', text)
@@ -768,11 +786,10 @@ class MemoryTests(unittest.TestCase):
 
     def test_an_empty_ledger_renders_no_memory(self):
         self.assertEqual(MEM.PlannerMemory(()).render(), '')
-        self.assertTrue(MEM.PlannerMemory(()).empty)
 
     def reviewer_memory(self, root):
         return MEM.ReviewerMemory.build(
-            MEM.read_changes(root), task_text=lambda task_id: f'Task {task_id}.')
+            LED.read_changes(root), task_text=lambda task_id: f'Task {task_id}.')
 
     def test_the_reviewer_memory_keeps_over_and_under_estimates_as_cases(self):
         root = self.root_with([
@@ -832,15 +849,37 @@ class MemoryTests(unittest.TestCase):
 
     def test_the_audit_recomputes_what_the_planner_memory_held(self):
         root = self.root_with([ledger_journal(1, 'c1')])
-        changes = MEM.read_changes(root)
+        changes = LED.read_changes(root)
         batch = {'round': 2, 'planner_memory': MEM.PlannerMemory(changes).render(),
-                 'reviewer_memory_candidates': 1}
-        audit_memories(root, batch)
+                 'reviewer_memory_version': 1}
+        SA.audit_memories(root, batch, CONFIG)
         leaked = dict(batch, planner_memory=batch['planner_memory'] + '\nquestion 0')
         with self.assertRaises(AuditFailure):
-            audit_memories(root, leaked)
+            SA.audit_memories(root, leaked, CONFIG)
         with self.assertRaises(AuditFailure):
-            audit_memories(root, dict(batch, reviewer_memory_candidates=2))
+            SA.audit_memories(root, dict(batch, reviewer_memory_version=2), CONFIG)
+
+    def test_claim_statistics_count_only_rules_the_verifier_implicated(self):
+        rows = [change_row(0, 0.6, 1.0, diverged=True, category='claim_confirmed'),
+                change_row(1, 0.6, 0.0, diverged=True, category='unrelated'),
+                change_row(2, 0.6, 0.0)]
+        root = self.root_with([ledger_journal(1, 'c1', rows=rows)])
+        change = LED.read_changes(root)[0]
+        # A divergence the verifier calls unrelated is executor drift, not a firing.
+        self.assertEqual(MEM.claim_counts(change), (3, 1, 1))
+        self.assertIn('rule fired 1/3', MEM.PlannerMemory((change,)).render())
+        self.assertNotIn('rule fired', MEM.PlannerMemory(
+            (change,), claims_verified=False).render())
+
+    def test_reviewer_metrics_compare_against_predicting_no_effect(self):
+        rows = [change_row(0, 0.5, 1.0), change_row(1, 0.0, 0.0)]
+        root = self.root_with([ledger_journal(1, 'c1', accepted=True, rows=rows)])
+        metrics = LED.reviewer_metrics(LED.read_changes(root))
+        self.assertEqual(metrics['sampled_pairs'], 2)
+        self.assertAlmostEqual(metrics['delta_brier'], 0.125)
+        self.assertAlmostEqual(metrics['delta_brier_zero_baseline'], 0.5)
+        self.assertAlmostEqual(metrics['delta_brier_skill'], 0.75)
+        self.assertEqual((metrics['accepted'], metrics['false_accepts']), (1, 0))
 
 
 class SampledCampaignTests(unittest.TestCase):

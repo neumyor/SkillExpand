@@ -59,7 +59,7 @@ SearchQA 需要 `--task-file`；ALFWorld 正式执行必须使用 `.env` 中的 
   --planner-memory-mode aggregate --reviewer-memory-mode cases
 ```
 
-`--claim-verification off`、`--planner-memory-mode off`、`--reviewer-memory-mode off` 分别关闭判定者、Planner 记忆与 Reviewer 记忆，用于单因素消融。`--acceptance-sample-size` 是按 family 自适应的上限：panel 更小的 family 全量执行；panel 少于 2 题时无法给出置信区间，候选一律拒绝并记为 `insufficient_sample`。
+`--claim-verification off`、`--planner-memory-mode off`、`--reviewer-memory-mode off` 分别关闭判定者、Planner 记忆与 Reviewer 记忆，用于单因素消融。sampled 协议下 `--reviewer-update-mode` 默认为 `none`（旧的 train-panel 校准与 Reviewer 案例记忆不能同时启用）；其它协议默认仍为 `rules`。`--acceptance-sample-size` 是按 family 自适应的上限：panel 更小的 family 全量执行；panel 少于 2 题时无法给出置信区间，候选一律拒绝并记为 `insufficient_sample`。
 
 structured Skill 编辑可在冷启动和 Evolve 中保持一致地启用：
 
