@@ -320,12 +320,21 @@ def verify(root):
     if (manifest['concurrency'] != CONCURRENCY or
             manifest['evolve_rounds'] != 2 or
             manifest['skill_edit_mode'] not in ('rewrite', 'structured') or
-            manifest['acceptance_mode'] not in ('predicted', 'empirical', 'jev') or
+            manifest['acceptance_mode'] not in ('predicted', 'empirical', 'jev',
+                                                'sampled') or
             manifest['predicted_review_scope'] not in ('val', 'train_cards') or
             int(manifest['autonomous_attempts']) < 1 or
             int(manifest['supervised_attempts']) < 0 or
             manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
         raise FrozenProtocolChanged('Unexpected campaign protocol')
+    if manifest['acceptance_mode'] == 'sampled':
+        if (int(manifest['acceptance_sample_size']) < MIN_SAMPLE_SIZE
+                or not 0.0 < float(manifest['acceptance_confidence']) < 1.0
+                or manifest['skill_edit_mode'] != 'structured'
+                or manifest['claim_verification'] not in ('on', 'off')
+                or manifest['planner_memory_mode'] not in ('off', 'aggregate')
+                or manifest['reviewer_memory_mode'] not in ('off', 'cases')):
+            raise FrozenProtocolChanged('Unexpected sampled acceptance protocol')
     for key, kind in (('python', 'file'), ('overlay', 'dir'), ('alfworld_data', 'dir'),
                       ('alfworld_config', 'file'), ('alfworld_bench_src', 'dir')):
         path = Path(manifest[key])
@@ -429,7 +438,8 @@ def stage_args(root, mode, benchmark, stage):
         '--candidate-count', str(manifest['candidate_count']), '--resume']
     args += ['--skill-edit-mode', manifest['skill_edit_mode']]
     args += ['--acceptance-mode', manifest['acceptance_mode']]
-    args += ['--predicted-review-scope', manifest['predicted_review_scope']]
+    if manifest['acceptance_mode'] == 'predicted':
+        args += ['--predicted-review-scope', manifest['predicted_review_scope']]
     if manifest['single_candidate']:
         args += ['--single-candidate']
     args += ['--reviewer-update-mode', manifest['reviewer_update_mode']]
@@ -663,6 +673,69 @@ PROBE_CORRECTION = (
     'evidence ID and one changed rule ID.')
 
 
+def sampled_contract_probe(root, benchmark, run, cfg):
+    """Validate the sampled protocol's two model contracts on the preflight run.
+
+    The card-Reviewer probe covers a component this protocol never calls, and the
+    preflight stage may propose nothing at all -- in which case its Reviewer and
+    verifier are never invoked.  A long run must not be the first thing that
+    discovers either contract cannot be satisfied.
+    """
+    from types import SimpleNamespace
+    from skillexpand import schema as S
+    from skillexpand import structured_skill as SS
+    from skillexpand.evaluation import validation as VA
+    from skillexpand.evaluation.claim_check import TrajectoryVerifier
+    from skillexpand.evaluation.delta_review import PairedDeltaReviewer
+    from skillexpand.evaluation.divergence import first_divergence
+    from skillexpand.runtime import agent_factory as F
+
+    skills = [S.from_dict(S.Skill, item) for item in read(run / 'initial_skills.json')]
+    base = sorted(skills, key=lambda item: item.skill_id)[0]
+    body = SS.render(SS.apply_edit(
+        SS.from_legacy(base.body),
+        {'op': 'add', 'section': 'completion_checks', 'target_id': None,
+         'text': 'Before submitting, restate the requested answer type.'}))
+    candidate = S.Skill(base.skill_id, base.family_id, base.version + 1, base.name,
+                        base.description, body)
+    claim = S.Claim('the task asks for a named entity',
+                    'state the answer type before submitting')
+    groups = read(run / 'routes' / 'val' / 'complete.json')['groups']
+    task_ids = tuple(int(t) for t in groups.get(base.skill_id, ()))
+    if not task_ids:
+        assignment = read(root / 'inputs' / f'{benchmark}-preflight-split.json')['assignment']
+        task_ids = tuple(sorted(int(t) for t, part in assignment.items()
+                                if part == 'val'))[:1]
+    if not task_ids:
+        raise AuditFailure(f'{benchmark}: preflight has no val task to probe with')
+    directory = root / 'preflight' / 'sampled-probe'
+    routes = SimpleNamespace(groups={base.skill_id: task_ids},
+                             fingerprint='preflight-probe')
+    panel_key = f'probe:{benchmark}'
+    reviewer = PairedDeltaReviewer(
+        cfg, routes, VA.ScoreCache(directory / f'{benchmark}-reviewer.jsonl'), workers=1,
+        host_factory=lambda task_id, usage_path: F.build_reasoning_host(
+            cfg, usage_path, role='l2_reviewer'))
+    prediction = reviewer.predict(base, candidate, claim, task_ids, panel_key)
+    verifier = TrajectoryVerifier(
+        cfg, VA.ScoreCache(directory / f'{benchmark}-verifier.jsonl'), workers=1,
+        host_factory=lambda task_id, usage_path: F.build_reasoning_host(
+            cfg, usage_path, role='l2_verifier'))
+    divergence = first_divergence(
+        ({'action': 'Search[first clue]', 'observation': 'a result'},),
+        ({'action': 'Lookup[second clue]', 'observation': 'a result'},))
+    verdict = verifier.verify(
+        task_ids[0],
+        {'section': 'completion_checks', 'rule_id': 'V2', 'op': 'add', 'before': None,
+         'after': 'Before submitting, restate the requested answer type.'},
+        claim, divergence, panel_key)
+    report = {'tasks': list(task_ids), 'mean_delta': prediction.mean_delta,
+              'mean_trigger': prediction.mean_trigger,
+              'verifier_category': verdict['category']}
+    save(directory / f'{benchmark}.json', report)
+    return report
+
+
 def independent_checks(root):
     """Resume, reviewer-format and frozen-plan checks required before a full launch.
 
@@ -733,6 +806,12 @@ def independent_checks(root):
                              'reviewer_candidates': len(judgments),
                              'reviewer_format_correction': corrected,
                              'full_plan': plan}
+        # The sampled protocol never calls the card reviewer probed above, and
+        # the preflight stage may propose nothing at all -- so its own reviewer
+        # and verifier contracts are checked here instead.
+        if manifest['acceptance_mode'] == 'sampled':
+            checks[benchmark]['sampled_contracts'] = sampled_contract_probe(
+                root, benchmark, run, cfg)
     save(root / 'preflight/independent-checks.json',
          {'status': 'passed', 'manifest_hash': digest(root / 'manifest.json'), 'checks': checks})
     return checks

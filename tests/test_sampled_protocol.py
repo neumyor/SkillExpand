@@ -25,6 +25,8 @@ from skillexpand.evaluation.divergence import action_sequence, first_divergence
 from skillexpand.evaluation.sampled_validation import SampledDeltaValidator
 from skillexpand.runtime import agent_factory as F
 from skillexpand.persistence.io import AuditFailure
+from skillexpand import campaign as C
+from skillexpand.reliability.errors import FrozenProtocolChanged, InvalidInput
 from skillexpand.l2.audit import audit_memories, audit_sampled_batch
 from skillexpand.l2 import memory as MEM
 
@@ -157,7 +159,7 @@ class ClaimTests(unittest.TestCase):
     def test_sampled_requires_structured_editing(self):
         SM.validate_protocol('sampled', 'structured')
         SM.validate_protocol('predicted', 'rewrite')
-        with self.assertRaises(ValueError):
+        with self.assertRaises(InvalidInput):
             SM.validate_protocol('sampled', 'rewrite')
 
 
@@ -814,6 +816,85 @@ class MemoryTests(unittest.TestCase):
             audit_memories(root, leaked)
         with self.assertRaises(AuditFailure):
             audit_memories(root, dict(batch, reviewer_memory_candidates=2))
+
+
+class SampledCampaignTests(unittest.TestCase):
+    """A campaign must freeze the whole protocol before any stage runs."""
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp())
+        overlay = tmp / 'overlay'
+        overlay.mkdir()
+        config = tmp / 'alfred.pddl.yaml'
+        config.write_text('{}')
+        patcher = patch.dict('os.environ', {
+            'EXPE_LLM_MODEL': 'stub-model',
+            'EXPE_LLM_BASE_URL': 'http://127.0.0.1:1/v1',
+            'ALFWORLD_PYTHON': '/usr/bin/true',
+            'EXPE_CAMPAIGN_OVERLAY': str(overlay),
+            'ALFWORLD_DATA': str(overlay),
+            'ALFWORLD_CONFIG': str(config),
+            'ALFWORLD_BENCH_SRC': str(overlay),
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.inputs = tmp / 'inputs'
+        self.inputs.mkdir()
+        tasks = [{'task': f'Question {i}?', 'env_kwargs': {'key': f'answer {i}'}}
+                 for i in range(8)]
+        assignment = {str(i): ('train' if i < 4 else 'val' if i < 6 else 'test')
+                      for i in range(8)}
+        for name in ('searchqa', 'alfworld'):
+            (self.inputs / f'{name}-tasks.json').write_text(json.dumps(tasks))
+            (self.inputs / f'{name}-split.json').write_text(
+                json.dumps({'assignment': assignment}))
+        self.root = tmp / 'campaign'
+
+    def prepare(self, **overrides):
+        options = dict(skill_edit_mode='structured', acceptance_mode='sampled',
+                       candidate_count=1, single_candidate=True,
+                       acceptance_sample_size=4, claim_verification='on',
+                       planner_memory_mode='aggregate', reviewer_memory_mode='cases')
+        options.update(overrides)
+        return C.prepare(self.root, self.inputs, **options)
+
+    def test_the_manifest_freezes_every_switch_and_the_role_map(self):
+        self.prepare()
+        manifest = json.loads((self.root / 'manifest.json').read_text())
+        self.assertEqual(manifest['acceptance_mode'], 'sampled')
+        self.assertEqual((manifest['acceptance_sample_size'],
+                          manifest['acceptance_confidence']), (4, 0.9))
+        self.assertEqual(manifest['claim_verification'], 'on')
+        self.assertEqual((manifest['planner_memory_mode'],
+                          manifest['reviewer_memory_mode']), ('aggregate', 'cases'))
+        self.assertEqual(set(manifest['models']), set(C.ROLES))
+        self.assertIn('l2_verifier', manifest['models'])
+
+    def test_the_stage_arguments_carry_the_protocol(self):
+        self.prepare()
+        args = C.stage_args(self.root, 'preflight', 'searchqa', 'evolve-1')
+        for flag, value in (('--acceptance-mode', 'sampled'),
+                            ('--acceptance-sample-size', '4'),
+                            ('--acceptance-confidence', '0.9'),
+                            ('--claim-verification', 'on'),
+                            ('--planner-memory-mode', 'aggregate'),
+                            ('--reviewer-memory-mode', 'cases')):
+            self.assertEqual(args[args.index(flag) + 1], value, flag)
+        self.assertIn('--l2-verifier-model', args)
+        self.assertNotIn('--predicted-review-scope', args)
+
+    def test_a_tampered_manifest_is_rejected_before_any_stage(self):
+        self.prepare()
+        path = self.root / 'manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['acceptance_sample_size'] = 1
+        path.write_text(json.dumps(manifest))
+        with self.assertRaises(FrozenProtocolChanged):
+            C.verify(self.root)
+
+    def test_the_sampled_protocol_requires_structured_editing(self):
+        with self.assertRaises(InvalidInput):
+            self.prepare(skill_edit_mode='rewrite')
 
 
 if __name__ == '__main__':

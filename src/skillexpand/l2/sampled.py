@@ -15,6 +15,8 @@ claim the reviewer can only judge the edit as a whole, and the verifier has
 nothing to confirm or refute.
 """
 
+from skillexpand.reliability.errors import InvalidInput
+
 PROTOCOL = 'sampled-delta-acceptance-v1'
 
 #: Appended to the Planner's system prompt when the claim is required.  It
@@ -51,7 +53,7 @@ def validate_protocol(acceptance_mode: str, skill_edit_mode: str) -> None:
     if acceptance_mode != 'sampled':
         return
     if skill_edit_mode != 'structured':
-        raise ValueError(
+        raise InvalidInput(
             'sampled acceptance requires skill_edit_mode=structured: the paired '
             'delta and its claim are defined over one added or replaced rule')
 
