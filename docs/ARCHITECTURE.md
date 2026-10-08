@@ -80,7 +80,7 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 
 sampled 协议**不使用**旧的 train-panel Reviewer 校准：`reviewer_update_mode` 在该协议下默认且只能为 `none`，否则两套学习信号会同时作用于同一个 Reviewer。
 
-每个 batch journal 记录当轮的 `planner_memory` 文本与 `reviewer_memory_version`（Reviewer 记忆覆盖的更早候选数）；审计逐字符重算 Planner 记忆、核对 Reviewer 记忆覆盖范围。round summary 的 `reviewer_metrics` 给出预注册主指标：逐题 Δ-Brier、相对"全部预测 0"基线的 skill score，以及护栏指标（被接受但实测无效的候选数）；审计要求它可由 journal 重算。置信区间需按候选聚类 bootstrap，属于离线分析。
+每个 batch journal 记录当轮的 `planner_memory` 文本与 `reviewer_memory_version`（Reviewer 记忆覆盖的更早候选数）；审计逐字符重算 Planner 记忆、核对 Reviewer 记忆覆盖范围。round summary 的 `reviewer_metrics` 给出预注册主指标：逐题 Δ-Brier、相对"全部预测 0"基线的 skill score，以及护栏指标（被接受但实测无效的候选数）；审计要求它可由 journal 重算。该指标只报告点值，不计算置信区间。
 
 ## 5. test 评测
 

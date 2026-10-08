@@ -158,8 +158,8 @@ def reviewer_metrics(changes: Sequence[ChangeRecord]) -> Dict[str, Any]:
     that predicts no effect anywhere (skill score > 0 means the Reviewer beats
     "nothing changes").  Candidate-level false acceptance is the guardrail: a
     Reviewer that only becomes more conservative lowers it without becoming more
-    accurate.  Confidence intervals belong to the analysis, which must cluster
-    by candidate; only the point values are reported here.
+    accurate.  Only point values are reported: no confidence interval is
+    computed for these metrics.
     """
     pairs = [(row.predicted_delta, float(row.measured_delta))
              for change in changes for row in change.sampled]
