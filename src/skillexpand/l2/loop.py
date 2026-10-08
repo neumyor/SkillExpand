@@ -31,17 +31,17 @@ from skillexpand.l2 import reviewer_coevolution as RC
 @dataclass
 class EvolutionConfig:
     batch_size: int = 50
-    candidate_count: int = 3
+    candidate_count: int = 1
     evolve_l1_workers: int = 8
     l2_review_workers: int = 8
     autonomous_attempts: int = 4
     supervised_attempts: int = 1
     evolve_rounds: int = 1
-    skill_edit_mode: str = "rewrite"
+    skill_edit_mode: str = "structured"
     acceptance_mode: str = "predicted"
     predicted_review_scope: str = "val"
     single_candidate: bool = False
-    reviewer_update_mode: str = "none"
+    reviewer_update_mode: str = "rules"
     reviewer_feedback_size: int = 0
 
     def __post_init__(self):

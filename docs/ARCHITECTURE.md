@@ -28,7 +28,7 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 
 1. 写入 `evolution/round-N/input.json`，冻结本轮输入 Skill 和 train task 集合。
 2. 用当前 Skill head 在所有 train task 上重新运行 Skill-aware L1；卡片写入 `evolution/round-N/cards/`，每题都有独立 checkpoint。
-3. 按 family、task ID 和固定 batch size 生成 `batches.json`。默认每批最多 50 张卡、最多 3 个候选。
+3. 按 family、task ID 和固定 batch size 生成 `batches.json`。默认每批最多 50 张卡、1 个候选（`--candidate-count`）。
 4. L2 Planner 读取当前 Skill、本批经验卡和 pattern 候选，提出不同机制的修改假设。
 5. `rewrite` 模式由 Editor 生成完整候选 body；`structured` 模式由 Planner 直接输出 schema 约束的单个 edit，程序依据真实 section/rule ID 应用它。description 不可修改。
 6. 相同 body 去重后进入 acceptance。每个 batch 事务写入 `l2_batches/<batch-id>.json`，只有选中的 candidate 才追加到 `skills.jsonl`。

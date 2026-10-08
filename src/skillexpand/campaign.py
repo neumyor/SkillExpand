@@ -204,10 +204,10 @@ def validate_inputs(tasks, split):
     return dict(counts)
 
 
-def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted', models=None,
+def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predicted', models=None,
             autonomous_attempts=4, supervised_attempts=1,
-            predicted_review_scope='val', candidate_count=3,
-            single_candidate=False, reviewer_update_mode='none',
+            predicted_review_scope='val', candidate_count=1,
+            single_candidate=False, reviewer_update_mode='rules',
             reviewer_feedback_size=0):
     if skill_edit_mode not in ('rewrite', 'structured'):
         raise InvalidInput('Unknown Skill edit mode')
@@ -825,15 +825,15 @@ def main():
     parser.add_argument('--benchmark', choices=BENCHMARKS)
     parser.add_argument('--stage', choices=STAGES)
     parser.add_argument('--attempt', type=int)
-    parser.add_argument('--skill-edit-mode', choices=('rewrite', 'structured'), default='rewrite',
+    parser.add_argument('--skill-edit-mode', choices=('rewrite', 'structured'), default='structured',
                         help='Skill editing mode frozen when preparing a campaign')
     parser.add_argument('--acceptance-mode', choices=('predicted', 'empirical', 'jev'), default='predicted',
                         help='Skill acceptance mode frozen when preparing a campaign')
     parser.add_argument('--predicted-review-scope', choices=('val', 'train_cards'), default='val',
                         help='Evidence scope for predicted acceptance')
-    parser.add_argument('--candidate-count', type=int, default=3)
+    parser.add_argument('--candidate-count', type=int, default=1)
     parser.add_argument('--single-candidate', action='store_true')
-    parser.add_argument('--reviewer-update-mode', choices=('none', 'summary', 'rules'), default='none')
+    parser.add_argument('--reviewer-update-mode', choices=('none', 'summary', 'rules'), default='rules')
     parser.add_argument('--reviewer-feedback-size', type=int, default=0)
     parser.add_argument('--autonomous-attempts', type=int, default=4)
     parser.add_argument('--supervised-attempts', type=int, default=1)

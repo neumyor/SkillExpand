@@ -50,7 +50,7 @@ flowchart LR
 
 ## Reviewer 协同演化（单候选）
 
-`--single-candidate`（要求 `--candidate-count 1`）让每个 batch 只提出一个候选，把"提出修改 → 验收 → 接受或拒绝"变成可归因的单一因果链。`--reviewer-update-mode` 控制 Reviewer 是否从真实反馈中校准：
+当前默认协议：每 batch **1 个候选**（`--candidate-count 1`）、`--skill-edit-mode structured`、`--acceptance-mode predicted --predicted-review-scope val`、`--reviewer-update-mode rules`。`--single-candidate` 在此基础上强制 `--candidate-count 1`，把"提出修改 → 验收 → 接受或拒绝"变成可归因的单一因果链。`--reviewer-update-mode` 控制 Reviewer 是否从真实反馈中校准（默认 `rules`）：
 
 | 模式 | 条件 | 行为 |
 |---|---|---|

@@ -62,6 +62,11 @@ class SerialL2Tests(unittest.TestCase):
         # These integration tests exercise the card-review protocol; the product
         # default is the independent val-panel protocol.
         config.setdefault("predicted_review_scope", "train_cards")
+        # The scripted Planner/Editor/Reviewer speak the rewrite protocol with
+        # three candidates and no calibration; pin it instead of product defaults.
+        config.setdefault("candidate_count", 3)
+        config.setdefault("skill_edit_mode", "rewrite")
+        config.setdefault("reviewer_update_mode", "none")
         return L.SerialEvolutionLoop(
             self.cfg,
             plan,
@@ -678,11 +683,20 @@ class SerialL2Tests(unittest.TestCase):
         self.assertEqual(outcome.reason, ED.REASON_NO_OPERATIONS)
 
     def test_cli_defaults_and_tail_batches(self):
-        self.assertEqual(L.EvolutionConfig().candidate_count, 3)
-        self.assertEqual(L.EvolutionConfig().batch_size, 50)
+        # The product defaults are the single-candidate structured protocol with
+        # rule-based Reviewer calibration; this fixture overrides them above.
+        defaults = L.EvolutionConfig()
+        self.assertEqual((defaults.candidate_count, defaults.batch_size), (1, 50))
+        self.assertEqual((defaults.skill_edit_mode, defaults.reviewer_update_mode),
+                         ("structured", "rules"))
         self.assertEqual([len(b) for b in L.family_task_batches(range(123), 50)], [50, 50, 23])
+        parsed = evolve.build_parser().parse_args(["--run-dir", "x"])
         self.assertEqual(
-            evolve.build_parser().parse_args(["--run-dir", "x"]).candidate_count, 3
+            (parsed.candidate_count, parsed.skill_edit_mode, parsed.reviewer_update_mode),
+            (1, "structured", "rules"),
+        )
+        self.assertEqual(
+            (parsed.acceptance_mode, parsed.predicted_review_scope), ("predicted", "val")
         )
 
     def test_evolve_round_runs_skill_aware_l1_then_l2_and_resumes(self):
@@ -704,7 +718,9 @@ class SerialL2Tests(unittest.TestCase):
 
         resumed = L.SerialEvolutionLoop(
             driver.cfg, driver.plan, L.LoopPaths(self.root),
-            L.EvolutionConfig(batch_size=1, predicted_review_scope="train_cards"),
+            L.EvolutionConfig(batch_size=1, predicted_review_scope="train_cards",
+                              candidate_count=3, skill_edit_mode="rewrite",
+                              reviewer_update_mode="none"),
         )
         with patch.object(PL, "run_generic", side_effect=AssertionError("resampled")), patch.object(
             F, "build_reasoning_host", side_effect=AssertionError("resampled")
@@ -825,6 +841,9 @@ class SerialL2Tests(unittest.TestCase):
                     "l2",
                     "--predicted-review-scope",
                     "train_cards",
+                    "--candidate-count", "3",
+                    "--skill-edit-mode", "rewrite",
+                    "--reviewer-update-mode", "none",
                 ]
             )
         summary = json.loads((target / "summary.json").read_text())

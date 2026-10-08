@@ -55,7 +55,7 @@ def build_parser():
         help="Train cards per serial L2 proposal; tails included",
     )
     p.add_argument(
-        "--candidate-count", type=int, default=3,
+        "--candidate-count", type=int, default=1,
         help="Maximum candidate bodies independently reviewed on each train-card batch",
     )
     p.add_argument(
@@ -63,7 +63,7 @@ def build_parser():
         help="Enforce the reviewer co-evolution single-candidate protocol (requires --candidate-count 1)",
     )
     p.add_argument(
-        "--reviewer-update-mode", choices=("none", "summary", "rules"), default="none",
+        "--reviewer-update-mode", choices=("none", "summary", "rules"), default="rules",
         help="Use no Reviewer calibration, program summary only, or validated calibration rules",
     )
     p.add_argument(
@@ -73,7 +73,7 @@ def build_parser():
     p.add_argument("--evolve-rounds", type=int, default=1,
         help="Number of Skill-aware L1 -> L2 evolution rounds")
     p.add_argument("--skill-edit-mode", choices=("rewrite", "structured"),
-        default="rewrite", help="Rewrite complete Skill bodies or apply one structured rule edit")
+        default="structured", help="Rewrite complete Skill bodies or apply one structured rule edit")
     p.add_argument("--acceptance-mode", choices=("predicted", "empirical", "jev"),
         default="predicted", help="Accept by card review, paired execution, or JEV validation")
     p.add_argument("--predicted-review-scope", choices=("val", "train_cards"),
