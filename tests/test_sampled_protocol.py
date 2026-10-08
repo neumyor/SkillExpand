@@ -25,7 +25,8 @@ from skillexpand.evaluation.divergence import action_sequence, first_divergence
 from skillexpand.evaluation.sampled_validation import SampledDeltaValidator
 from skillexpand.runtime import agent_factory as F
 from skillexpand.persistence.io import AuditFailure
-from skillexpand.l2.audit import audit_sampled_batch
+from skillexpand.l2.audit import audit_memories, audit_sampled_batch
+from skillexpand.l2 import memory as MEM
 
 EVIDENCE_ID = 't1:e1'
 
@@ -477,6 +478,28 @@ class SampledBatchJournalTests(unittest.TestCase):
         with self.assertRaises(AuditFailure):
             audit_sampled_batch(batch)
 
+    def test_a_later_round_learns_only_from_journaled_earlier_ones(self):
+        first = self.journal()
+        batches = self.root / 'l2_batches'
+        batches.mkdir(exist_ok=True)
+        (batches / 'r1.json').write_text(json.dumps(dict(first.record, round=1)))
+
+        changes = MEM.read_changes(self.root, before_round=2)
+        self.assertEqual(len(changes), 1)
+        # The scripted Planner adds a Conditions rule, which is the type the
+        # ledger must report and the history must be grouped by.
+        self.assertEqual(changes[0].change_type(), 'conditions/add')
+        memory = MEM.PlannerMemory(changes).render()
+        self.assertIn('conditions/add', memory)
+
+        batch = {'round': 2, 'planner_memory': memory,
+                 'reviewer_memory_candidates': 1}
+        audit_memories(self.root, batch)
+        # The same ledger read without the round filter would describe a panel
+        # the next round has not seen yet, so the audit must notice.
+        with self.assertRaises(AuditFailure):
+            audit_memories(self.root, dict(batch, reviewer_memory_candidates=0))
+
     def test_the_audit_rejects_a_batch_without_claims(self):
         result = self.journal()
         batch = json.loads(json.dumps(result.record))
@@ -635,6 +658,162 @@ class VerificationTests(unittest.TestCase):
         target['verification'] = None
         with self.assertRaises(AuditFailure):
             audit_sampled_batch(stripped)
+
+
+def change_row(task_id, predicted, measured, *, sampled=True, diverged=False,
+               category=None):
+    return {'task_id': task_id, 'delta_probability': predicted,
+            'measured_delta': measured, 'sampled': sampled,
+            'divergence': ({'diverged_at_step': 1} if diverged else None),
+            'verification': ({'category': category or 'claim_confirmed',
+                              'reason': 'because'} if diverged else None)}
+
+
+def ledger_journal(round_index, candidate_id, *, section='conditions', op='ADD',
+                   accepted=True, point=0.4, lower=0.1, rows=None,
+                   trigger='the target receptacle is closed'):
+    return {
+        'round': round_index, 'batch_id': f'b{round_index}-{candidate_id}',
+        'family_id': 'f', 'task_ids': [0, 1],
+        'hypotheses': [{'claim': {'trigger': trigger, 'action_change': 'open it'}}],
+        'proposals': [{'edit': {'candidate': {'candidate_id': candidate_id,
+                                              'edits': [{'op': op, 'section': section,
+                                                         'target_id': None,
+                                                         'text': 'rule'}]}}}],
+        'acceptance': {'mode': 'sampled', 'scope': 'val',
+                       'candidates': [{'candidate_id': candidate_id,
+                                       'result': {'decision': {'accepted': accepted,
+                                                               'point': point,
+                                                               'lower': lower},
+                                                  'rows': rows if rows is not None else [
+                                                      change_row(0, 0.6, 1.0,
+                                                                 diverged=True),
+                                                      change_row(1, 0.6, 0.0)]}}]},
+    }
+
+
+class MemoryTests(unittest.TestCase):
+    def root_with(self, journals):
+        root = Path(tempfile.mkdtemp())
+        (root / 'l2_batches').mkdir()
+        for index, journal in enumerate(journals):
+            (root / 'l2_batches' / f'{index}.json').write_text(json.dumps(journal))
+        return root
+
+    def test_the_ledger_is_read_oldest_first_and_only_before_a_round(self):
+        root = self.root_with([ledger_journal(2, 'c2'), ledger_journal(1, 'c1'),
+                               ledger_journal(3, 'c3')])
+        changes = MEM.read_changes(root, before_round=2)
+        self.assertEqual([change.candidate_id for change in changes], ['c1'])
+        self.assertEqual([change.candidate_id for change in MEM.read_changes(root)],
+                         ['c1', 'c2', 'c3'])
+
+    def test_a_change_is_classified_by_what_the_sample_measured(self):
+        root = self.root_with([
+            ledger_journal(1, 'c1', accepted=True, rows=[change_row(0, 0.6, 1.0),
+                                                         change_row(1, 0.6, 0.0)]),
+            ledger_journal(1, 'c2', accepted=False, rows=[change_row(0, 0.6, 0.0),
+                                                          change_row(1, 0.6, 0.0)]),
+            ledger_journal(1, 'c3', accepted=False, rows=[change_row(0, 0.6, 0.5),
+                                                          change_row(1, 0.6, 0.3)]),
+        ])
+        verdicts = {change.candidate_id: change.verdict
+                    for change in MEM.read_changes(root)}
+        self.assertEqual(verdicts, {'c1': MEM.VERDICT_EFFECTIVE,
+                                    'c2': MEM.VERDICT_NO_EFFECT,
+                                    'c3': MEM.VERDICT_INSUFFICIENT})
+
+    def test_the_planner_memory_names_no_task_and_only_carries_counts(self):
+        root = self.root_with([
+            ledger_journal(1, 'c1', rows=[change_row(0, 0.6, 1.0, diverged=True),
+                                          change_row(1, 0.6, 0.0)]),
+            ledger_journal(1, 'c2', section='procedure', op='EDIT', accepted=False,
+                           rows=[change_row(0, 0.6, 0.0), change_row(1, 0.6, 0.0)]),
+        ])
+        text = MEM.PlannerMemory(MEM.read_changes(root)).render()
+        self.assertIn('conditions/add', text)
+        self.assertIn('procedure/replace', text)
+        self.assertIn('no measured effect', text)
+        self.assertNotIn('task 0', text)
+        self.assertNotIn('Task 0.', text)
+        for forbidden in ('"', 't0:e1', 'question', 'receptacle'):
+            self.assertNotIn(forbidden, text)
+
+    def test_an_empty_ledger_renders_no_memory(self):
+        self.assertEqual(MEM.PlannerMemory(()).render(), '')
+        self.assertTrue(MEM.PlannerMemory(()).empty)
+
+    def reviewer_memory(self, root):
+        return MEM.ReviewerMemory.build(
+            MEM.read_changes(root), task_text=lambda task_id: f'Task {task_id}.')
+
+    def test_the_reviewer_memory_keeps_over_and_under_estimates_as_cases(self):
+        root = self.root_with([
+            ledger_journal(1, 'c1', rows=[change_row(0, 0.8, 0.0, diverged=True,
+                                                     category='claim_confirmed'),
+                                          change_row(1, 0.0, 1.0)]),
+        ])
+        memory = self.reviewer_memory(root)
+        kinds = {case.kind for case in memory.cases}
+        self.assertEqual(kinds, {MEM.OVER_ESTIMATED, MEM.UNDER_ESTIMATED})
+        block = memory.block_for(section='conditions', op='add', task_id=99,
+                                 exclude_candidate_id='other')
+        self.assertIn('over_estimated', block)
+        self.assertIn('under_estimated', block)
+        self.assertIn('Task 0.', block)
+        self.assertIn('verifier: claim_confirmed', block)
+
+    def test_retrieval_excludes_the_task_and_the_proposal_under_judgement(self):
+        root = self.root_with([
+            ledger_journal(1, 'c1', rows=[change_row(0, 0.8, 0.0, diverged=True),
+                                          change_row(1, 0.8, 0.0, diverged=True)]),
+        ])
+        memory = self.reviewer_memory(root)
+        self.assertEqual(memory.block_for(section='conditions', op='add', task_id=0,
+                                          exclude_candidate_id='other')
+                         .count('task "'), 1)
+        self.assertEqual(memory.block_for(section='conditions', op='add', task_id=0,
+                                          exclude_candidate_id='c1'), '')
+        self.assertEqual(memory.block_for(section='other', op='add', task_id=0,
+                                          exclude_candidate_id='other'), '')
+
+    def test_the_reviewer_prompt_carries_only_the_current_task_block(self):
+        prompts = []
+        reviewer = PairedDeltaReviewer(
+            SimpleNamespace(benchmark=SimpleNamespace(name='searchqa', task_file='x')),
+            SimpleNamespace(groups={'searchqa.f': (0, 1)}, fingerprint='fp'),
+            V.ScoreCache(Path(tempfile.mkdtemp()) / 'p.jsonl'), workers=1,
+            host_factory=lambda task_id, usage_path: StubReviewHost(prompts=prompts))
+        base = structured_skill(SS.render(SS.from_sections({
+            'procedure': ['Search.'], 'conditions': ['If exposed, place.'],
+            'completion_checks': []})))
+        candidate = structured_skill(SS.render(SS.from_sections({
+            'procedure': ['Search.'], 'conditions': ['If closed, open then place.'],
+            'completion_checks': []})), version=1)
+        with patch.object(F, 'task_text_of', side_effect=lambda cfg, t: f'Task {t}.'):
+            reviewer.predict(base, candidate, S.Claim('closed', 'open then place'),
+                             (0, 1), 'panel',
+                             memory_blocks={0: 'REVIEWER MEMORY for zero',
+                                            1: 'REVIEWER MEMORY for one'})
+        by_task = {prompt: index for index, prompt in enumerate(prompts)}
+        zero = next(prompt for prompt in prompts if '"Task 0."' in prompt)
+        one = next(prompt for prompt in prompts if '"Task 1."' in prompt)
+        self.assertIn('REVIEWER MEMORY for zero', zero)
+        self.assertNotIn('REVIEWER MEMORY for one', zero)
+        self.assertIn('REVIEWER MEMORY for one', one)
+        self.assertEqual(len(by_task), len(prompts))
+
+    def test_the_audit_recomputes_what_the_planner_memory_held(self):
+        root = self.root_with([ledger_journal(1, 'c1')])
+        changes = MEM.read_changes(root)
+        batch = {'round': 2, 'planner_memory': MEM.PlannerMemory(changes).render(),
+                 'reviewer_memory_candidates': 1}
+        audit_memories(root, batch)
+        leaked = dict(batch, planner_memory=batch['planner_memory'] + '\nquestion 0')
+        with self.assertRaises(AuditFailure):
+            audit_memories(root, leaked)
+        with self.assertRaises(AuditFailure):
+            audit_memories(root, dict(batch, reviewer_memory_candidates=2))
 
 
 if __name__ == '__main__':

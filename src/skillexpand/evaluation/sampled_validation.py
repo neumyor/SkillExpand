@@ -111,7 +111,8 @@ class SampledDeltaValidator:
     """Corrections from a random val sample; the decision rule is fixed here."""
 
     def __init__(self, cfg, routes, reviewer, executor, sample_size: int = 16,
-                 confidence: float = 0.9, verifier: Optional[Any] = None):
+                 confidence: float = 0.9, verifier: Optional[Any] = None,
+                 reviewer_memory: Optional[Any] = None):
         if int(sample_size) < MIN_SAMPLE_SIZE:
             raise InvalidInput(
                 f'acceptance sample size must be at least {MIN_SAMPLE_SIZE}: '
@@ -125,6 +126,9 @@ class SampledDeltaValidator:
         self.sample_size = int(sample_size)
         self.confidence = float(confidence)
         self.verifier = verifier
+        # Duck-typed on purpose: the memory is built by the layer that owns the
+        # journals, and this module only asks it for the cases of one change type.
+        self.reviewer_memory = reviewer_memory
         self.protocol_hash = S.content_hash({
             'protocol': 'sampled-delta-acceptance',
             'reviewer': reviewer.protocol_hash,
@@ -132,10 +136,14 @@ class SampledDeltaValidator:
             'sample_size': self.sample_size,
             'confidence': self.confidence,
             'verifier': getattr(verifier, 'protocol_hash', None),
+            'reviewer_memory': (
+                None if reviewer_memory is None
+                else getattr(reviewer_memory, 'version', 0)),
         })
 
     def validate(self, base_skill: S.Skill, candidate_skill: S.Skill, claim: S.Claim,
-                 panel_key: str, sample_key: str) -> SampledValidation:
+                 panel_key: str, sample_key: str,
+                 exclude_candidate_id: str = '') -> SampledValidation:
         if base_skill.skill_id != candidate_skill.skill_id:
             raise InvalidInput('Both arms must belong to the same Skill')
         panel = tuple(sorted(int(t) for t in self.routes.groups[base_skill.skill_id]))
@@ -145,8 +153,17 @@ class SampledDeltaValidator:
                 'has nothing to sample')
 
         sample = PPI.select_sample(panel, self.sample_size, sample_key)
+        blocks = {}
+        if self.reviewer_memory is not None:
+            changed = change_view(base_skill, candidate_skill)
+            blocks = {
+                task_id: self.reviewer_memory.block_for(
+                    section=changed['section'], op=changed['op'], task_id=task_id,
+                    exclude_candidate_id=exclude_candidate_id)
+                for task_id in panel
+            }
         prediction = self.reviewer.predict(base_skill, candidate_skill, claim, panel,
-                                           panel_key)
+                                           panel_key, memory_blocks=blocks)
         base_score = self.executor.score(base_skill, sample, panel_key)
         candidate_score = self.executor.score(candidate_skill, sample, panel_key)
 

@@ -115,7 +115,8 @@ class SkillPatchRunner:
                  reviewer_factory=None, acceptance_mode="predicted",
                  val_scorer=None, jev_scorer=None,
                  predicted_review_scope="val", predicted_scorer=None,
-                 single_candidate=False, sampled_validator=None):
+                 single_candidate=False, sampled_validator=None,
+                 planner_memory=""):
         self.editor, self.reviewer, self.audit_dir = editor, reviewer, Path(audit_dir)
         self.read_only = read_only
         self.reviewer_factory = reviewer_factory
@@ -138,6 +139,7 @@ class SkillPatchRunner:
         self.jev_scorer = jev_scorer
         self.predicted_scorer = predicted_scorer
         self.sampled_validator = sampled_validator
+        self.planner_memory = str(planner_memory or "")
         self.single_candidate = bool(single_candidate)
         # The claim is part of the sampled protocol, so the requirement follows
         # from the mode rather than from a separate switch.
@@ -171,6 +173,7 @@ class SkillPatchRunner:
                         base_skill, candidate.skill, claim, panel_key,
                         sample_key=(f"sampled:{panel_key}:"
                                     f"{candidate.candidate_id}"),
+                        exclude_candidate_id=candidate.candidate_id,
                     ).to_dict(),
                 })
             acceptance = {
@@ -279,13 +282,15 @@ class SkillPatchRunner:
                 if previous is None:
                     return {"raw": self.editor.plan(base_skill, experiences, candidate_count,
                                                     batch_patterns=batch_patterns,
-                                                    claim_required=self.claim_required)}
+                                                    claim_required=self.claim_required,
+                                                    planner_memory=self.planner_memory)}
                 correction = {"error": str(previous.error), "previous_output": previous.raw,
                               "instruction": PLANNER_CORRECTION}
                 return {"raw": self.editor.plan(base_skill, experiences, candidate_count,
                                                 correction=correction,
                                                 batch_patterns=batch_patterns,
-                                                claim_required=self.claim_required)}
+                                                claim_required=self.claim_required,
+                                                planner_memory=self.planner_memory)}
             value, fresh = cached_attempt(attempt_name("hypotheses", attempt), generate)
             return value["raw"], fresh
         record = {

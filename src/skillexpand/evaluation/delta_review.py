@@ -65,8 +65,11 @@ def change_view(base_skill: S.Skill, candidate_skill: S.Skill) -> Dict[str, Any]
         for rule_id in sorted(set(before) | set(after), key=_rule_sort_key):
             was, now = before.get(rule_id), after.get(rule_id)
             if was != now:
-                changes.append({'section': section, 'rule_id': rule_id,
-                                'before': was, 'after': now})
+                changes.append({
+                    'section': section, 'rule_id': rule_id,
+                    'op': 'replace' if was is not None and now is not None else
+                          ('add' if was is None else 'remove'),
+                    'before': was, 'after': now})
     if len(changes) != 1:
         raise ValueError(
             f'paired-delta review requires exactly one changed rule, found {len(changes)}')
@@ -133,26 +136,25 @@ class PairedDeltaReviewer:
         }
 
     def __init__(self, cfg, routes, cache, workers: int = 8,
-                 host_factory: Optional[Callable] = None, memory_block: str = '',
-                 memory_version: int = 0):
+                 host_factory: Optional[Callable] = None, memory_version: int = 0):
         self.cfg = cfg
         self.routes = routes
         self.cache = cache
         self.workers = max(1, int(workers))
         self.host_factory = host_factory
-        self.memory_block = str(memory_block or '')
+        # The memory is retrieved per task, so it cannot live in the protocol
+        # hash.  It travels in the cache identity instead, which is what has to
+        # change when the same task is asked again with different cases.
         self.memory_version = int(memory_version)
         self.protocol_hash = S.content_hash({
             'protocol': self.PROTOCOL,
             'response_schema': self.RESPONSE_SCHEMA,
             'benchmark': cfg.benchmark.name,
             'routes': routes.fingerprint,
-            'memory_block': self.memory_block,
-            'memory_version': self.memory_version,
         })
 
     def prompt(self, task: str, base_skill: S.Skill, candidate_skill: S.Skill,
-               claim: S.Claim) -> str:
+               claim: S.Claim, memory_block: str = '') -> str:
         payload = {
             'task': task,
             'changed_rule': change_view(base_skill, candidate_skill),
@@ -186,8 +188,8 @@ class PairedDeltaReviewer:
                 'reason': f'string, <= {self.REASON_MAX_CHARS} characters',
             },
         }
-        if self.memory_block:
-            payload['reviewer_memory'] = self.memory_block
+        if memory_block:
+            payload['reviewer_memory'] = memory_block
         return S._canonical_json(payload)
 
     def _parse_response(self, raw):
@@ -234,7 +236,9 @@ class PairedDeltaReviewer:
         return result.value, result.attempts
 
     def predict(self, base_skill: S.Skill, candidate_skill: S.Skill, claim: S.Claim,
-                task_ids: Sequence[int], panel_key: str) -> DeltaPanelPrediction:
+                task_ids: Sequence[int], panel_key: str,
+                memory_blocks: Optional[Dict[int, str]] = None
+                ) -> DeltaPanelPrediction:
         if base_skill.skill_id != candidate_skill.skill_id:
             raise InvalidInput('Both arms of a paired prediction must be the same Skill')
         task_ids = tuple(sorted(int(t) for t in task_ids))
@@ -242,11 +246,13 @@ class PairedDeltaReviewer:
             raise JournalConflict('Predicted tasks must belong to the frozen Skill route group')
         # The cache identity carries both bodies and the claim: the same proposal
         # is never re-asked, and a different proposal is never served a stale row.
+        blocks = dict(memory_blocks or {})
         material = S._canonical_json({'base': base_skill.body, 'candidate': candidate_skill.body,
                                       'claim': claim.payload()})
         keys = {
             t: ScoreCache.make_key(self.cfg.benchmark.name, panel_key, t,
-                                   f'delta:{self.protocol_hash}', material)
+                                   f'delta:{self.protocol_hash}',
+                                   material + blocks.get(t, ''))
             for t in task_ids
         }
         records, pending = {}, []
@@ -267,12 +273,14 @@ class PairedDeltaReviewer:
             )
             result, attempts = self._review(
                 host, self.prompt(F.task_text_of(self.cfg, task_id), base_skill,
-                                  candidate_skill, claim))
+                                  candidate_skill, claim, blocks.get(task_id, '')))
             return {'task_id': task_id, 'base_skill_key': base_skill.key,
                     'candidate_skill_key': candidate_skill.key, 'claim_id': claim.claim_id,
                     'cache_key': keys[task_id], 'panel_key': panel_key,
                     'protocol_hash': self.protocol_hash,
                     'memory_version': self.memory_version,
+                    'memory_cases': (blocks.get(task_id, '').count('\n- ') + 1
+                                     if blocks.get(task_id) else 0),
                     'format_attempts': attempts,
                     'response_format': 'json_schema', **result}
 

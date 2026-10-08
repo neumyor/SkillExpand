@@ -373,7 +373,7 @@ class SkillEditor:
         return EditOutcome(candidate, body, REASON_PROPOSED, operations=(operation,))
 
     def plan(self, base_skill, experiences, candidate_count, correction=None,
-             batch_patterns=(), claim_required=False):
+             batch_patterns=(), claim_required=False, planner_memory=""):
         from skillexpand.l2.card_review import card_payload
         from skillexpand.l2 import sampled as SM
 
@@ -422,6 +422,8 @@ class SkillEditor:
             # appended only when that protocol is active: the older paths keep
             # an unchanged prompt and therefore an unchanged protocol identity.
             system += SM.CLAIM_CONTRACT
+        if planner_memory:
+            system += SM.PLANNER_MEMORY_CONTRACT
         return self.host.llm(
             [
                 SystemMessage(content=system),
@@ -435,6 +437,7 @@ class SkillEditor:
                             "description": base_skill.description,
                             "cards": card_payload(experiences),
                             "batch_patterns": list(batch_patterns),
+                            "change_history": planner_memory or None,
                             "format_correction": correction,
                         },
                         ensure_ascii=False,

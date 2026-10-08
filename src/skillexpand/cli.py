@@ -85,6 +85,12 @@ def build_parser():
         help="Executed val tasks per candidate under sampled acceptance")
     p.add_argument("--acceptance-confidence", type=float, default=0.9,
         help="One-sided confidence level of the sampled lower bound")
+    p.add_argument("--planner-memory-mode", choices=("off", "aggregate"),
+        default="aggregate",
+        help="Give the Planner the measured outcomes of its earlier proposals")
+    p.add_argument("--reviewer-memory-mode", choices=("off", "cases"),
+        default="cases",
+        help="Give the Reviewer retrieved cases of its own earlier misestimates")
     p.add_argument("--claim-verification", choices=("on", "off"), default="on",
         help="Let an independent verifier attribute trajectory differences to the "
              "claimed rule (sampled acceptance only)")
@@ -327,6 +333,8 @@ def main(argv=None):
                 acceptance_sample_size=args.acceptance_sample_size,
                 acceptance_confidence=args.acceptance_confidence,
                 claim_verification=args.claim_verification,
+                planner_memory_mode=args.planner_memory_mode,
+                reviewer_memory_mode=args.reviewer_memory_mode,
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config,
                                          allow_code_change=args.allow_code_change)

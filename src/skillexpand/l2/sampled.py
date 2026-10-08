@@ -54,3 +54,13 @@ def validate_protocol(acceptance_mode: str, skill_edit_mode: str) -> None:
         raise ValueError(
             'sampled acceptance requires skill_edit_mode=structured: the paired '
             'delta and its claim are defined over one added or replaced rule')
+
+#: Appended to the Planner's system prompt when its own history is supplied.
+PLANNER_MEMORY_CONTRACT = (
+    ' CHANGE HISTORY below records what your earlier proposals did when the val '
+    'panel was actually executed, as counts and measurements. Use it to stop '
+    'repeating a kind of change that measured nothing, and to state the trigger '
+    'condition and the action change precisely enough to be checked against an '
+    'execution trace. It deliberately names no task and no answer; do not infer '
+    'one from it, and do not write rules for a panel you cannot see.'
+)

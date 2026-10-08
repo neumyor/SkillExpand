@@ -212,7 +212,8 @@ def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predict
             predicted_review_scope='val', candidate_count=1,
             single_candidate=False, reviewer_update_mode='rules',
             reviewer_feedback_size=0, acceptance_sample_size=16,
-            acceptance_confidence=0.9, claim_verification='on'):
+            acceptance_confidence=0.9, claim_verification='on',
+            planner_memory_mode='aggregate', reviewer_memory_mode='cases'):
     if skill_edit_mode not in ('rewrite', 'structured'):
         raise InvalidInput('Unknown Skill edit mode')
     if acceptance_mode not in ('predicted', 'empirical', 'jev', 'sampled'):
@@ -226,6 +227,10 @@ def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predict
         raise InvalidInput('acceptance_confidence must lie strictly between 0 and 1')
     if claim_verification not in ('on', 'off'):
         raise InvalidInput('claim_verification must be on or off')
+    if planner_memory_mode not in ('off', 'aggregate'):
+        raise InvalidInput('Unknown planner memory mode')
+    if reviewer_memory_mode not in ('off', 'cases'):
+        raise InvalidInput('Unknown reviewer memory mode')
     if predicted_review_scope not in ('val', 'train_cards'):
         raise InvalidInput('Unknown predicted review scope')
     if candidate_count < 1 or (single_candidate and candidate_count != 1):
@@ -280,6 +285,8 @@ def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predict
         'acceptance_sample_size': acceptance_sample_size,
         'acceptance_confidence': acceptance_confidence,
         'claim_verification': claim_verification,
+        'planner_memory_mode': planner_memory_mode,
+        'reviewer_memory_mode': reviewer_memory_mode,
         'skill_edit_mode': skill_edit_mode, 'acceptance_mode': acceptance_mode,
         'predicted_review_scope': predicted_review_scope,
         'benchmarks': details,
@@ -432,6 +439,8 @@ def stage_args(root, mode, benchmark, stage):
         args += ['--acceptance-sample-size', str(manifest['acceptance_sample_size'])]
         args += ['--acceptance-confidence', str(manifest['acceptance_confidence'])]
         args += ['--claim-verification', manifest['claim_verification']]
+        args += ['--planner-memory-mode', manifest['planner_memory_mode']]
+        args += ['--reviewer-memory-mode', manifest['reviewer_memory_mode']]
     models = manifest['models']
     for flag, key in (('--l1-model', 'l1_executor'), ('--cold-start-model', 'cold_start'),
                       ('--l2-planner-model', 'l2_planner'), ('--l2-editor-model', 'l2_editor'),
@@ -859,6 +868,10 @@ def main():
                         help='One-sided confidence level of the sampled lower bound')
     parser.add_argument('--claim-verification', choices=('on', 'off'), default='on',
                         help='Independent verification of the claimed rule effect')
+    parser.add_argument('--planner-memory-mode', choices=('off', 'aggregate'),
+                        default='aggregate')
+    parser.add_argument('--reviewer-memory-mode', choices=('off', 'cases'),
+                        default='cases')
     parser.add_argument('--predicted-review-scope', choices=('val', 'train_cards'), default='val',
                         help='Evidence scope for predicted acceptance')
     parser.add_argument('--candidate-count', type=int, default=1)
@@ -891,7 +904,9 @@ def main():
                          reviewer_feedback_size=args.reviewer_feedback_size,
                          acceptance_sample_size=args.acceptance_sample_size,
                          acceptance_confidence=args.acceptance_confidence,
-                         claim_verification=args.claim_verification)
+                         claim_verification=args.claim_verification,
+                         planner_memory_mode=args.planner_memory_mode,
+                         reviewer_memory_mode=args.reviewer_memory_mode)
         print(json.dumps({'root': str(root), 'benchmarks': result['benchmarks'], 'models': result['models']}))
     elif args.action == 'check':
         result = verify(root)

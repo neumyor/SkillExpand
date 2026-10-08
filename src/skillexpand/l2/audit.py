@@ -21,6 +21,27 @@ from skillexpand.l2 import reviewer_coevolution as RC
 
 
 
+def audit_memories(root, batch):
+    """Both memories must be exactly the views the ledger yields at this round.
+
+    The Planner's memory is checkable in full: it is recomputed here and compared
+    character for character, so any task text that found its way into it would
+    make the two differ.  The Reviewer's is checkable by coverage: it may draw on
+    every proposal from an earlier round and on nothing else.
+    """
+    from skillexpand.l2 import memory as MEM
+
+    round_index = int(batch.get('round', 0))
+    if round_index < 1:
+        return
+    changes = MEM.read_changes(root, before_round=round_index)
+    expected = MEM.PlannerMemory(changes).render()
+    require(batch.get('planner_memory', '') == expected,
+            'journaled Planner memory is not the aggregate the ledger yields')
+    require(batch.get('reviewer_memory_candidates', -1)
+            == len({change.candidate_id for change in changes}),
+            'journaled Reviewer memory does not cover exactly the earlier proposals')
+
 def audit_sampled_batch(batch):
     """Replay a sampled-acceptance batch from its journal alone.
 
@@ -218,6 +239,7 @@ def audit_batch(root, batch, base, cards):
                     'predicted val candidate lacks success delta')
     if acceptance_mode == 'sampled':
         audit_sampled_batch(batch)
+        audit_memories(root, batch)
     if mode == 'structured':
         candidates = []
         for proposal in batch.get('proposals', []):
