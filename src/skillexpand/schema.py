@@ -768,12 +768,18 @@ class ValidationResult:
     reasons: Tuple[str, ...] = ()
     #: Per-task success rates under each arm, as ``(task_id, base, candidate)``.
     pairs: Tuple[Tuple[int, float, float], ...] = ()
+    #: Raw reviewer probabilities retained for post-hoc calibration.  The existing
+    #: ``pairs`` field intentionally stays compact and boolean-like; this field keeps
+    #: the per-task probabilities needed to compare a prediction with later train
+    #: feedback without calling the reviewer again.
+    prediction_rows: Tuple[Dict[str, Any], ...] = ()
     returned_to_editor: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, 'task_ids', tuple(self.task_ids))
         object.__setattr__(self, 'arms', tuple(self.arms))
         object.__setattr__(self, 'pairs', tuple(self.pairs))
+        object.__setattr__(self, 'prediction_rows', tuple(self.prediction_rows))
         object.__setattr__(self, 'reasons', reason_tuple(self.reasons,
                                                         'ValidationResult'))
 

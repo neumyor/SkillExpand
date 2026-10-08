@@ -58,6 +58,18 @@ def build_parser():
         "--candidate-count", type=int, default=3,
         help="Maximum candidate bodies independently reviewed on each train-card batch",
     )
+    p.add_argument(
+        "--single-candidate", action="store_true",
+        help="Enforce the reviewer co-evolution single-candidate protocol (requires --candidate-count 1)",
+    )
+    p.add_argument(
+        "--reviewer-update-mode", choices=("none", "summary", "rules"), default="none",
+        help="Use no Reviewer calibration, program summary only, or validated calibration rules",
+    )
+    p.add_argument(
+        "--reviewer-feedback-size", type=int, default=0,
+        help="Fixed train feedback tasks per Skill family; 0 means all train tasks",
+    )
     p.add_argument("--evolve-rounds", type=int, default=1,
         help="Number of Skill-aware L1 -> L2 evolution rounds")
     p.add_argument("--skill-edit-mode", choices=("rewrite", "structured"),
@@ -336,6 +348,9 @@ def main(argv=None):
                 skill_edit_mode=args.skill_edit_mode,
                 acceptance_mode=args.acceptance_mode,
                 predicted_review_scope=args.predicted_review_scope,
+                single_candidate=args.single_candidate,
+                reviewer_update_mode=args.reviewer_update_mode,
+                reviewer_feedback_size=args.reviewer_feedback_size,
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config)
             # All evolution entry points execute Skill-aware L1 before L2.

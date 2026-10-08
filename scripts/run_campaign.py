@@ -34,7 +34,7 @@ CONCURRENCY = {
     },
 }
 REQUEST_INTERVAL_SECONDS = 0.5
-RETRY_DELAYS = (15, 60, 180)
+RETRY_DELAYS = (15, 60, 180, 300)
 
 
 def configured_runtime():
@@ -138,6 +138,21 @@ def source_commit(repo):
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
+def git_identity(repo):
+    """Freeze the exact source revision, including an intentional dirty tree."""
+    repo = str(repo)
+    commit = subprocess.check_output(
+        ['git', '-C', repo, 'rev-parse', 'HEAD'], text=True
+    ).strip()
+    status = subprocess.check_output(
+        ['git', '-C', repo, 'status', '--porcelain=v1', '--untracked-files=all'],
+        text=True,
+    )
+    return {
+        'commit': commit,
+        'dirty': bool(status),
+        'status_hash': hashlib.sha256(status.encode()).hexdigest(),
+    }
 
 
 @contextmanager
@@ -161,14 +176,23 @@ def validate_inputs(tasks, split):
 
 def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted', models=None,
             autonomous_attempts=4, supervised_attempts=1,
-            predicted_review_scope='val'):
+            predicted_review_scope='val', candidate_count=3,
+            single_candidate=False, reviewer_update_mode='none',
+            reviewer_feedback_size=0):
     if skill_edit_mode not in ('rewrite', 'structured'):
         raise ValueError('Unknown Skill edit mode')
     if acceptance_mode not in ('predicted', 'empirical', 'jev'):
         raise ValueError('Unknown acceptance mode')
     if predicted_review_scope not in ('val', 'train_cards'):
         raise ValueError('Unknown predicted review scope')
+    if candidate_count < 1 or (single_candidate and candidate_count != 1):
+        raise ValueError('single-candidate campaigns require candidate_count=1')
+    if reviewer_update_mode not in ('none', 'summary', 'rules'):
+        raise ValueError('Unknown reviewer update mode')
+    if reviewer_feedback_size < 0:
+        raise ValueError('reviewer_feedback_size must be nonnegative')
     repo = Path(__file__).resolve().parents[1]
+    source_git = git_identity(repo)
     runtime = configured_runtime()
     if root.exists() and any(root.iterdir()):
         raise ValueError('Prepare requires a new campaign directory')
@@ -204,11 +228,15 @@ def prepare(root, inputs, skill_edit_mode='rewrite', acceptance_mode='predicted'
     if models:
         role_models.update({k: v for k, v in models.items() if v})
     manifest = {
-        'schema': 1, 'repo': str(repo), 'source_commit': source_commit(repo), **runtime,
+        'schema': 1, 'repo': str(repo),
+        'source_commit': source_commit(repo), 'git': source_git, **runtime,
         'models': role_models,
         'concurrency': CONCURRENCY, 'evolve_rounds': 2,
         'autonomous_attempts': autonomous_attempts, 'supervised_attempts': supervised_attempts,
-        'batch_size': 50, 'candidate_count': 3,
+        'batch_size': 50, 'candidate_count': candidate_count,
+        'single_candidate': single_candidate,
+        'reviewer_update_mode': reviewer_update_mode,
+        'reviewer_feedback_size': reviewer_feedback_size,
         'skill_edit_mode': skill_edit_mode, 'acceptance_mode': acceptance_mode,
         'predicted_review_scope': predicted_review_scope,
         'benchmarks': details,
@@ -231,6 +259,17 @@ def verify(root):
         if digest(root / relative) != expected:
             raise ValueError(f'Frozen campaign file changed: {relative}')
     models = role_models(manifest)
+    candidate_count = int(manifest.get('candidate_count', 0))
+    single_candidate = manifest.get('single_candidate', False)
+    reviewer_update_mode = manifest.get('reviewer_update_mode', 'none')
+    feedback_size = int(manifest.get('reviewer_feedback_size', 0))
+    if (candidate_count < 1 or not isinstance(single_candidate, bool) or
+            (single_candidate and candidate_count != 1) or
+            reviewer_update_mode not in ('none', 'summary', 'rules') or
+            feedback_size < 0):
+        raise ValueError('Unexpected Reviewer coevolution protocol')
+    if manifest.get('git') != git_identity(Path(manifest['repo'])):
+        raise ValueError('Source Git identity changed after campaign preparation')
     if (not manifest.get('model') and not all(models.values())):
         raise ValueError('No LLM model configured')
     if (not all(models.values()) or manifest['concurrency'] != CONCURRENCY or
@@ -328,8 +367,15 @@ def stage_args(root, mode, benchmark, stage):
     manifest = read(root / 'manifest.json')
     concurrency = manifest['concurrency'][benchmark]
     suffix = '-preflight' if mode == 'preflight' else ''
+    task_path = root / 'inputs' / f'{benchmark}{suffix}-tasks.json'
+    run = root / mode / benchmark / 'run'
+    if (run / 'cold_start_complete.json').exists():
+        inherited_path = Path(read(run / 'config.json')['benchmark']['task_file'])
+        if digest(inherited_path) != digest(task_path):
+            raise ValueError('Imported cold-start task data differs from campaign inputs')
+        task_path = inherited_path
     args = ['--benchmark', benchmark, '--run-dir', str(root / mode / benchmark / 'run'),
-        '--task-file', str(root / 'inputs' / f'{benchmark}{suffix}-tasks.json'),
+        '--task-file', str(task_path),
         '--split-file', str(root / 'inputs' / f'{benchmark}{suffix}-split.json'),
         '--cold-start-workers', str(concurrency['cold_start_workers']),
         '--family-discovery-workers', str(concurrency['family_discovery_workers']),
@@ -343,6 +389,11 @@ def stage_args(root, mode, benchmark, stage):
     args += ['--skill-edit-mode', manifest.get('skill_edit_mode', 'rewrite')]
     args += ['--acceptance-mode', manifest.get('acceptance_mode', 'predicted')]
     args += ['--predicted-review-scope', manifest.get('predicted_review_scope', 'val')]
+    if manifest.get('single_candidate', False):
+        args += ['--single-candidate']
+    args += ['--reviewer-update-mode', manifest.get('reviewer_update_mode', 'none')]
+    if manifest.get('reviewer_feedback_size', 0):
+        args += ['--reviewer-feedback-size', str(manifest['reviewer_feedback_size'])]
     models = role_models(manifest)
     for flag, key in (('--l1-model', 'l1_executor'), ('--cold-start-model', 'cold_start'),
                       ('--l2-planner-model', 'l2_planner'), ('--l2-editor-model', 'l2_editor'),
@@ -412,9 +463,17 @@ def retryable_failure(exc, run, started):
              # this task-local aggregate when one or more tasks remain missing.
              # Retrying the stage therefore resumes from its cache rather than
              # discarding the completed tasks.
-             'PredictedValidationError')
+             'PredictedValidationError', 'ReviewerUpdateError')
     current = exc
     while current is not None:
+        if type(current).__name__ == 'PredictedValidationError':
+            errors = getattr(current, 'errors', ())
+            permanent = ('InvalidRequestError', 'AuthenticationError', 'PermissionError',
+                         'PermissionDeniedError', 'NotFoundError')
+            if any(name in str(item.get('error', ''))
+                   for item in errors if isinstance(item, dict) for name in permanent):
+                return False
+            return True
         if type(current).__name__ in names:
             return True
         current = current.__cause__
@@ -465,18 +524,28 @@ def run_job(root, mode, benchmark):
     verify(root)
     directory = root / mode / benchmark
     with locked(directory / 'job.lock'):
+        max_attempts = int(os.environ.get('EXPE_STAGE_ATTEMPTS', '0'))
+        if max_attempts < 0:
+            raise ValueError('Stage attempt budget must be nonnegative (0 means unlimited)')
         state_path = directory / 'status.json'
         state = read(state_path) if state_path.exists() else {'stages': {}, 'started': time.time()}
-        state.update(pid=os.getpid(), status='running')
+        reviewer_attempts = int(os.environ.get('EXPE_REVIEWER_ATTEMPTS', '32'))
+        if reviewer_attempts < 1:
+            raise ValueError('Reviewer attempt budget must be positive')
+        state.update(pid=os.getpid(), status='running',
+                     recovery={'stage_max_attempts': max_attempts,
+                               'reviewer_attempts': reviewer_attempts})
         for stage in STAGES:
             previous = state['stages'].get(stage, {})
             if previous.get('status') == 'complete':
                 audit_stage(root, mode, benchmark, stage)
                 continue
             first = previous.get('attempt', 0) + 1
-            for offset in range(len(RETRY_DELAYS) + 1):
+            offset = 0
+            while True:
                 attempt = first + offset
                 state.update(stage=stage, updated=time.time())
+                state.pop('next_retry_at', None)
                 state['stages'][stage] = {'attempt': attempt, 'status': 'running'}
                 log_path = directory / 'logs' / f'{stage}-{attempt}.log'
                 log_path.parent.mkdir(exist_ok=True)
@@ -496,13 +565,16 @@ def run_job(root, mode, benchmark):
                 save(state_path, state)
                 if complete:
                     break
-                if not result.get('retryable') or offset == len(RETRY_DELAYS):
+                if not result.get('retryable') or (max_attempts and offset + 1 >= max_attempts):
                     state.update(status='needs_attention', updated=time.time())
                     save(state_path, state)
                     return 1
-                state.update(status='retry_wait', updated=time.time())
+                delay = RETRY_DELAYS[min(offset, len(RETRY_DELAYS) - 1)]
+                state.update(status='retry_wait', updated=time.time(),
+                             next_retry_at=time.time() + delay)
                 save(state_path, state)
-                time.sleep(RETRY_DELAYS[offset])
+                time.sleep(delay)
+                offset += 1
                 state['status'] = 'running'
         state.update(status='complete', updated=time.time())
         save(state_path, state)
@@ -639,6 +711,10 @@ def main():
                         help='Skill acceptance mode frozen when preparing a campaign')
     parser.add_argument('--predicted-review-scope', choices=('val', 'train_cards'), default='val',
                         help='Evidence scope for predicted acceptance')
+    parser.add_argument('--candidate-count', type=int, default=3)
+    parser.add_argument('--single-candidate', action='store_true')
+    parser.add_argument('--reviewer-update-mode', choices=('none', 'summary', 'rules'), default='none')
+    parser.add_argument('--reviewer-feedback-size', type=int, default=0)
     parser.add_argument('--autonomous-attempts', type=int, default=4)
     parser.add_argument('--supervised-attempts', type=int, default=1)
     parser.add_argument('--l1-model')
@@ -656,7 +732,11 @@ def main():
         result = prepare(root, args.inputs.resolve(), args.skill_edit_mode, args.acceptance_mode,
                          models=models, autonomous_attempts=args.autonomous_attempts,
                          supervised_attempts=args.supervised_attempts,
-                         predicted_review_scope=args.predicted_review_scope)
+                         predicted_review_scope=args.predicted_review_scope,
+                         candidate_count=args.candidate_count,
+                         single_candidate=args.single_candidate,
+                         reviewer_update_mode=args.reviewer_update_mode,
+                         reviewer_feedback_size=args.reviewer_feedback_size)
         print(json.dumps({'root': str(root), 'benchmarks': result['benchmarks'], 'model': result['model']}))
     elif args.action == 'check':
         result = verify(root)

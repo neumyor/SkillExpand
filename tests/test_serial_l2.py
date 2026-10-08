@@ -211,6 +211,78 @@ class SerialL2Tests(unittest.TestCase):
             self.assertTrue(batch["acceptance"]["panel"].startswith("val:"))
             self.assertEqual(batch["reviews"], [])
 
+    def test_reviewer_coevolution_writes_train_feedback_and_versioned_update(self):
+        driver = self.prepared(
+            batch_size=50,
+            predicted_review_scope="val",
+            candidate_count=1,
+            single_candidate=True,
+            reviewer_update_mode="rules",
+        )
+        editor, _ = self.hosts(driver)
+
+        class Routes:
+            fingerprint = "test-val-routes"
+            groups = {skill.skill_id: (2,) for skill in driver.initial}
+
+        class Judge:
+            token_counter = len
+
+            @staticmethod
+            def llm(messages, **kwargs):
+                payload = json.loads(messages[-1].content)
+                body = payload["skill"]["body"]
+                good = body.startswith("NEW")
+                return json.dumps({
+                    "probability_true": 0.8 if good else 0.2,
+                    "predicted_success": good,
+                    "reason": "controlled coevolution forecast",
+                })
+
+        def factory(cfg, path):
+            if "predicted-" in str(path):
+                return Judge()
+            if "reviewer-update-" in str(path):
+                raise AssertionError("empty rule observations must skip model construction")
+            return editor
+
+        def feedback_units(specs, worker, workers, on_result, **kwargs):
+            if worker is PL.execute_experience:
+                return self.units(specs, worker, workers, on_result, **kwargs)
+            return self.fake_units(specs, worker, workers, on_result, **kwargs)
+
+        with patch.object(PL, "run_generic", side_effect=feedback_units), patch.object(
+            F, "build_reasoning_host", side_effect=factory
+        ), patch.object(L.FrozenRoutes, "run", return_value=Routes()):
+            result = driver.run_evolutions(1)
+
+        self.assertEqual(result["reviewer_prompt_version"], 1)
+        self.assertGreater(result["reviewer_feedback_count"], 0)
+        feedback = json.loads((self.root / "reviewer_feedback.jsonl").read_text().splitlines()[0])
+        self.assertEqual(feedback["split"], "train")
+        update = json.loads((self.root / "reviewer_updates.jsonl").read_text().splitlines()[0])
+        self.assertEqual(update["generation_round"], 1)
+        self.assertIn(feedback["feedback_id"], update["feedback_ids"])
+        self.assertEqual(update["generator"], "program")
+        self.assertEqual(update["skip_reason"], "no_observed_rules")
+        self.assertEqual(update["rules"], [])
+        self.assertIn("observed_rules", update["input_prompt"])
+        self.assertEqual(update["raw_output"], "")
+        from scripts.check_fresh_campaign import evidence_hashes
+        before = evidence_hashes(self.root)
+        restored = L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root), driver.config)
+        with patch.object(F, "build_reasoning_host", side_effect=AssertionError("resume model")):
+            self.assertEqual(restored.run_evolutions(1), result)
+        self.assertEqual(evidence_hashes(self.root), before)
+        from skillexpand.l2.audit import audit_round
+        feedback_path = self.root / "reviewer_feedback.jsonl"
+        original = feedback_path.read_text()
+        invalid_future = dict(feedback, round_index=999, feedback_id="unstarted-round")
+        feedback_path.write_text(original + json.dumps(invalid_future) + "\n")
+        with self.assertRaisesRegex(ValueError, "unstarted round"):
+            audit_round(self.root, 1)
+        feedback_path.write_text(original)
+
     def test_card_reviews_use_bounded_pool_and_keep_card_order(self):
         driver = self.prepared(batch_size=50, l2_review_workers=2)
         editor, reviewer = self.hosts(driver)

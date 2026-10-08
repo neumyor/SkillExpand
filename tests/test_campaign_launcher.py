@@ -23,6 +23,7 @@ def campaign(tmp_path, monkeypatch):
     monkeypatch.setattr(C, 'health', lambda root: {})
     monkeypatch.setattr(C, 'audit_stage', lambda *args: {'integrity': 'passed'})
     monkeypatch.setattr(C, 'RETRY_DELAYS', (0, 0, 0))
+    monkeypatch.setenv('EXPE_STAGE_ATTEMPTS', '4')
     return tmp_path
 
 
@@ -110,6 +111,22 @@ def test_validation_errors_do_not_retry_due_to_old_network_error(campaign):
 def test_predicted_validation_failure_is_retryable(campaign):
     exc = RuntimeError('Incomplete predicted validation (1 failed task(s); task_ids=[7])')
     assert C.retryable_failure(exc, campaign / 'run', 0)
+
+
+def test_default_recovery_survives_more_than_four_stage_failures(campaign, monkeypatch):
+    monkeypatch.delenv('EXPE_STAGE_ATTEMPTS')
+    calls = fake_processes(monkeypatch, campaign, lambda stage, attempt:
+        {'status': 'failed', 'retryable': True} if stage == 'cold-start' and attempt < 10
+        else {'status': 'complete', 'retryable': False})
+    assert C.run_job(campaign, 'preflight', 'searchqa') == 0
+    assert calls[:10] == [('cold-start', n) for n in range(1, 11)]
+    assert calls[10:] == [('evolve-1', 1), ('evolve-2', 1)]
+
+
+def test_reviewer_update_failure_is_retryable_but_integrity_error_is_not(campaign):
+    from skillexpand.runtime.reviewer_retry import ReviewerUpdateError
+    assert C.retryable_failure(ReviewerUpdateError('output budget exhausted'), campaign / 'run', 0)
+    assert not C.retryable_failure(ValueError('unknown frozen task'), campaign / 'run', 0)
 
 
 def test_input_validation_rejects_missing_tasks_and_unknown_roles():

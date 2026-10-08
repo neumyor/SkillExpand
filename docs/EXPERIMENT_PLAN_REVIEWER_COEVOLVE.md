@@ -31,9 +31,9 @@
 
 仅用 Reviewer 自己的 val 预测更新 Reviewer 会造成自我循环，不能作为真实反馈。本计划采用独立的 train feedback：
 
-- 对每个已提出的 candidate，在下一轮的 train task 上保存 old head 和 candidate 的**同 task、一次尝试、无重试** paired outcome；若成本不允许全量执行，预先固定一个 `reviewer_feedback` 子集，所有条件使用同一子集。
+- 对每个已提出的 candidate，在 round boundary 的固定 train family panel 上保存 old head 和 candidate 的**同 task、一次尝试、无重试** paired outcome；该 panel 在 manifest 中冻结，反馈在当前 round 完成后落盘，并只被下一 round 消费。若成本不允许全量执行，预先固定一个 `reviewer_feedback` 子集，所有条件使用同一子集。
 - 反馈记录 task ID、old/candidate Skill key、一次执行是否成功、prediction、错误类别和轨迹 hash。
-- 真实反馈只用于下一轮 Reviewer prompt 的 calibration block，例如“在某类 task 上，带有某种规则的修改曾被高估/低估”。程序先按固定模板聚合统计，LLM 只负责把已验证事实压缩成简短规则；不能让 LLM 从原始轨迹自由编造经验。
+- 真实反馈只用于下一轮 Reviewer prompt 的 calibration block，例如“在某类 task 上，带有某种规则的修改曾被高估/低估”。程序先按固定模板聚合统计，C3 的 Reviewer LLM 只负责把已验证事实压缩成简短规则；不能让 LLM 从原始轨迹自由编造经验。C2 仍生成并审计 update，但保持初始 prompt，不把摘要或规则发送给 Reviewer。
 - val 仍只用于当前 round 的 acceptance，test 仍只用于最终报告。Reviewer update 不读取 test，也不把 val 结果写回 prompt。
 - 若上一轮没有已完成的真实 feedback，Reviewer 使用初始 prompt，不能假装已经校准。
 
@@ -47,11 +47,11 @@
 |---|---:|---|---|
 | C0 | 1 | 固定初始 prompt | 无 |
 | C1 | 1 | 固定初始 prompt + 结构化历史摘要 | 无新增校准规则 |
-| C2 | 1 | 固定初始 prompt | 有，按上一轮 train paired feedback 更新 |
+| C2 | 1 | 固定初始 prompt（update 仅作审计对照） | 有，按上一轮 train paired feedback 更新 |
 | C3 | 1 | 固定初始 prompt + 校准规则 | 有，主方案 |
 | 可选 M | 3 | 当前多候选基线 | 无，作为历史协议参照 |
 
-主比较是 C3 vs C2：两者都单候选且都有真实反馈，唯一差异是校准摘要是否真正进入 Reviewer prompt。C2 用固定的反馈记录作为审计对照，C3 让更新机制按预注册模板工作。C0 用于衡量“只简化候选数”本身的影响。多候选 M 仅用于解释与历史结果的关系，不从它挑最佳候选与 C3 比较。
+主比较是 C3 vs C2：两者都单候选且都有真实反馈，唯一差异是 calibration block 是否进入 Reviewer prompt。C2 的 update 只作为固定反馈和版本链的审计对照，C3 由 Reviewer LLM 按预注册模板压缩规则。C0 用于衡量“只简化候选数”本身的影响。多候选 M 仅用于解释与历史结果的关系，不从它挑最佳候选与 C3 比较。
 
 如果实现成本只允许两个条件，至少运行 C0 和 C3，并保留逐候选、逐 task 原始记录；这时不能把 C3 的收益单独归因于反馈校准与单候选简化。
 
@@ -104,4 +104,38 @@ Reviewer update 必须是版本化工件，包含：
 
 长任务启动前先完成 1–2 task 的全链路 smoke、不变量检查和真实模型健康检查；每个 task 完成即落盘并支持 resume。每阶段先做完整性审计，再使用结果。发现重复 writer、scope 错误、反馈覆盖不完整或 prompt 版本漂移时，保留现场并废弃该条件。
 
-当前代码尚未实现本计划的单候选和 Reviewer update 机制；本文件是该分支的研究设计与实现验收标准，不代表已有实验结果。
+本分支已实现单候选开关、train paired feedback 和版本化 Reviewer update 的协议骨架；本文件仍是研究设计与实现验收标准，不代表已有 benchmark 实验结果。
+
+## 8. 实施拆解与运行入口
+
+本分支的实现按以下顺序推进，任何完整 benchmark 运行都必须在这些步骤通过后进行：
+
+1. **协议层**：开启 `--candidate-count 1 --single-candidate`，在 batch journal 中冻结单候选协议；若 Planner 返回多个候选，直接使该 batch 无效，不生成补位候选。
+2. **反馈层**：对每个已落盘候选，在固定的 train family panel 上先保存 Reviewer 的 old/candidate 概率，再以同一 task、同一 executor、一次自主尝试执行两侧。反馈只允许写入 `reviewer_feedback.jsonl`。
+3. **校准层**：由程序计算 paired precision、false-positive regression，以及 old/candidate 绝对成功概率的 Brier 和 ECE，生成版本化 `reviewer_updates.jsonl`。`summary` 模式保持初始 Reviewer prompt，`rules` 模式让 Reviewer LLM 只压缩带 feedback ID 的有限规则。
+4. **审计层**：round audit 必须检查 candidate count、train-only feedback、唯一 feedback ID、old/candidate task 覆盖和 prompt version；test 不进入任何 update。
+5. **预检层**：先用 1–2 个 train task 完成全链路 smoke，再做 prompt 改变不变量、候选/反馈覆盖和对照条件检查，最后才允许启动完整的两轮 campaign。
+
+推荐的主方案入口是：
+
+```bash
+.venv/bin/python -m skillexpand \
+  --benchmark searchqa --run-dir runs/reviewer-c3-searchqa \
+  --phase evolve --evolve-rounds 2 --resume \
+  --candidate-count 1 --single-candidate \
+  --acceptance-mode predicted --predicted-review-scope val \
+  --reviewer-update-mode rules --reviewer-feedback-size 0
+```
+
+其中 `--reviewer-update-mode summary` 对应 C2，`none` 对应 C0，`rules` 对应 C3。完整实验前必须分别冻结 C0/C2/C3 的 manifest、feedback subset、模型和 route，并只在固定 test 集上报告最终 paired 结果。
+
+当前实现覆盖 C0、C2、C3 三个可归因条件；C1 的 history-only 敏感性条件暂不进入主实验，避免把结构化历史摘要与真实反馈校准混在同一个主比较中。
+
+## 9. Reviewer 更新恢复约定
+
+- 规则模板仍只提取“预测改善、实际退化”的 train 配对记录；修复不扩展模板、不改变历史预测、缓存身份或实验比较口径。
+- 没有任何候选 feedback 时沿用上一份有效更新。有 feedback 但模板生成空观察时，跳过 LLM，保存 `generator=program`、`skip_reason=no_observed_rules`、`rules=[]` 的新版本；统计摘要来自真实 feedback，版本与 parent 链连续。
+- 逐任务预测和规则压缩共用输出重试机制，默认每个请求最多 32 次尝试，`EXPE_REVIEWER_ATTEMPTS` 可调整。每次 prompt 相同，失败等待依次为 1、2、4、8、16、30 秒，随后固定 30 秒；所有实际请求仍写入原始 usage ledger。
+- 网络恢复仍由底层 provider wrapper 处理。输出重试耗尽后抛出 `ReviewerUpdateError`，由 supervisor 从缓存与 journal 续跑；默认可恢复阶段失败持续重试，等待依次为 15、60、180、300 秒，之后固定 300 秒。`EXPE_STAGE_ATTEMPTS=0` 表示无次数上限，正整数可设置每次 job 启动的阶段尝试上限。
+- 请求契约/认证错误及实验完整性错误保持停止；放宽恢复预算不放宽真实 feedback 引用、任务覆盖、冻结配置、轨迹及版本链校验。历史阶段审计只使用其边界之前的 feedback 与 update。
+- 每次修复记录旧/新代码签名、恢复策略及已保留证据的哈希。续跑仅补齐失败部分，完成后核对阶段审计及证据不变量。
