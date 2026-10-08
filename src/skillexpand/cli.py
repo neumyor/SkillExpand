@@ -85,6 +85,9 @@ def build_parser():
         help="Executed val tasks per candidate under sampled acceptance")
     p.add_argument("--acceptance-confidence", type=float, default=0.9,
         help="One-sided confidence level of the sampled lower bound")
+    p.add_argument("--claim-verification", choices=("on", "off"), default="on",
+        help="Let an independent verifier attribute trajectory differences to the "
+             "claimed rule (sampled acceptance only)")
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent train tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,
@@ -100,6 +103,7 @@ def build_parser():
     p.add_argument('--l2-planner-model', help='LLM used to propose L2 hypotheses')
     p.add_argument('--l2-editor-model', help='LLM used to materialize rewrite-mode candidates')
     p.add_argument('--l2-reviewer-model', help='LLM used by per-card L2 reviewers')
+    p.add_argument('--l2-verifier-model', help='LLM used by the claim verifier')
     p.add_argument('--selector-model', help='LLM used to route validation/test tasks')
     p.add_argument("--resume", action="store_true")
     p.add_argument(
@@ -143,6 +147,7 @@ def apply_model_overrides(cfg, args):
         'l2_planner': base_model,
         'l2_editor': base_model,
         'l2_reviewer': base_model,
+        'l2_verifier': base_model,
         'selector': base_model,
     }
     existing = cfg.get('models', {})
@@ -152,6 +157,7 @@ def apply_model_overrides(cfg, args):
         'l2_planner': args.l2_planner_model,
         'l2_editor': args.l2_editor_model,
         'l2_reviewer': args.l2_reviewer_model,
+        'l2_verifier': args.l2_verifier_model,
         'selector': args.selector_model,
     }
     # An imported cold-start config already contains its frozen role map; flags
@@ -320,6 +326,7 @@ def main(argv=None):
                 reviewer_feedback_size=args.reviewer_feedback_size,
                 acceptance_sample_size=args.acceptance_sample_size,
                 acceptance_confidence=args.acceptance_confidence,
+                claim_verification=args.claim_verification,
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config,
                                          allow_code_change=args.allow_code_change)

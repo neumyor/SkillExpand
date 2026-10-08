@@ -20,6 +20,8 @@ from skillexpand.l2.editor import SkillEditor
 from skillexpand.evaluation import ppi as PPI
 from skillexpand.evaluation import validation as V
 from skillexpand.evaluation.delta_review import PairedDeltaReviewer
+from skillexpand.evaluation.claim_check import CATEGORIES, TrajectoryVerifier
+from skillexpand.evaluation.divergence import action_sequence, first_divergence
 from skillexpand.evaluation.sampled_validation import SampledDeltaValidator
 from skillexpand.runtime import agent_factory as F
 from skillexpand.persistence.io import AuditFailure
@@ -258,22 +260,57 @@ def structured_skill(body: str, *, version: int = 0) -> S.Skill:
 
 
 class StubExecutor:
-    """Deterministic stand-in whose candidate fixes the listed tasks."""
+    """Deterministic stand-in whose candidate fixes, and acts on, listed tasks.
+
+    Actions and outcomes come from the same predicate, so a task that diverges
+    is exactly a task the change acts on -- which is what the verifier's
+    invariants are checked against.
+    """
 
     protocol_hash = 'stub-executor-v1'
+    BASE_ACTIONS = ('search', 'finish')
 
     def __init__(self, improvement=()):
         self.improvement = set(improvement)
 
+    def _acts(self, skill, task_id):
+        return ('open it before placing' in skill.body) and task_id in self.improvement
+
+    def actions(self, skill, task_id):
+        return (('open',) + self.BASE_ACTIONS) if self._acts(skill, task_id) \
+            else self.BASE_ACTIONS
+
     def score(self, skill, task_ids, panel_key, role=S.ROLE_EVAL):
-        repaired = 'open it before placing' in skill.body
         outcomes = []
         for task_id in task_ids:
-            success = (task_id % 2 == 0) or (repaired and task_id in self.improvement)
+            success = (task_id % 2 == 0) or self._acts(skill, task_id)
             outcomes.append(S.TaskOutcome(
                 task_id=task_id, family_id=skill.family_id, role=role,
                 success=success, note='solved' if success else 'unresolved'))
         return V.PanelScore(skill.key, skill.body, tuple(task_ids), tuple(outcomes))
+
+    def records(self, skill, task_ids, panel_key, role=S.ROLE_EVAL):
+        return {
+            task_id: {
+                'task_id': task_id, 'skill_key': skill.key,
+                'events': [{'action': action, 'observation': f'after {action}'}
+                           for action in self.actions(skill, task_id)],
+            }
+            for task_id in task_ids
+        }
+
+
+class StubVerifyHost:
+    """Records each verifier prompt and returns one fixed verdict."""
+
+    def __init__(self, category='claim_confirmed'):
+        self.category = category
+        self.prompts = []
+
+    def llm(self, messages, **kwargs):
+        self.prompts.append('\n'.join(str(getattr(m, 'content', m)) for m in messages))
+        return json.dumps({'category': self.category,
+                           'reason': 'the change adds the open step at the divergence'})
 
 
 class StubReviewHost:
@@ -446,6 +483,158 @@ class SampledBatchJournalTests(unittest.TestCase):
         batch['hypotheses'][0].pop('claim')
         with self.assertRaises(AuditFailure):
             audit_sampled_batch(batch)
+
+
+class DivergenceTests(unittest.TestCase):
+    def events(self, actions):
+        return tuple({'action': action, 'observation': f'after {action}'}
+                     for action in actions)
+
+    def test_identical_actions_have_no_divergence(self):
+        self.assertIsNone(first_divergence(self.events(['a', 'b']), self.events(['a', 'b'])))
+        self.assertEqual(action_sequence(self.events(['a', 'b'])), ('a', 'b'))
+
+    def test_the_first_differing_step_is_reported_with_its_context(self):
+        base = self.events(['search', 'open', 'finish'])
+        candidate = self.events(['search', 'open', 'take', 'finish'])
+        divergence = first_divergence(base, candidate)
+        self.assertEqual(divergence.step, 3)
+        self.assertEqual(divergence.base_action, 'finish')
+        self.assertEqual(divergence.candidate_action, 'take')
+        self.assertEqual(divergence.prefix_actions, ('search', 'open'))
+        self.assertEqual(divergence.context_observation, 'after open')
+        self.assertEqual((divergence.base_steps, divergence.candidate_steps), (3, 4))
+
+    def test_a_run_that_stops_earlier_is_a_divergence(self):
+        divergence = first_divergence(self.events(['a', 'b']), self.events(['a']))
+        self.assertEqual(divergence.step, 2)
+        self.assertIsNone(divergence.candidate_action)
+        self.assertEqual(divergence.base_action, 'b')
+
+    def test_only_executed_actions_align_the_two_runs(self):
+        base = ({'action': 'a'}, {'observation': 'narration without an action'},
+                {'action': 'b'})
+        candidate = ({'action': 'a'}, {'action': 'b'})
+        self.assertIsNone(first_divergence(base, candidate))
+
+
+class VerificationTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.object(F, 'task_text_of',
+                               side_effect=lambda cfg, task_id: f'Task {task_id}.')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.root = Path(tempfile.mkdtemp())
+        self.routes = SimpleNamespace(groups={'searchqa.f': PANEL}, fingerprint='fp')
+        self.cfg = SimpleNamespace(benchmark=SimpleNamespace(name='searchqa', task_file='x'))
+        self.base = structured_skill(SS.render(SS.from_sections({
+            'procedure': ['Search the named item.'],
+            'conditions': ['If the receptacle is exposed, place the object.'],
+            'completion_checks': []})))
+        self.candidate = structured_skill(SS.render(SS.from_sections({
+            'procedure': ['Search the named item.'],
+            'conditions': ['If the receptacle is closed, open it before placing the object.'],
+            'completion_checks': []})), version=1)
+        self.claim = S.Claim('the target receptacle is closed',
+                             'open it before placing the object')
+
+    def verifier(self, host):
+        return TrajectoryVerifier(self.cfg, V.ScoreCache(self.root / 'verifications.jsonl'),
+                                  workers=1,
+                                  host_factory=lambda task_id, usage_path: host)
+
+    def validator(self, **kwargs):
+        reviewer = PairedDeltaReviewer(
+            self.cfg, self.routes, V.ScoreCache(self.root / 'predictions.jsonl'), workers=1,
+            host_factory=lambda task_id, usage_path: StubReviewHost(delta=0.6))
+        return SampledDeltaValidator(
+            self.cfg, self.routes, reviewer, StubExecutor(improvement=[1, 3, 5, 7, 9]),
+            sample_size=4, confidence=0.9, **kwargs)
+
+    def test_the_verifier_parses_and_caches_its_verdict(self):
+        host = StubVerifyHost(category='claim_not_confirmed')
+        verifier = self.verifier(host)
+        divergence = first_divergence(
+            ({'action': 'a'},), ({'action': 'b'},))
+        changed = {'section': 'conditions', 'rule_id': 'C1',
+                   'before': 'If exposed, place.', 'after': 'If closed, open then place.'}
+        first = verifier.verify(1, changed, self.claim, divergence, 'panel')
+        second = verifier.verify(1, changed, self.claim, divergence, 'panel')
+        self.assertEqual(first['category'], 'claim_not_confirmed')
+        self.assertEqual(len(host.prompts), 1)
+        self.assertEqual(second['category'], first['category'])
+        for expected in ('execution_difference', 'changed_rule', 'deliberately withheld',
+                         'action_without_change'):
+            self.assertIn(expected, host.prompts[0])
+
+    def test_an_unknown_category_is_rejected(self):
+        # The parser is checked directly: the repair budget would otherwise make
+        # this test sleep through eight backoff waits.
+        verifier = self.verifier(StubVerifyHost())
+        with self.assertRaises(ValueError):
+            verifier._parse_response(json.dumps({'category': 'looks_good',
+                                                 'reason': 'fine'}))
+        with self.assertRaises(ValueError):
+            verifier._parse_response(json.dumps({'category': 'unrelated',
+                                                 'reason': ''}))
+        self.assertEqual(
+            verifier._parse_response(json.dumps({'category': 'unrelated',
+                                                 'reason': 'the step is unrelated'}))
+            ['category'], 'unrelated')
+
+    def test_verification_covers_exactly_the_observed_differences(self):
+        host = StubVerifyHost()
+        validator = self.validator(verifier=self.verifier(host))
+        result = validator.validate(self.base, self.candidate, self.claim,
+                                    'panel', 'sample-key')
+        executed = set(result.sample_task_ids)
+        diverged = {task_id for task_id in executed if task_id in {1, 3, 5, 7, 9}}
+        self.assertTrue(result.verification_enabled)
+        self.assertEqual({row['task_id'] for row in result.rows
+                          if row['verification'] is not None}, diverged)
+        self.assertEqual(len(host.prompts), len(diverged))
+        for row in result.rows:
+            if not row['sampled']:
+                self.assertIsNone(row['divergence'])
+                self.assertIsNone(row['verification'])
+            elif row['task_id'] in diverged:
+                self.assertEqual(row['divergence']['diverged_at_step'], 1)
+                self.assertIn(row['verification']['category'], CATEGORIES)
+            else:
+                self.assertIsNone(row['divergence'])
+                self.assertIsNone(row['verification'])
+
+    def test_verification_off_records_no_verdicts_and_never_calls_the_judge(self):
+        host = StubVerifyHost()
+        validator = self.validator()
+        result = validator.validate(self.base, self.candidate, self.claim,
+                                    'panel', 'sample-key')
+        self.assertFalse(result.verification_enabled)
+        self.assertEqual(host.prompts, [])
+        self.assertTrue(all(row['verification'] is None for row in result.rows))
+
+    def test_the_audit_requires_a_verdict_for_every_observed_difference(self):
+        validator = self.validator(verifier=self.verifier(StubVerifyHost()))
+        result = validator.validate(self.base, self.candidate, self.claim,
+                                    'panel', 'sample-key').to_dict()
+        batch = {
+            'base_skill_key': self.base.key,
+            'hypotheses': [dict(hypothesis(), claim=self.claim.to_dict())],
+            'proposals': [{'claim': self.claim.to_dict(),
+                           'edit': {'candidate': {'candidate_id': 'c1'}}}],
+            'acceptance': {'mode': 'sampled', 'scope': 'val',
+                           'task_ids': list(PANEL), 'sample_size': 4,
+                           'confidence': 0.9, 'executions': 4,
+                           'predicted_requests': len(PANEL),
+                           'candidates': [{'candidate_id': 'c1', 'result': result}]},
+        }
+        audit_sampled_batch(batch)
+        stripped = json.loads(json.dumps(batch))
+        rows = stripped['acceptance']['candidates'][0]['result']['rows']
+        target = next(row for row in rows if row['verification'] is not None)
+        target['verification'] = None
+        with self.assertRaises(AuditFailure):
+            audit_sampled_batch(stripped)
 
 
 if __name__ == '__main__':

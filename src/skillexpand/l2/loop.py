@@ -27,6 +27,7 @@ from skillexpand.evaluation import validation as VA
 from skillexpand.evaluation.jev import JevSkillScorer
 from skillexpand.l2 import reviewer_coevolution as RC
 from skillexpand.l2 import sampled as SM
+from skillexpand.evaluation.claim_check import TrajectoryVerifier
 from skillexpand.evaluation.delta_review import PairedDeltaReviewer
 from skillexpand.evaluation.sampled_validation import (
     MIN_SAMPLE_SIZE, SampledDeltaValidator)
@@ -49,6 +50,7 @@ class EvolutionConfig:
     reviewer_feedback_size: int = 0
     acceptance_sample_size: int = 16
     acceptance_confidence: float = 0.9
+    claim_verification: str = "on"
 
     def __post_init__(self):
         if min(self.batch_size, self.candidate_count, self.evolve_l1_workers,
@@ -73,6 +75,8 @@ class EvolutionConfig:
                 f"acceptance_sample_size must be at least {MIN_SAMPLE_SIZE}")
         if not 0.0 < self.acceptance_confidence < 1.0:
             raise InvalidInput("acceptance_confidence must lie strictly between 0 and 1")
+        if self.claim_verification not in ("on", "off"):
+            raise InvalidInput("claim_verification must be 'on' or 'off'")
         # The sampled protocol is only checkable against one rule change.
         SM.validate_protocol(self.acceptance_mode, self.skill_edit_mode)
 
@@ -224,10 +228,22 @@ class SerialEvolutionLoop:
             self.sampled_routes,
             self.config.l2_review_workers,
         )
+        verifier = None
+        if self.config.claim_verification == "on":
+            def verifier_factory(task_id, usage_path):
+                return self._reasoning_host("l2_verifier", usage_path)
+
+            verifier = TrajectoryVerifier(
+                self.cfg,
+                VA.ScoreCache(self.paths.root / "val" / "verifications.jsonl"),
+                self.config.l2_review_workers,
+                host_factory=verifier_factory,
+            )
         self.sampled_validator = SampledDeltaValidator(
             self.cfg, self.sampled_routes, reviewer, executor,
             sample_size=self.config.acceptance_sample_size,
             confidence=self.config.acceptance_confidence,
+            verifier=verifier,
         )
         return self.sampled_validator
 

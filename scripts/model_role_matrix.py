@@ -24,6 +24,7 @@ ROLES = (
     "l2_planner",
     "l2_editor",
     "l2_reviewer",
+    "l2_verifier",
     "selector",
 )
 PRIMARY_ROLES = ("l1_executor", "cold_start", "l2_planner", "l2_reviewer")
@@ -35,6 +36,7 @@ ROLE_FLAGS = {
     "l2_planner": "--l2-planner-model",
     "l2_editor": "--l2-editor-model",
     "l2_reviewer": "--l2-reviewer-model",
+    "l2_verifier": "--l2-verifier-model",
     "selector": "--selector-model",
 }
 

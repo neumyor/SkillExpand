@@ -70,6 +70,8 @@ REPAIR: Dict[str, RepairPolicy] = {p.name: p for p in (
     RepairPolicy('reviewer.calibration_rules', 32, _REVIEWER_BACKOFF),
     # Paired per-task delta prediction for one rule change on the val panel.
     RepairPolicy('reviewer.delta_review', 32, _REVIEWER_BACKOFF),
+    # Third-party attribution of a trajectory difference to one rule.
+    RepairPolicy('verifier.claim', 8, _REVIEWER_BACKOFF),
     # L2 Planner hypotheses and per-card Reviewer judgments.
     RepairPolicy('planner.hypotheses', 2),
     RepairPolicy('reviewer.card', 2),

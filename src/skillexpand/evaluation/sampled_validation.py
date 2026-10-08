@@ -24,6 +24,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from skillexpand import schema as S
 from skillexpand.evaluation import ppi as PPI
+from skillexpand.evaluation.delta_review import change_view
+from skillexpand.evaluation.divergence import first_divergence
 from skillexpand.reliability.errors import InvalidInput
 
 #: Below this many executed pairs the interval cannot be read as evidence.
@@ -45,6 +47,9 @@ class SampledValidation:
     decision: PPI.SampleDecision
     arms: Tuple[S.ArmEvaluation, ...]
     rows: Tuple[Dict[str, Any], ...]
+    #: Whether an independent verifier attributed the divergences.  Recorded so
+    #: the audit can tell "no divergence found" from "verification disabled".
+    verification_enabled: bool = False
 
     @property
     def passed(self) -> bool:
@@ -106,7 +111,7 @@ class SampledDeltaValidator:
     """Corrections from a random val sample; the decision rule is fixed here."""
 
     def __init__(self, cfg, routes, reviewer, executor, sample_size: int = 16,
-                 confidence: float = 0.9):
+                 confidence: float = 0.9, verifier: Optional[Any] = None):
         if int(sample_size) < MIN_SAMPLE_SIZE:
             raise InvalidInput(
                 f'acceptance sample size must be at least {MIN_SAMPLE_SIZE}: '
@@ -119,12 +124,14 @@ class SampledDeltaValidator:
         self.executor = executor
         self.sample_size = int(sample_size)
         self.confidence = float(confidence)
+        self.verifier = verifier
         self.protocol_hash = S.content_hash({
             'protocol': 'sampled-delta-acceptance',
             'reviewer': reviewer.protocol_hash,
             'executor': executor.protocol_hash,
             'sample_size': self.sample_size,
             'confidence': self.confidence,
+            'verifier': getattr(verifier, 'protocol_hash', None),
         })
 
     def validate(self, base_skill: S.Skill, candidate_skill: S.Skill, claim: S.Claim,
@@ -156,20 +163,39 @@ class SampledDeltaValidator:
         decision = PPI.estimate(prediction.deltas, measurements,
                                 confidence=self.confidence)
 
+        # Attribution runs only where the two executions actually differ, and it
+        # reads those executions back from the cache rather than rerunning them.
+        divergences, verifications, changed_rule = {}, {}, None
+        if self.verifier is not None:
+            changed_rule = change_view(base_skill, candidate_skill)
+            base_records = self.executor.records(base_skill, sample, panel_key)
+            candidate_records = self.executor.records(candidate_skill, sample, panel_key)
+            for task_id in sample:
+                divergence = first_divergence(
+                    base_records[task_id].get('events') or (),
+                    candidate_records[task_id].get('events') or ())
+                divergences[task_id] = divergence
+                if divergence is not None:
+                    verifications[task_id] = self.verifier.verify(
+                        task_id, changed_rule, claim, divergence, panel_key)
+
         prediction_by_task = {int(row['task_id']): row for row in prediction.rows}
         rows = []
         for task_id in panel:
             predicted = prediction_by_task[task_id]
+            sampled = task_id in measurements
+            divergence = divergences.get(task_id) if sampled else None
             rows.append({
                 'task_id': task_id,
                 'delta_probability': float(predicted['delta_probability']),
                 'trigger_probability': float(predicted['trigger_probability']),
                 'reviewer_reason': str(predicted['reason']),
                 'claim_inconsistent': bool(predicted.get('claim_inconsistent', False)),
-                'sampled': task_id in measurements,
-                'measured_delta': (measurements[task_id] if task_id in measurements
-                                   else None),
+                'sampled': sampled,
+                'measured_delta': (measurements[task_id] if sampled else None),
                 'from_cache': bool(predicted.get('from_cache', False)),
+                'divergence': (divergence.payload() if divergence is not None else None),
+                'verification': (verifications.get(task_id) if sampled else None),
             })
         return SampledValidation(
             skill_id=base_skill.skill_id,
@@ -183,4 +209,5 @@ class SampledDeltaValidator:
             decision=decision,
             arms=(base_arm, candidate_arm),
             rows=tuple(rows),
+            verification_enabled=self.verifier is not None,
         )

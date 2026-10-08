@@ -223,6 +223,40 @@ class FixedSkillScorer:
             }
         )
 
+    def _keys(self, skill, task_ids, panel_key, role):
+        """Cache keys of one panel measurement, shared by scoring and reading.
+
+        Description does not enter execution. Equal bodies share identical
+        measurements, so a description-only edit cannot win through repeated
+        sampling.
+        """
+        identity = S.content_hash(
+            {
+                "protocol": self.protocol_hash,
+                "panel": panel_key,
+                "skill_id": skill.skill_id,
+                "body": skill.body,
+            }
+        )
+        return {
+            t: ScoreCache.make_key(self.benchmark, identity, t, role, skill.body)
+            for t in task_ids
+        }
+
+    def records(self, skill, task_ids, panel_key, role=S.ROLE_EVAL):
+        """Cached execution records of a panel that has already been measured.
+
+        Reading the measurements back is how a later diagnostic -- the verifier's
+        attribution of a trajectory difference -- uses the same executions the
+        decision rested on, instead of running anything again.
+        """
+        keys = self._keys(skill, tuple(task_ids), panel_key, role)
+        found = {t: self.cache.get(keys[t]) for t in keys}
+        missing = sorted(t for t, record in found.items() if record is None)
+        if missing:
+            raise InvalidInput(f"No cached execution for task(s) {missing[:3]}")
+        return found
+
     def score(
         self,
         skill,
@@ -237,21 +271,8 @@ class FixedSkillScorer:
             raise JournalConflict(
                 "Evaluation tasks must belong to this Skill frozen route group"
             )
-        # Description does not enter execution. Equal bodies share identical measurements,
-        # so a description-only edit cannot win through repeated sampling.
-        identity = S.content_hash(
-            {
-                "protocol": self.protocol_hash,
-                "panel": panel_key,
-                "skill_id": skill.skill_id,
-                "body": skill.body,
-            }
-        )
         pending, records = [], {}
-        keys = {
-            t: ScoreCache.make_key(self.benchmark, identity, t, role, skill.body)
-            for t in task_ids
-        }
+        keys = self._keys(skill, task_ids, panel_key, role)
         for t in task_ids:
             hit = self.cache.get(keys[t])
             if hit is not None:

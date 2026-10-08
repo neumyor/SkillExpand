@@ -110,6 +110,37 @@ def audit_sampled_batch(batch):
             require(abs(float(recorded.get(key, 0.0)) - float(value)) < 1e-9,
                     f'recorded sampled {key} does not match the recomputed estimate')
 
+        # Attribution is a diagnostic, and two invariants keep it one: it must
+        # only ever describe a difference that was actually observed, and it must
+        # cover every observed difference when it is enabled -- a partial panel
+        # would let the weakest cases drop out.
+        from skillexpand.evaluation.claim_check import CATEGORIES
+
+        enabled = result.get('verification_enabled')
+        require(isinstance(enabled, bool),
+                'sampled result does not record whether verification ran')
+        for task_row in rows:
+            divergence = task_row.get('divergence')
+            verification = task_row.get('verification')
+            if not task_row.get('sampled'):
+                require(divergence is None and verification is None,
+                        'unexecuted task recorded a trajectory difference')
+                continue
+            require(verification is None or divergence is not None,
+                    'verification recorded without an execution difference')
+            if not enabled:
+                require(verification is None,
+                        'verification recorded although it was disabled')
+                continue
+            require((divergence is None) == (verification is None),
+                    'an observed execution difference was left unverified')
+            if verification is not None:
+                require(verification.get('category') in CATEGORIES,
+                        'verifier returned an unknown category')
+                require(isinstance(verification.get('reason'), str)
+                        and verification['reason'].strip(),
+                        'verifier returned an empty reason')
+
 def audit_batch(root, batch, base, cards):
     """Replay cached decisions without any model, environment, or file writes."""
     root = Path(root)

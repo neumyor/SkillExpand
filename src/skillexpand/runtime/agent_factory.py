@@ -72,6 +72,7 @@ def load_config(benchmark: str = 'alfworld', agent: str = 'expel') -> Any:
             'l2_planner': ag.llm,
             'l2_editor': ag.llm,
             'l2_reviewer': ag.llm,
+            'l2_verifier': ag.llm,
             'selector': ag.llm,
         },
         'ai_name': bench.ai_name,

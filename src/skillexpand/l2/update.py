@@ -147,7 +147,7 @@ class SkillPatchRunner:
 
 
     def _accept_sampled(self, record, base_skill, ordered, aliases, candidate_claims,
-                        identity, acceptance_record):
+                        acceptance_record):
         """Paired delta corrected by a random val sample (see l2.sampled).
 
         Every proposed candidate is sampled whether or not it is later accepted,
@@ -169,7 +169,8 @@ class SkillPatchRunner:
                     "claim_id": claim.claim_id,
                     "result": validator.validate(
                         base_skill, candidate.skill, claim, panel_key,
-                        sample_key=f"sampled:{identity}:{candidate.candidate_id}",
+                        sample_key=(f"sampled:{panel_key}:"
+                                    f"{candidate.candidate_id}"),
                     ).to_dict(),
                 })
             acceptance = {
@@ -393,7 +394,7 @@ class SkillPatchRunner:
         # paths: it executes, predicts, and records a different result shape.
         if self.acceptance_mode == "sampled":
             return self._accept_sampled(record, base_skill, ordered, aliases,
-                                        candidate_claims, identity, acceptance_record)
+                                        candidate_claims, acceptance_record)
 
         # The default predicted protocol is an independent validation-panel
         # forecast.  It deliberately does not expose L1 cards or trajectories
