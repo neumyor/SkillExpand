@@ -156,6 +156,10 @@ worker 只消费它保存的 trajectory 与 verifier 结果。任务表来自 `-
 Tencent provider 会偶发拒绝严格的 wire `response_format`（HTTP 400 / 400006）。predicted Reviewer 可用
 `EXPE_REVIEWER_RESPONSE_FORMAT=omit` 省去该字段（prompt 与解析不变，协议哈希会区分两种模式）。
 
+### TB-eval（progressive library，E3/E4）
+
+`--progressive-library` 让 TerminalBench 的 L1 在运行时从 Skill 目录里选一个 Skill 再加载其 body，并把 predicted 验收的面板换成全部 train 题（闭集）。它要求冻结 config 的 `benchmark.progressive_library`（由 `scripts/import_terminalbench_batch.py` 写入）、`--acceptance-mode predicted --predicted-review-scope val --reviewer-update-mode none`，且只用于 `terminalbench` + Harbor；与冻结 config 不一致会在启动时直接报错。每个阶段用 `scripts/tb_eval_stage.py prepare|launch --stage E3|E4` 在独立 run 目录中原地运行（launch 写死完整开关集）。selector 溯源写入 `evolution/round-N/selection/`，`audit_round` 会与 manifest 的 `routes` 交叉核对。闭集验收不能与 main 的 val 面板结果比较，详见 `docs/EXPERIMENT_PLAN_TB_EVAL.md`。
+
 ## campaign launcher
 
 `python scripts/run_campaign.py prepare --root <campaign> --inputs <dir>` 冻结两个 benchmark 的输入、模型角色和并发参数，并把当前 `src/` 复制到 `<campaign>/code/src`，同时写入冻结启动器 `<campaign>/code/run_campaign.py`。之后的所有动作都用冻结启动器运行，确保只执行冻结代码（对已 prepare 的 campaign，`scripts/run_campaign.py` 也会把非 prepare 动作转交给冻结启动器）：
