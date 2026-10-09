@@ -7,7 +7,8 @@ from skillexpand import schema as S
 from skillexpand.persistence.io import require, save
 from skillexpand.persistence import io as IO
 from skillexpand.persistence import store as ST
-from skillexpand.reliability.errors import StoreError
+from skillexpand.reliability.errors import JournalConflict, StoreError
+from skillexpand.evaluation import progressive as PG
 from skillexpand.l2.editor import SkillEditor
 from skillexpand.l2.update import SkillPatchRunner
 from skillexpand.l2.card_review import OUTCOMES as CR_OUTCOMES
@@ -132,13 +133,74 @@ def audit_batch(root, batch, base, cards):
                 'single-candidate acceptance scored multiple candidates')
 
 
+def progressive_sidecar(directory, task_id):
+    """One task's selector provenance, as written by the progressive L1 sink."""
+    path = Path(directory) / 'selection' / f'{task_id}.json'
+    if not path.exists():
+        raise JournalConflict(f'Missing progressive selection record for task {task_id}')
+    value = json.loads(path.read_text())
+    if value.get('task_id') != task_id or not isinstance(value.get('selection'), dict) \
+            or not isinstance(value.get('skill_load'), dict):
+        raise JournalConflict(f'Malformed progressive selection record for task {task_id}')
+    return value
+
+
+def progressive_route(directory, task_id):
+    """Compact route of one task (no raw selector output), from its sidecar only."""
+    value = progressive_sidecar(directory, task_id)
+    return {'skill_id': value['skill_load'].get('skill_id'),
+            'skill_key': value['skill_load'].get('skill_key'),
+            'load_stage': value['skill_load'].get('load_stage'),
+            'catalog_fingerprint': value['selection'].get('catalog_fingerprint')}
+
+
+def progressive_routes(directory, task_ids):
+    """The manifest ``routes`` view; the sidecar directory is its single source."""
+    found = {p.name for p in (Path(directory) / 'selection').glob('*.json')}
+    if found != {f'{t}.json' for t in task_ids}:
+        raise JournalConflict('Selection sidecars differ from the round task set')
+    return {str(t): progressive_route(directory, t) for t in task_ids}
+
+
+def _audit_progressive_routes(directory, manifest, cards, heads):
+    """Cross-check the selection sidecars against cards, heads and the manifest."""
+    task_ids = sorted(cards)
+    require({p.name for p in (directory / 'selection').glob('*.json')} ==
+            {f'{t}.json' for t in task_ids}, 'unexpected/missing selection sidecars')
+    require(manifest.get('routes') == progressive_routes(directory, task_ids),
+            'manifest routes differ from the selection sidecars')
+    catalog = PG.catalog(heads.values())
+    for task_id in task_ids:
+        exp, value = cards[task_id], progressive_sidecar(directory, task_id)
+        load, selection = value['skill_load'], value['selection']
+        require(load.get('load_stage') == PG.LOAD_STAGE and
+                selection.get('load_stage') == PG.LOAD_STAGE,
+                f'task {task_id}: Skill body was not loaded after selection')
+        require(load.get('skill_id') == exp.selected_skill_id == selection.get('skill_id') ==
+                selection.get('loaded_skill_id'),
+                f'task {task_id}: selection record differs from the card')
+        require(load.get('skill_key') == exp.initial_skill_key,
+                f'task {task_id}: loaded Skill key differs from the card')
+        require(selection.get('ok') is True, f'task {task_id}: selection did not succeed')
+        shown = selection.get('catalog')
+        require(isinstance(shown, list) and
+                all(set(item) == {'skill_id', 'description'} for item in shown),
+                f'task {task_id}: selector catalog is not body-free')
+        require(shown == catalog and
+                selection.get('catalog_fingerprint') == S.content_hash(shown),
+                f'task {task_id}: selector catalog differs from the round input library')
+
+
 def audit_round(root, round_index):
     root = Path(root)
     directory = root / 'evolution' / f'round-{round_index}'
     manifest = json.loads((directory / 'manifest.json').read_text())
     inputs = json.loads((directory / 'input.json').read_text())
     split = json.loads((root / 'split.json').read_text())
-    mapping = json.loads((root / 'task_skill_map.json').read_text())
+    progressive = bool((json.loads((root / 'config.json').read_text())
+                        .get('benchmark') or {}).get('progressive_library', False))
+    # A progressive library has no task->Skill map; the selector's choice is the route.
+    mapping = None if progressive else json.loads((root / 'task_skill_map.json').read_text())
     train = sorted(int(t) for t, value in split['assignment'].items() if value == S.SPLIT_TRAIN)
     require(manifest['task_ids'] == train == inputs['task_ids'], 'round/train coverage mismatch')
     heads = {s['family_id']: S.from_dict(S.Skill, s) for s in inputs['skills']}
@@ -147,6 +209,16 @@ def audit_round(root, round_index):
     expected_predicted_scope = protocol['config']['predicted_review_scope']
     require(expected_predicted_scope in ('val', 'train_cards'),
             'unknown predicted review scope in frozen config')
+    if progressive:
+        require(expected_acceptance_mode == 'predicted' and expected_predicted_scope == 'val',
+                'progressive library requires predicted val acceptance')
+        require(protocol['config'].get('progressive_library') is True,
+                'progressive cold start but the evolution switch was off')
+        require(protocol['config'].get('reviewer_update_mode', 'none') == 'none',
+                'progressive library requires reviewer_update_mode=none')
+    else:
+        require(not protocol['config'].get('progressive_library', False),
+                'progressive evolution switch on but the cold start is not progressive')
     require(inputs['round'] == manifest['round'] == round_index, 'round identity mismatch')
     require(len(heads) == len(inputs['skills']), 'duplicate input Skill family')
     if round_index == 1:
@@ -176,15 +248,24 @@ def audit_round(root, round_index):
         require(exp.task_id == task_id, f'card filename/task mismatch: {task_id}')
         require(exp.split == S.SPLIT_TRAIN, f'non-train card: {task_id}')
         require(exp.evolution_round == round_index, f'wrong card round: {task_id}')
-        require(exp.benchmark == split['benchmark'] and exp.selected_skill_id == mapping[str(task_id)],
-                'card benchmark/routing mismatch')
+        if progressive:
+            head = heads.get(exp.family_id)
+            require(exp.benchmark == split['benchmark'] and head is not None and
+                    exp.selected_skill_id == head.skill_id and exp.initial_skill_key == head.key,
+                    'card benchmark/selected Skill mismatch')
+        else:
+            require(exp.benchmark == split['benchmark'] and exp.selected_skill_id == mapping[str(task_id)],
+                    'card benchmark/routing mismatch')
         expected_skill = manifest['skill_keys'].get(exp.family_id)
         require(expected_skill == exp.initial_skill_key,
                 f'card {task_id} was executed with a different Skill head')
         require(S.content_hash(value) == manifest['cards'][str(task_id)],
                 f'card hash mismatch: {task_id}')
-        require(exp.selection_source == S.SELECTION_FIXED and
-                exp.selected_skill_id == heads[exp.family_id].skill_id, 'card selection mismatch')
+        if progressive:
+            require(exp.selection_source == S.SELECTION_AGENT, 'card selection mismatch')
+        else:
+            require(exp.selection_source == S.SELECTION_FIXED and
+                    exp.selected_skill_id == heads[exp.family_id].skill_id, 'card selection mismatch')
         if (split['benchmark'] == 'terminalbench'
                 and config.benchmark.get('rollout', {}).get('mode') == 'harbor_rollout'):
             # TerminalBench trials are the external Harbor rollout; the saved
@@ -201,6 +282,8 @@ def audit_round(root, round_index):
             audit_checkpoint(checkpoint, adapter)
         cards[task_id] = exp
 
+    if progressive:
+        _audit_progressive_routes(directory, manifest, cards, heads)
     planned = json.loads((directory / 'batches.json').read_text())
     journals = []
     journal_dir = root / 'l2_batches'
@@ -236,6 +319,9 @@ def audit_round(root, round_index):
                     f'batch/card hash mismatch: {task_id}')
             seen.append(task_id)
             require(cards[task_id].family_id == batch['family_id'], 'cross-family batch')
+            if progressive:
+                require(cards[task_id].selected_skill_id == batch['skill_id'],
+                        'batch groups cards by a Skill they did not select')
         if batch.get('candidate'):
             require(batch['outcome'] == 'review_approved',
                     'candidate is present on a non-approved journal')

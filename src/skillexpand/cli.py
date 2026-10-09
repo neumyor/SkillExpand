@@ -83,6 +83,11 @@ def build_parser():
              "paired delta corrected by a random val sample")
     p.add_argument("--predicted-review-scope", choices=("val", "train_cards"),
         default="val", help="Evidence scope for predicted acceptance")
+    p.add_argument("--progressive-library", action="store_true",
+        help="TB-eval: select Skills from a catalog at run time (progressive library) and "
+             "accept against the closed train panel; requires a progressive cold start, "
+             "terminalbench Harbor rollouts, --acceptance-mode predicted, "
+             "--predicted-review-scope val and --reviewer-update-mode none")
     SM.add_arguments(p)
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent train tasks during each Skill-aware L1 round")
@@ -363,6 +368,7 @@ def main(argv=None):
                 single_candidate=args.single_candidate,
                 reviewer_update_mode=args.reviewer_update_mode,
                 reviewer_feedback_size=args.reviewer_feedback_size,
+                progressive_library=args.progressive_library,
                 **SM.options_from(args),
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config,
