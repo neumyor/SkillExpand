@@ -27,8 +27,107 @@ FILES = (
 )
 
 
+#: Files a progressive-library cold start must carry.  It has no family
+#: clustering and no task->Skill map, so ``clusters.json``/``task_skill_map.json``
+#: are optional there (and only there).
+PROGRESSIVE_REQUIRED = (
+    "config.json",
+    "split.json",
+    "manifest.json",
+    "initial_skills.json",
+    "cold_start_complete.json",
+)
+PROGRESSIVE_PROTOCOL = "progressive-library"
+
+
+def is_progressive(root):
+    """True when the frozen config marks this cold start as a progressive library."""
+    config = json.loads((Path(root) / "config.json").read_text())
+    return bool((config.get("benchmark") or {}).get("progressive_library", False))
+
+
+def _load_progressive_cold_start(root):
+    values = {}
+    for name in FILES:
+        path = root / name
+        if path.exists():
+            values[name] = json.loads(path.read_text())
+    missing = [name for name in PROGRESSIVE_REQUIRED if name not in values]
+    if missing:
+        raise JournalConflict(f"Progressive cold start is missing {missing}")
+    manifest = values["manifest.json"]
+    if (
+        manifest["split"] != values["split.json"]
+        or manifest["config"] != values["config.json"]
+    ):
+        raise JournalConflict("Cold-start split/config differs from its frozen manifest")
+    cfg = OmegaConf.create(values["config.json"])
+    plan = read_split(root / "split.json")
+    complete = values["cold_start_complete.json"]
+    if complete.get("protocol") != PROGRESSIVE_PROTOCOL:
+        raise JournalConflict("Progressive cold start has the wrong protocol marker")
+    train = set(plan.tasks_in(S.SPLIT_TRAIN))
+    if complete.get("train_count") != len(train):
+        raise JournalConflict("Cold-start train count mismatch")
+    table = F.task_table(cfg, refresh=True)
+    if set(plan.assignment) != set(range(len(table))) or manifest[
+        "task_table_hash"
+    ] != S.content_hash(table):
+        raise JournalConflict("Cold-start task data changed")
+    initial = values["initial_skills.json"]
+    if "initial_skills_hash" in complete and complete[
+        "initial_skills_hash"
+    ] != S.content_hash(initial):
+        raise JournalConflict("Cold-start artifact hash mismatch")
+    skills = tuple(S.from_dict(S.Skill, item) for item in initial)
+    if not skills:
+        raise JournalConflict("Progressive cold start has no initial Skills")
+    if len({s.skill_id for s in skills}) != len(skills):
+        raise JournalConflict("Progressive cold start has duplicate Skill IDs")
+    for skill in skills:
+        if (
+            skill.skill_id != f"{plan.benchmark}.{skill.family_id}"
+            or skill.version != 0
+            or not skill.description.strip()
+            or not skill.body.strip()
+        ):
+            raise JournalConflict(f"Invalid initial Skill: {skill.skill_id}")
+    cards = {}
+    for t in sorted(train):
+        exp = S.from_dict(
+            S.TaskExperience,
+            json.loads((root / "discovery/results" / f"{t}.json").read_text()),
+        )
+        # Cold cards are skill-free; they keep whatever family_id they were
+        # imported with, because a progressive run has no task->family mapping.
+        if (
+            exp.task_id != t
+            or exp.benchmark != plan.benchmark
+            or exp.split != S.SPLIT_TRAIN
+            or exp.initial_skill_key is not None
+            or exp.selected_skill_id is not None
+            or not exp.experience_id.startswith("discovery:")
+            or not exp.experience_card
+            or exp.experience_card.get("schema_version") != 5
+            or exp.experience_card.get("task", {}).get("task_id") != t
+        ):
+            raise JournalConflict(f"Invalid cold-start experience: task {t}")
+        cards[t] = exp
+    expected_hashes = json.loads((root / "discovery/card_hashes.json").read_text())
+    actual_hashes = {
+        str(t): S.content_hash(projection(e.experience_card)) for t, e in cards.items()
+    }
+    if actual_hashes != expected_hashes:
+        raise JournalConflict("Cold-start cards differ from discovery hashes")
+    if len({e.experience_id for e in cards.values()}) != len(cards):
+        raise JournalConflict("Duplicate cold-start experience IDs")
+    return cfg, plan, skills, cards
+
+
 def load_cold_start(root):
     root = Path(root)
+    if is_progressive(root):
+        return _load_progressive_cold_start(root)
     values = {name: json.loads((root / name).read_text()) for name in FILES}
     manifest = values["manifest.json"]
     if (
@@ -121,15 +220,17 @@ def import_cold_start(source, target):
     """Copy completed inputs, never mutable Skill heads or old evolution results."""
     source, target = Path(source).resolve(), Path(target).resolve()
     cfg, plan, skills, cards = load_cold_start(source)
+    # Only a progressive cold start may lack clusters.json/task_skill_map.json.
+    files = tuple(n for n in FILES if (source / n).exists()) if is_progressive(source) else FILES
     identity = {
         "source": str(source),
         "files": {
-            n: S.content_hash(json.loads((source / n).read_text())) for n in FILES
+            n: S.content_hash(json.loads((source / n).read_text())) for n in files
         },
         "cards": {str(t): S.content_hash(S.to_dict(e)) for t, e in cards.items()},
     }
     freeze(target / "cold_start_import.json", identity)
-    for name in FILES:
+    for name in files:
         freeze(target / name, json.loads((source / name).read_text()))
     freeze(target / "discovery/card_hashes.json",
            json.loads((source / "discovery/card_hashes.json").read_text()))

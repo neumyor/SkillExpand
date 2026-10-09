@@ -62,24 +62,30 @@ def _reconstruct_skill(spec: ExperienceSpec) -> Optional[S.Skill]:
         provenance=S.Provenance(rationale='reconstructed in worker'))
 
 
-def _harbor_rollout(spec: ExperienceSpec, cfg) -> Dict[str, Any]:
+def harbor_experience(cfg, *, unit_id: str, task_id: int, family_id: str, split: str,
+                      skill: Optional[S.Skill], skill_key: Optional[str],
+                      selected_skill_id: Optional[str], selection_source: str,
+                      selection_reason: str, selection_raw: str,
+                      max_trials: Optional[int], l1_checkpoint_path: str,
+                      evolution_round: int) -> Dict[str, Any]:
     """Run one TerminalBench task through the external Harbor/Tencent runner.
 
     TerminalBench environments are not executable in-process: the real rollout
-    happens inside the remote task sandbox, and this worker consumes its saved
-    trajectory and verifier result to build the experience card.
+    happens inside the remote task sandbox, and this conversion consumes its saved
+    trajectory and verifier result to build the experience card.  It is shared by
+    the fixed worker and the progressive worker, which differ only in how the
+    Skill and the identity fields are chosen.
     """
     from skillexpand.benchmarks.terminalbench import harbor_rollout
     from skillexpand.l1 import learning as L
     from skillexpand.l1 import protocol as P
     from skillexpand.l1.adapters import resolve
 
-    skill = _reconstruct_skill(spec)
-    task = F.task_table(cfg)[spec.task_id]['task']
+    task = F.task_table(cfg)[task_id]['task']
     payload, raw_response = harbor_rollout(
-        cfg, spec.task_id, skill, spec.max_trials or 1,
-        Path(spec.l1_checkpoint_path).parent.parent / 'harbor',
-        spec.evolution_round)
+        cfg, task_id, skill, max_trials or 1,
+        Path(l1_checkpoint_path).parent.parent / 'harbor',
+        evolution_round)
     trials = []
     for item in payload.get('trials', []):
         trajectory = item.get('trajectory_path') or item.get('trial_dir')
@@ -105,27 +111,38 @@ def _harbor_rollout(spec: ExperienceSpec, cfg) -> Dict[str, Any]:
                                              'observation': 'No trajectory steps recorded.',
                                              'environment': {'success': reward}}]})
     rewards = tuple(bool(t['success']) for t in trials)
-    card = L.card(spec.task_id, task, trials, {'status': 'valid', 'claims': []},
-                  None, f'{spec.unit_id}:card', len,
+    card = L.card(task_id, task, trials, {'status': 'valid', 'claims': []},
+                  None, f'{unit_id}:card', len,
                   evidence=P.evidence(task, trials, adapter=resolve(cfg)),
-                  card_id=f'{spec.unit_id}:card', benchmark='terminalbench',
-                  family_id=spec.family_id, evolution_round=spec.evolution_round,
-                  skill_key=spec.skill_key)
+                  card_id=f'{unit_id}:card', benchmark='terminalbench',
+                  family_id=family_id, evolution_round=evolution_round,
+                  skill_key=skill_key)
     experience = S.TaskExperience(
-        experience_id=f'{spec.unit_id}:experience', benchmark='terminalbench',
-        task_id=spec.task_id, task=task, family_id=spec.family_id, split=spec.split,
-        reward=any(rewards), num_trials=len(trials), initial_skill_key=spec.skill_key,
+        experience_id=f'{unit_id}:experience', benchmark='terminalbench',
+        task_id=task_id, task=task, family_id=family_id, split=split,
+        reward=any(rewards), num_trials=len(trials), initial_skill_key=skill_key,
         failed_trajectories=tuple(t['trajectory'] for t in trials if not t['success']),
         final_trajectory=next((t['trajectory'] for t in reversed(trials) if t['success']), None),
-        selected_skill_id=spec.selected_skill_id, selection_source=spec.selection_source,
-        selection_reason=spec.selection_reason, selection_raw=spec.selection_raw,
+        selected_skill_id=selected_skill_id, selection_source=selection_source,
+        selection_reason=selection_reason, selection_raw=selection_raw,
         trial_rewards=rewards, trial_phases=tuple(t['phase'] for t in trials),
-        experience_card=card, l1_audit_path=spec.l1_checkpoint_path,
-        l1_trials=tuple(trials), evolution_round=spec.evolution_round)
-    return {'record_type': 'experience', 'unit_id': spec.unit_id,
-            'task_id': spec.task_id, 'family_id': spec.family_id, 'ok': True,
+        experience_card=card, l1_audit_path=l1_checkpoint_path,
+        l1_trials=tuple(trials), evolution_round=evolution_round)
+    return {'record_type': 'experience', 'unit_id': unit_id,
+            'task_id': task_id, 'family_id': family_id, 'ok': True,
             'experience': S.to_dict(experience), 'harbor_response': raw_response,
             'failure': None, 'pid': os.getpid()}
+
+
+def _harbor_rollout(spec: ExperienceSpec, cfg) -> Dict[str, Any]:
+    """The fixed-library Harbor worker: the Skill is the spec's family Skill."""
+    return harbor_experience(
+        cfg, unit_id=spec.unit_id, task_id=spec.task_id, family_id=spec.family_id,
+        split=spec.split, skill=_reconstruct_skill(spec), skill_key=spec.skill_key,
+        selected_skill_id=spec.selected_skill_id, selection_source=spec.selection_source,
+        selection_reason=spec.selection_reason, selection_raw=spec.selection_raw,
+        max_trials=spec.max_trials, l1_checkpoint_path=spec.l1_checkpoint_path,
+        evolution_round=spec.evolution_round)
 
 
 def execute_experience(spec: ExperienceSpec) -> Dict[str, Any]:

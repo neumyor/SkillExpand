@@ -39,12 +39,11 @@ class TerminalBenchEnv(BaseEnv):
         return self.instruction
 
     def step(self, action, *args, **kwargs):
-        self.curr_step += 1
-        self.terminated = True
-        self.reward = False
-        return ("Native SkillExpand execution is not available for TerminalBench; "
-                "run the Harbor/Tencent adapter and import its verifier result.",
-                False, True, False, self.curr_step)
+        # A fabricated observation would silently turn a misrouted run into a
+        # reward-0 record; fail loudly instead.
+        raise RuntimeError(
+            "Native SkillExpand execution is not available for TerminalBench; "
+            "run the Harbor/Tencent adapter and import its verifier result.")
 
     def success_fn(self):
         return bool(self.reward)
