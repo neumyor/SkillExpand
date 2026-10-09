@@ -129,7 +129,8 @@ def main(argv=None):
                         'runner_script': args.runner_script or default_runner()}},
         'agent': {'llm': method_model},
         'models': {k: method_model for k in
-                   ('l1_executor', 'cold_start', 'l2_planner', 'l2_editor', 'l2_reviewer', 'selector')}}
+                   ('l1_executor', 'cold_start', 'l2_planner', 'l2_editor', 'l2_reviewer', 'l2_verifier',
+                       'selector')}}
     initial_payload = [S.to_dict(initial)]
     hashes = {str(i): S.content_hash(P.projection(cards[i])) for i in train_ids}
     manifest = {

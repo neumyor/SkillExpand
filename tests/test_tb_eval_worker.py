@@ -218,6 +218,23 @@ def test_importer_writes_a_progressive_cold_start_that_loads(tmp_path):
     assert SkillLibrary(root / 'skills.jsonl', benchmark='terminalbench').families
 
 
+def test_imported_config_survives_the_launcher_role_overrides_unchanged(tmp_path):
+    """The stage launcher re-resolves the role map and re-freezes config.json; the importer's
+    frozen config must already be that exact fixed point or the first launch raises
+    FrozenProtocolChanged (a missing ``l2_verifier`` role did exactly that)."""
+    from omegaconf import OmegaConf
+    from skillexpand.cli import apply_model_overrides, build_parser
+    from skillexpand.persistence.io import freeze
+    root = build_cold_start(tmp_path)
+    model = json.loads((root / 'config.json').read_text())['agent']['llm']
+    flags = ['--l1-model', model, '--cold-start-model', model, '--l2-planner-model', model,
+             '--l2-editor-model', model, '--l2-reviewer-model', model, '--selector-model', model]
+    args = build_parser().parse_args(['--run-dir', str(root), *flags])
+    cfg = OmegaConf.create(json.loads((root / 'config.json').read_text()))
+    resolved = OmegaConf.to_container(apply_model_overrides(cfg, args), resolve=True)
+    freeze(root / 'config.json', resolved)
+
+
 def rewrite(path, mutate):
     value = json.loads(path.read_text())
     path.write_text(json.dumps(mutate(value) or value))
