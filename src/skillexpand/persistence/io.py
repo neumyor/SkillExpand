@@ -24,7 +24,24 @@ from skillexpand.reliability.errors import (
 
 #: Frozen-identity keys that record provenance rather than protocol.
 PROVENANCE_KEYS = ('code',)
+#: Keys that only name the LLM transport.  A relay run binds a fresh loopback port
+#: on every launch, so these legitimately differ between a run and its resume.
+TRANSPORT_KEYS = ('provider', 'relay_base_url', 'llm_transport', 'direct_provider_fallback')
 CODE_CHANGES = 'code_changes.jsonl'
+
+
+def _relay_run():
+    """True for a relay launch (the CLI sets this before any frozen identity is built)."""
+    return os.environ.get('EXPE_LLM_RELAY_REQUIRED', '').strip().lower() in (
+        '1', 'true', 'yes', 'on')
+
+
+def _without_transport(obj):
+    if isinstance(obj, dict):
+        return {k: _without_transport(v) for k, v in obj.items() if k not in TRANSPORT_KEYS}
+    if isinstance(obj, list):
+        return [_without_transport(v) for v in obj]
+    return obj
 
 
 def require(condition, message):
@@ -103,9 +120,17 @@ def freeze(path, value, allow_code_change=False):
         if runtime_only(frozen) == runtime_only(value):
             save(path, value)
             return
-    if isinstance(frozen, dict) and isinstance(value, dict):
+    if _relay_run():
+        # Transport drift only: ignoring it must not hide a source-code change,
+        # which still has to pass through ``allow_code_change`` below.
+        if _without_transport(frozen) == _without_transport(value):
+            return
+        frozen_view, value_view = _without_transport(frozen), _without_transport(value)
+    else:
+        frozen_view, value_view = frozen, value
+    if isinstance(frozen_view, dict) and isinstance(value_view, dict):
         strip = lambda d: {k: v for k, v in d.items() if k not in PROVENANCE_KEYS}
-        if strip(frozen) == strip(value) and set(frozen) == set(value):
+        if strip(frozen_view) == strip(value_view) and set(frozen_view) == set(value_view):
             drift = _code_drift(frozen.get('code'), value.get('code'))
             if not allow_code_change:
                 files = drift['changed'] + drift['added'] + drift['removed']

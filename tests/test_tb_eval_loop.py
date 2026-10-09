@@ -18,7 +18,9 @@ from skillexpand.l1 import workers as LW
 from skillexpand.l2 import audit as AU
 from skillexpand.l2 import loop as L
 from skillexpand.persistence.io import AuditFailure
-from skillexpand.reliability.errors import InvalidInput, JournalConflict
+from skillexpand.reliability.errors import (
+    FrozenCodeChanged, FrozenProtocolChanged, InvalidInput, JournalConflict,
+)
 from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
 from tests import test_experience_first as fixtures
@@ -387,3 +389,99 @@ class MainIdentityTests(unittest.TestCase):
         self.assertTrue(all(c.family_id == plan.family_of(t) for t, c in loop.cards.items()))
         self.assertFalse(loop.config.progressive_library)
         self.assertEqual(L.EvolutionConfig().progressive_library, False)
+
+
+# ---- relay port drift on resume --------------------------------------------------
+
+RELAY_A, RELAY_B = 'http://127.0.0.1:41001/v1', 'http://127.0.0.1:41002/v1'
+
+
+def use_relay(world, url, required=True):
+    """Do what cli does for a relay launch: new endpoint env + rewritten frozen config."""
+    world.monkeypatch.setenv('EXPE_LLM_BASE_URL', url)
+    world.monkeypatch.setenv('OPENAI_API_BASE', url)
+    if required:
+        world.monkeypatch.setenv('EXPE_LLM_RELAY_REQUIRED', '1')
+    else:
+        world.monkeypatch.delenv('EXPE_LLM_RELAY_REQUIRED', raising=False)
+    config = json.loads((world.root / 'config.json').read_text())
+    config['benchmark']['rollout'].update(
+        llm_transport='tencent_e2b_relay', relay_base_url=url, direct_provider_fallback=False)
+    (world.root / 'config.json').write_text(json.dumps(config))
+    manifest = json.loads((world.root / 'manifest.json').read_text())
+    manifest['config'] = config
+    (world.root / 'manifest.json').write_text(json.dumps(manifest))
+    world.cfg, world.plan, _, _ = A.load_cold_start(world.root)
+
+
+def crash_in_judge(world):
+    good = world.hosts['l2_reviewer']
+    world.hosts['l2_reviewer'] = SimpleNamespace(
+        token_counter=len, llm=lambda *a, **k: (_ for _ in ()).throw(RuntimeError('judge down')))
+    with pytest.raises(Exception, match='judge down'):
+        world.run()
+    world.hosts['l2_reviewer'] = good
+
+
+def test_relay_run_resumes_across_a_relay_port_change(world):
+    use_relay(world, RELAY_A)
+    crash_in_judge(world)
+    assert (world.root / 'routes' / 'train' / 'complete.json').exists()
+    frozen_l2 = (world.root / 'l2_manifest.json').read_bytes()
+    use_relay(world, RELAY_B)
+    world.l1_runs = []
+    loop, summary = world.run()
+    assert summary['status'] == 'complete' and world.l1_runs == []
+    assert (world.root / 'l2_manifest.json').read_bytes() == frozen_l2   # never rewritten
+    AU.audit_round(world.root, 1)
+
+
+def test_relay_port_change_during_routing_resumes_the_partial_route(world):
+    use_relay(world, RELAY_A)
+    calls = []
+
+    def flaky_selector(messages, **kw):
+        calls.append(1)
+        if len(calls) > 2:
+            raise RuntimeError('selector down')
+        return selector_llm(messages)
+    world.hosts['selector'] = SimpleNamespace(
+        token_counter=len, llm=flaky_selector, benchmark_name='terminalbench')
+    with pytest.raises(Exception):
+        world.run()
+    assert not (world.root / 'routes' / 'train' / 'complete.json').exists()
+    world.hosts['selector'] = SimpleNamespace(
+        token_counter=len, llm=selector_llm, benchmark_name='terminalbench')
+    use_relay(world, RELAY_B)
+    _, summary = world.run()
+    assert summary['status'] == 'complete'
+
+
+def test_relay_port_change_never_waives_source_code_drift(world):
+    use_relay(world, RELAY_A)
+    crash_in_judge(world)
+    use_relay(world, RELAY_B)
+    with patch('skillexpand.l2.loop.code_signature', return_value={'x.py': 'drifted'}):
+        with pytest.raises(FrozenCodeChanged):
+            world.run()
+        with patch.object(L.SerialEvolutionLoop, 'run_evolutions', lambda self, rounds=None: None):
+            L.SerialEvolutionLoop(world.cfg, world.plan, L.LoopPaths(world.root),
+                                  progressive_config(), allow_code_change=True)
+    ledger = (world.root / 'code_changes.jsonl').read_text()
+    assert 'l2_manifest.json' in ledger
+
+
+def test_non_relay_provider_drift_is_still_refused(world):
+    use_relay(world, RELAY_A, required=False)
+    crash_in_judge(world)
+    use_relay(world, RELAY_B, required=False)
+    with pytest.raises(FrozenProtocolChanged):
+        world.run()
+
+
+def test_relay_run_still_refuses_a_real_protocol_change(world):
+    use_relay(world, RELAY_A)
+    crash_in_judge(world)
+    use_relay(world, RELAY_B)
+    with pytest.raises(FrozenProtocolChanged):
+        world.run(progressive_config(candidate_count=2))
