@@ -14,8 +14,8 @@ after the fact:
     Every evaluated task keeps its own outcome.
 
 3.  **Comparisons are paired.**  A candidate is only ever compared against the
-    skill it replaces on the *same* task ids.  ``PairedDelta`` reports wins /
-    losses / ties alongside the mean, because a mean shift alone cannot
+    skill it replaces on the *same* task ids.  ``PairedDelta`` keeps the per-task
+    ``pairs`` alongside the mean, because a mean shift alone cannot
     distinguish "better everywhere" from "better on two tasks, worse on two".
 
 4.  **Isolation is recorded, not assumed.**  Whether the executor was fresh and
@@ -37,7 +37,6 @@ import hashlib
 import json
 import sys
 from dataclasses import dataclass, field, fields, is_dataclass
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 SCHEMA_VERSION = 3
@@ -59,15 +58,8 @@ SPLIT_TEST = 'test'
 SPLITS = (SPLIT_TRAIN, SPLIT_VAL, SPLIT_TEST)
 
 ROLE_EVAL = 'eval'
-ROLES = (ROLE_EVAL,)
 
-#: The four evaluation conditions from the plan.
-MODE_VANILLA = 'vanilla'                              # A(x)
-MODE_TASK_ADAPTED = 'task_adapted'                     # A(x; S, E_x)
 MODE_CONSOLIDATED_DIRECT = 'consolidated_direct'       # A_fresh(x; S')
-MODE_CONSOLIDATED_RETRIEVED = 'consolidated_retrieved' # A_fresh(x; Retrieve(x, S))
-MODES = (MODE_VANILLA, MODE_TASK_ADAPTED,
-         MODE_CONSOLIDATED_DIRECT, MODE_CONSOLIDATED_RETRIEVED)
 
 ARM_BASE = 'base'
 ARM_CANDIDATE = 'candidate'
@@ -76,11 +68,6 @@ SELECTION_AGENT = 'agent'
 SELECTION_FIXED = 'fixed'
 SELECTION_UNSKILLED = 'unskilled'
 SELECTIONS = (SELECTION_AGENT, SELECTION_FIXED, SELECTION_UNSKILLED)
-
-
-OUTCOME_DIRECT_SUCCESS = 'direct_success'
-OUTCOME_REFLECTION_RECOVERED = 'reflection_recovered'
-OUTCOME_HARD_FAILURE = 'hard_failure'
 
 
 def reason_tuple(value: Any, owner: str = 'record') -> Tuple[str, ...]:
@@ -114,10 +101,6 @@ def _canonical_json(payload: Any) -> str:
 def content_hash(payload: Any) -> str:
     """Short deterministic id fragment for a JSON-serialisable payload."""
     return hashlib.sha256(_canonical_json(payload).encode('utf-8')).hexdigest()[:12]
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
 # --------------------------------------------------------------------------
@@ -228,7 +211,6 @@ class Provenance:
     generalisation test".
     """
 
-    created_at: str = field(default_factory=utc_now)
     rationale: str = ''
     source_experience_ids: Tuple[str, ...] = ()
     source_task_ids: Tuple[int, ...] = ()
@@ -307,11 +289,6 @@ class CandidateSkill:
             raise ValueError(
                 'candidate is identical to its base skill; a proposal must '
                 'either change the body or be rejected before reaching here')
-
-    @property
-    def differs_from_base(self) -> bool:
-        return True
-
 
 @dataclass(frozen=True)
 class Claim:
@@ -442,56 +419,6 @@ class TaskExperience:
     def make_id(benchmark: str, family_id: str, task_id: int) -> str:
         return f'{benchmark}:{family_id}:{task_id}'
 
-    @property
-    def is_train_eligible(self) -> bool:
-        """Only train tasks may drive a Skill edit."""
-        return self.split == SPLIT_TRAIN
-
-    @property
-    def solved_on_first_trial(self) -> bool:
-        """True when trial 0 already succeeded, i.e. without any reflection."""
-        return bool(self.trial_rewards) and self.trial_rewards[0]
-
-    @property
-    def reflections_used(self) -> int:
-        """How many trials were needed beyond a first-try success."""
-        if not self.trial_rewards:
-            return 0
-        for i, ok in enumerate(self.trial_rewards):
-            if ok:
-                return i
-        return len(self.trial_rewards) - 1
-
-    @property
-    def outcome_type(self) -> str:
-        if self.experience_card is not None:
-            return (OUTCOME_DIRECT_SUCCESS if self.solved_on_first_trial else
-                    OUTCOME_REFLECTION_RECOVERED if self.reward else OUTCOME_HARD_FAILURE)
-        if not self.trial_rewards:
-            return (OUTCOME_DIRECT_SUCCESS if self.reward else OUTCOME_HARD_FAILURE)
-        if self.trial_rewards[0]:
-            return OUTCOME_DIRECT_SUCCESS
-        if any(self.trial_rewards):
-            return OUTCOME_REFLECTION_RECOVERED
-        return OUTCOME_HARD_FAILURE
-
-    @property
-    def is_learning_signal(self) -> bool:
-        """Whether this experience is allowed to *trigger* a skill update.
-
-        Only ``reflection_recovered``.  A ``direct_success`` says the skill already
-        works and serves as a regression anchor; a ``hard_failure`` says the skill is
-        inadequate but not how to fix it -- measured, every round that tried to repair
-        a hard failure in the pool failed the strict rule, because the pool's failures
-        are mostly outside the executor's reach.  Triggering on those makes the loop
-        spend its whole budget on unsolvable targets.
-        """
-        return self.outcome_type == OUTCOME_REFLECTION_RECOVERED
-
-    @property
-    def fell_back(self) -> bool:
-        return False
-
 
 # --------------------------------------------------------------------------
 # Evaluation
@@ -518,10 +445,6 @@ class TaskOutcome:
     repeat: int = 0
     #: Free-form per-run note (e.g. a failure-mode label).
     note: str = ''
-
-    def __post_init__(self) -> None:
-        if self.role not in ROLES:
-            raise ValueError(f'unknown role {self.role!r}, expected one of {ROLES}')
 
 
 @dataclass(frozen=True)
@@ -551,10 +474,6 @@ class ArmEvaluation:
     def __post_init__(self) -> None:
         if self.arm_id not in (ARM_BASE, ARM_CANDIDATE):
             raise ValueError(f'unknown arm_id {self.arm_id!r}')
-        if self.role not in ROLES:
-            raise ValueError(f'unknown role {self.role!r}')
-        if self.mode not in MODES:
-            raise ValueError(f'unknown mode {self.mode!r}')
         object.__setattr__(self, 'outcomes', tuple(self.outcomes))
 
     @property
@@ -564,19 +483,6 @@ class ArmEvaluation:
     @property
     def n(self) -> int:
         return len(self.outcomes)
-
-    @property
-    def success_rate(self) -> Optional[float]:
-        """``None`` when no task was evaluated -- never silently 0.0.
-
-        A missing measurement and a measured failure must not be conflated;
-        upstream analysis that treats them alike is how a 0/0 becomes a 0%.
-        """
-        return (self.successes / self.n) if self.n else None
-
-    def by_task(self) -> Dict[int, TaskOutcome]:
-        """Last outcome per task id.  Only meaningful when ``repeats == 1``."""
-        return {o.task_id: o for o in self.outcomes}
 
     def by_task_rate(self) -> Dict[int, float]:
         """Per-task success rate, averaged over repeats.
@@ -589,13 +495,6 @@ class ArmEvaluation:
         for outcome in self.outcomes:
             acc.setdefault(outcome.task_id, []).append(1.0 if outcome.success else 0.0)
         return {task_id: sum(vals) / len(vals) for task_id, vals in acc.items()}
-
-    @property
-    def repeats(self) -> int:
-        counts: Dict[int, int] = {}
-        for outcome in self.outcomes:
-            counts[outcome.task_id] = counts.get(outcome.task_id, 0) + 1
-        return max(counts.values()) if counts else 0
 
 
 def assert_isolation_valid(arms: Sequence[ArmEvaluation], owner: str,
@@ -632,28 +531,12 @@ def assert_isolation_valid(arms: Sequence[ArmEvaluation], owner: str,
 
 @dataclass(frozen=True)
 class PairedDelta:
-
-    role: str
     n_paired: int
-    n_only_base: int
-    n_only_candidate: int
     mean_delta: Optional[float]
-    mean_base: Optional[float]
-    mean_candidate: Optional[float]
-    wins: int
-    losses: int
-    ties: int
     pairs: Tuple[Tuple[int, float, float], ...] = ()
-    #: Differences within this magnitude count as a tie.
-    tie_tolerance: float = 1e-9
-
-    @property
-    def is_informative(self) -> bool:
-        return self.n_paired > 0
 
 
-def paired_delta(base: ArmEvaluation, candidate: ArmEvaluation,
-                 tie_tolerance: float = 1e-9) -> PairedDelta:
+def paired_delta(base: ArmEvaluation, candidate: ArmEvaluation) -> PairedDelta:
     """Pair two arms on shared task ids and summarise the per-task difference."""
     if base.role != candidate.role:
         raise ValueError(
@@ -661,23 +544,12 @@ def paired_delta(base: ArmEvaluation, candidate: ArmEvaluation,
             'a paired comparison must hold the task role fixed')
 
     b, c = base.by_task_rate(), candidate.by_task_rate()
-    shared = sorted(set(b) & set(c))
-    pairs = tuple((tid, b[tid], c[tid]) for tid in shared)
+    pairs = tuple((tid, b[tid], c[tid]) for tid in sorted(set(b) & set(c)))
     deltas = [cs - bs for _, bs, cs in pairs]
-
     return PairedDelta(
-        role=base.role,
-        n_paired=len(shared),
-        n_only_base=len(set(b) - set(c)),
-        n_only_candidate=len(set(c) - set(b)),
+        n_paired=len(pairs),
         mean_delta=(sum(deltas) / len(deltas)) if deltas else None,
-        mean_base=(sum(bs for _, bs, _ in pairs) / len(pairs)) if pairs else None,
-        mean_candidate=(sum(cs for _, _, cs in pairs) / len(pairs)) if pairs else None,
-        wins=sum(1 for d in deltas if d > tie_tolerance),
-        losses=sum(1 for d in deltas if d < -tie_tolerance),
-        ties=sum(1 for d in deltas if abs(d) <= tie_tolerance),
         pairs=pairs,
-        tie_tolerance=tie_tolerance,
     )
 
 
@@ -726,22 +598,6 @@ class ValidationResult:
     @property
     def delta(self) -> Optional[float]:
         return self.metrics.get('success_delta')
-
-    @property
-    def regressed_task_ids(self) -> Tuple[int, ...]:
-        tol = 1e-9
-        return tuple(t for t, b, c in self.pairs if c < b - tol)
-
-    @property
-    def recovered_task_ids(self) -> Tuple[int, ...]:
-        tol = 1e-9
-        return tuple(t for t, b, c in self.pairs if c > b + tol)
-
-    def arm(self, arm_id: str) -> Optional[ArmEvaluation]:
-        for a in self.arms:
-            if a.arm_id == arm_id:
-                return a
-        return None
 
 
 # --------------------------------------------------------------------------

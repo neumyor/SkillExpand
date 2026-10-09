@@ -73,10 +73,8 @@ REPAIR: Dict[str, RepairPolicy] = {p.name: p for p in (
     # L2 Planner hypotheses.
     RepairPolicy('planner.hypotheses', 2),
     # Cold-start family discovery and initial Skill synthesis.
-    RepairPolicy('discovery.tags', 3, (1, 2)),
-    RepairPolicy('discovery.proposals', 3, (1, 2)),
-    RepairPolicy('discovery.assignment', 3, (1, 2)),
-    RepairPolicy('discovery.initial_skill', 3, (1, 2)),
+    *(RepairPolicy(f'discovery.{step}', 3, (1, 2))
+      for step in ('tags', 'proposals', 'assignment', 'initial_skill')),
     # Protocol outcomes: an invalid response is recorded, not retried.
     RepairPolicy('editor.candidate', 1, exhausted=EXHAUSTED_DEGRADE),
     RepairPolicy('patterns.batch', 1, exhausted=EXHAUSTED_DEGRADE),
