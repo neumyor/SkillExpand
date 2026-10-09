@@ -52,12 +52,19 @@ def main(argv=None):
     source, root = args.source_root.resolve(), args.run_dir.resolve()
     rows = json.loads(args.task_file.read_text())
     by_name = {r['task_name']: r for r in rows}
+    if len(by_name) != len(rows):
+        dupes = sorted({r['task_name'] for r in rows if sum(
+            x['task_name'] == r['task_name'] for x in rows) > 1})
+        raise SystemExit(f'task file {args.task_file} repeats task_name: {dupes}')
     grouped = defaultdict(list)
     for rp in sorted(source.glob('*/result.json')):
         d = json.loads(rp.read_text())
         if d.get('task_name') in by_name:
             grouped[d['task_name']].append((rp.parent, d))
-    names = sorted(by_name)
+    # A task id is the row's position in the task file, which is also how the runtime
+    # (``load_tasks``) numbers tasks; sorting here would break that and make the frozen
+    # task table disagree with the file ("Cold-start task data changed").
+    names = [r['task_name'] for r in rows]
     short = {n: len(grouped[n]) for n in names if len(grouped[n]) != args.attempts}
     if len(names) != args.expected_tasks or short:
         raise SystemExit(f'expected {args.expected_tasks} tasks x {args.attempts} attempts; '

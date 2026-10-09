@@ -186,8 +186,8 @@ def test_existing_style_experience_serialization_is_unchanged():
 
 # ---- progressive load_cold_start ------------------------------------------------
 
-def build_cold_start(tmp, tasks=2):
-    names = [f'task-{i}' for i in range(tasks)]
+def build_cold_start(tmp, tasks=2, names=None):
+    names = names or [f'task-{i}' for i in range(tasks)]
     (tmp / 'tasks.json').write_text(json.dumps(
         [{'task_name': n, 'instruction': f'instruction of {n}'} for n in names]))
     source = tmp / 'raw'
@@ -201,7 +201,7 @@ def build_cold_start(tmp, tasks=2):
     root = tmp / 'run'
     importer = load_script('import_terminalbench_batch')
     importer.main(['--source-root', str(source), '--task-file', str(tmp / 'tasks.json'),
-                   '--run-dir', str(root), '--expected-tasks', str(tasks), '--attempts', '1',
+                   '--run-dir', str(root), '--expected-tasks', str(len(names)), '--attempts', '1',
                    '--runner-script', str(tmp / 'r.sh')])
     return root
 
@@ -216,6 +216,28 @@ def test_importer_writes_a_progressive_cold_start_that_loads(tmp_path):
     assert all(c.family_id == 'general' and c.initial_skill_key is None for c in cards.values())
     from skillexpand.persistence.store import SkillLibrary
     assert SkillLibrary(root / 'skills.jsonl', benchmark='terminalbench').families
+
+
+def test_importer_numbers_tasks_in_task_file_order_so_an_unsorted_table_still_loads(tmp_path):
+    """``load_tasks`` numbers tasks by file position; the importer must agree with it, whether or
+    not the file is sorted by task_name (it used to sort, so an unsorted file failed to load with
+    "Cold-start task data changed")."""
+    root = build_cold_start(tmp_path, names=['zeta', 'alpha', 'mid'])
+    _, _, _, cards = A.load_cold_start(root)
+    assert [cards[i].task for i in range(3)] == [f'instruction of {n}' for n in ('zeta', 'alpha', 'mid')]
+    ids = {json.loads(line)['task_name']: json.loads(line)['task_id']
+           for line in (root / 'trial_manifest.jsonl').read_text().splitlines()}
+    assert ids == {'zeta': 0, 'alpha': 1, 'mid': 2}
+
+
+def test_importer_rejects_a_task_file_that_repeats_a_task_name(tmp_path):
+    (tmp_path / 'tasks.json').write_text(json.dumps(
+        [{'task_name': 'a', 'instruction': 'x'}, {'task_name': 'a', 'instruction': 'y'}]))
+    importer = load_script('import_terminalbench_batch')
+    with pytest.raises(SystemExit, match="repeats task_name: \\['a'\\]"):
+        importer.main(['--source-root', str(tmp_path), '--task-file', str(tmp_path / 'tasks.json'),
+                       '--run-dir', str(tmp_path / 'run'), '--expected-tasks', '1',
+                       '--attempts', '1', '--runner-script', str(tmp_path / 'r.sh')])
 
 
 def test_imported_config_survives_the_launcher_role_overrides_unchanged(tmp_path):
