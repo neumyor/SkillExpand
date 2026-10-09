@@ -65,6 +65,37 @@ class TrajectoryVerifier:
         },
     }
 
+    INSTRUCTIONS = (
+        'You are an independent verifier. The same executor attempted the same '
+        'task twice with the same Skill, except for the one rule in changed_rule: '
+        'execution_without_change used the rule as it was, execution_with_change '
+        'used it as changed. Each execution lists, step by step, what the executor '
+        'wrote and what it observed. Decide whether the two executions differ in '
+        'behaviour, and classify:\n'
+        '- no_difference: they take the same course of action; wording that does '
+        'not change what is done is not a difference.\n'
+        '- claim_confirmed: they differ, and with the change the executor does what '
+        "the claim's action_change describes, in the situation its trigger "
+        'describes.\n'
+        '- claim_not_confirmed: they differ because of the changed rule, but not in '
+        'the way the claim describes, or not in the situation it names.\n'
+        '- unrelated: they differ, but not because of this rule. The executor is a '
+        'language model, so changing one rule can perturb behaviour the rule does '
+        'not govern.\n'
+        '- indeterminate: the executions do not show enough to decide.\n'
+        'first_difference_step is the 1-based step of execution_with_change at '
+        'which behaviour first differs, or null for no_difference or when it '
+        'cannot be located. How either attempt ended is deliberately withheld; '
+        'judge only whether and how this rule changed what the executor did, never '
+        'whether the change helped. '
+        f'Return JSON only: {{"category":"<one of {", ".join(CATEGORIES)}>",'
+        '"first_difference_step":<integer or null>,'
+        '"reason":"one or two sentences naming the two behaviours that differ, '
+        'or why they do not"}.'
+    )
+    #: Method prompt constants frozen in the L2 identity (read at call time).
+    PROMPTS = ('PROTOCOL', 'RESPONSE_SCHEMA', 'INSTRUCTIONS')
+
     @classmethod
     def response_format(cls) -> Dict[str, Any]:
         return {
@@ -94,34 +125,7 @@ class TrajectoryVerifier:
             'claim': claim.payload(),
             'execution_without_change': without_change,
             'execution_with_change': with_change,
-            'instructions': (
-                'You are an independent verifier. The same executor attempted the same '
-                'task twice with the same Skill, except for the one rule in changed_rule: '
-                'execution_without_change used the rule as it was, execution_with_change '
-                'used it as changed. Each execution lists, step by step, what the executor '
-                'wrote and what it observed. Decide whether the two executions differ in '
-                'behaviour, and classify:\n'
-                '- no_difference: they take the same course of action; wording that does '
-                'not change what is done is not a difference.\n'
-                '- claim_confirmed: they differ, and with the change the executor does what '
-                "the claim's action_change describes, in the situation its trigger "
-                'describes.\n'
-                '- claim_not_confirmed: they differ because of the changed rule, but not in '
-                'the way the claim describes, or not in the situation it names.\n'
-                '- unrelated: they differ, but not because of this rule. The executor is a '
-                'language model, so changing one rule can perturb behaviour the rule does '
-                'not govern.\n'
-                '- indeterminate: the executions do not show enough to decide.\n'
-                'first_difference_step is the 1-based step of execution_with_change at '
-                'which behaviour first differs, or null for no_difference or when it '
-                'cannot be located. How either attempt ended is deliberately withheld; '
-                'judge only whether and how this rule changed what the executor did, never '
-                'whether the change helped. '
-                f'Return JSON only: {{"category":"<one of {", ".join(CATEGORIES)}>",'
-                '"first_difference_step":<integer or null>,'
-                '"reason":"one or two sentences naming the two behaviours that differ, '
-                'or why they do not"}.'
-            ),
+            'instructions': self.INSTRUCTIONS,
         })
 
     def _parse_response(self, raw):

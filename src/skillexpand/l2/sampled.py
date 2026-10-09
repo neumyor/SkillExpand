@@ -56,6 +56,8 @@ PLANNER_MEMORY_CONTRACT = (
     'panel you cannot see.'
 )
 
+PROMPTS = ('CLAIM_FIELD', 'CLAIM_CONTRACT', 'PLANNER_MEMORY_CONTRACT')
+
 
 def claim_required(acceptance_mode: str) -> bool:
     """Whether this acceptance mode needs a claim with every proposal."""

@@ -127,7 +127,7 @@ campaign, cli               冻结 campaign 启动器；单次运行 CLI
 
 冻结身份只包含方法输入：任务数据、split、各角色模型名、prompt、协议参数、初始 Skill 与卡片。不包含源码版本、端点 URL、超时等运维参数。`persistence/io.freeze` 是写一次、之后必须逐字段相等，否则 `FrozenProtocolChanged`，必须新建运行目录。
 
-**注意**：L2 的 Planner/Editor/Reviewer prompt、family discovery 与初始 Skill 合成 prompt 不在 manifest 中（cold-start manifest 只含 adapter prompt），因此改动这些 prompt 不会被检测到，按约定属于协议变更，必须新建运行目录。`--llm-relay` 不改写冻结 config：中继只设置环境变量并写信息性的 `relay_manifest.json`；`GPTWrapper` 在中继下运行时去掉模型名的 `openai/` 前缀。
+**注意**：方法 prompt（Planner/Editor 契约、predicted/delta reviewer 与 verifier 的指令和 schema、family discovery、初始 Skill 合成、L1 反思/抽取）以各模块的 `PROMPTS` 常量名单逐项摘要写入 `manifest.json` / `l2_manifest.json` 的 `method_prompts`；改动任一文本会触发 `FrozenProtocolChanged`，必须新建运行目录。`--llm-relay` 不改写冻结 config：中继只设置环境变量并写信息性的 `relay_manifest.json`；`GPTWrapper` 在中继下运行时去掉模型名的 `openai/` 前缀。
 
 campaign（`skillexpand.campaign`）在 prepare 时把源码复制到 `<root>/code/src` 并写入冻结启动器 `<root>/code/run_campaign.py`；之后所有动作都经由冻结启动器运行该副本。`verify` 只校验 `inputs/`（任务数据）的摘要；manifest 中的 `source_commit` 仅供参考，不做校验。
 

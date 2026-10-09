@@ -444,6 +444,21 @@ class PredictedSkillScorer:
     # The reason is audit metadata; keep it bounded without rejecting otherwise
     # valid reviewer decisions from providers that do not enforce maxLength.
     REASON_MAX_CHARS = 8192
+    INSTRUCTIONS = (
+        "You are a strict validation reviewer. Predict whether a fresh "
+        "executor will complete this task successfully with one autonomous "
+        "attempt using this Skill. Do not assume rejected answers can be "
+        "retried and do not use any execution trace. You may reason internally "
+        "for as long as needed. "
+        f"{REVIEW_OUTPUT_CONTRACT}"
+        "Do not output markdown, analysis, a task/skill echo, or any other key. "
+        "probability_true is a number in [0,1]; predicted_success is true "
+        "exactly when probability_true >= {threshold}; reason is a "
+        f"concise string of at most {REASON_MAX_CHARS} characters."
+    )
+    #: Method prompt constants frozen in the L2 identity (read at call time).
+    PROMPTS = ("PROTOCOL", "REVIEW_OUTPUT_CONTRACT", "REASON_MAX_CHARS", "RESPONSE_SCHEMA",
+               "INSTRUCTIONS")
     RESPONSE_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -502,18 +517,7 @@ class PredictedSkillScorer:
         payload = {
             "task": task,
             "skill": {"description": skill.description, "body": skill.body},
-            "instructions": (
-                "You are a strict validation reviewer. Predict whether a fresh "
-                "executor will complete this task successfully with one autonomous "
-                "attempt using this Skill. Do not assume rejected answers can be "
-                "retried and do not use any execution trace. You may reason internally "
-                "for as long as needed. "
-                f"{self.REVIEW_OUTPUT_CONTRACT}"
-                "Do not output markdown, analysis, a task/skill echo, or any other key. "
-                f"probability_true is a number in [0,1]; predicted_success is true "
-                f"exactly when probability_true >= {self.threshold:.6g}; reason is a "
-                f"concise string of at most {self.REASON_MAX_CHARS} characters."
-            ),
+            "instructions": self.INSTRUCTIONS.format(threshold=f"{self.threshold:.6g}"),
             "output_schema": {
                 "probability_true": "number in [0,1]",
                 "predicted_success": "boolean",

@@ -15,6 +15,7 @@ from skillexpand.reliability.retry import call_with_repair
 
 PLANNER_CORRECTION = ("Fix structure and IDs only. Use supplied card_id/evidence_id pairs; "
                       "drop unsupported hypotheses.")
+PROMPTS = ("PLANNER_CORRECTION",)
 
 
 def attempt_name(base, attempt):

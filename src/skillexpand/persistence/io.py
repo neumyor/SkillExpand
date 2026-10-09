@@ -52,6 +52,15 @@ def freeze(path, value):
         raise FrozenProtocolChanged(f'Frozen inputs changed: {path}; use a new run directory')
 
 
+def prompt_digests(*sources):
+    """Digest of each method prompt constant a source (module or class) names in ``PROMPTS``.
+
+    Read at call time, so editing a prompt changes the identity that embeds it.
+    """
+    return {f'{source.__name__}.{name}': S.content_hash(getattr(source, name))
+            for source in sources for name in source.PROMPTS}
+
+
 def read_split(path):
     obj = json.loads(Path(path).read_text())
     return S.SplitPlan.make({int(k): v for k, v in obj['assignment'].items()},

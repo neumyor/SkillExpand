@@ -308,6 +308,41 @@ about tools and actions, not a complete definition of the task's required capabi
 Describe reusable capabilities without instance names or answers. Preserve uncertainty.
 """
 
+TAG_INSTRUCTION = (
+    'You are extracting reusable capabilities from one task experience card.\n'
+    'Describe required operations and completion conditions, not solver performance, topic, '
+    'or answer entities. A diagnostic or assisted completion is not a proven procedure.\n'
+    'Return JSON only: {"capability_tags":["..."],"capability_summary":"..."}.\n\n'
+)
+PROPOSE_INSTRUCTION = (
+    'You are proposing a reusable task family taxonomy from representative capability tags.\n'
+    'A family must share the same required operations, decision process, operation order, '
+    'and completion contract. Do not group by topic or answer entity.\n'
+)
+PROPOSE_TARGET_FIXED = 'Use exactly {count} families.\n'
+PROPOSE_TARGET_FREE = 'Choose the smallest defensible number of families.\n'
+PROPOSE_SCHEMA = (
+    'For each family return only family_id, name, definition, and trigger_conditions. '
+    'family_id must be an opaque sequential ID exactly matching family-p001, family-p002, and so on. '
+    'Trigger conditions are positive task requirements used for routing. Do not return '
+    'exclusion criteria or task IDs. Return JSON only with a families list.\n\n'
+)
+PROPOSE_RETRY_SUFFIX = '\nPrevious output was invalid. Return only the requested family taxonomy.'
+ASSIGN_INSTRUCTION = (
+    'Choose exactly one family for this task experience card. Compare the complete family '
+    'taxonomy with the task goal and required operations. Use the task goal as authoritative; '
+    'a partial or failed execution trace does not remove capabilities required by the goal. '
+    'Do not create a family and do not return null. If no family is perfect, choose the '
+    'closest family and set match_type to best_fit. Return JSON only: '
+    '{"task_id":123,"family_id":"family-p001","match_type":"direct|best_fit",'
+    '"rationale":"..."}.\n\n'
+)
+ASSIGN_RETRY_SUFFIX = ('\nPrevious output was invalid. Choose one supplied family_id '
+                       'and return the exact JSON schema.')
+PROMPTS = ('JSON_RETRY_SUFFIX', 'FAMILY_CONTRACT', 'TAG_INSTRUCTION', 'PROPOSE_INSTRUCTION',
+           'PROPOSE_TARGET_FIXED', 'PROPOSE_TARGET_FREE', 'PROPOSE_SCHEMA',
+           'PROPOSE_RETRY_SUFFIX', 'ASSIGN_INSTRUCTION', 'ASSIGN_RETRY_SUFFIX')
+
 
 def tag_tasks(tasks: Mapping[int, str], llm: Callable[[str], str],
               on_tag: Callable[[TaskTag], None] | None = None,
@@ -316,13 +351,7 @@ def tag_tasks(tasks: Mapping[int, str], llm: Callable[[str], str],
         raise DiscoveryError('tag worker count must be positive')
 
     def tag_one(task_id: int) -> TaskTag:
-        prompt = (
-            'You are extracting reusable capabilities from one task experience card.\n'
-            'Describe required operations and completion conditions, not solver performance, topic, '
-            'or answer entities. A diagnostic or assisted completion is not a proven procedure.\n'
-            'Return JSON only: {"capability_tags":["..."],"capability_summary":"..."}.\n\n'
-            + FAMILY_CONTRACT + f'\nTASK_ID: {task_id}\nTASK:\n{tasks[task_id]}'
-        )
+        prompt = TAG_INSTRUCTION + FAMILY_CONTRACT + f'\nTASK_ID: {task_id}\nTASK:\n{tasks[task_id]}'
         return ask_json(llm, prompt, 'discovery.tags', parse=lambda value: TaskTag(
             task_id, _string_list(value.get('capability_tags'), 'capability_tags'),
             _text(value.get('capability_summary'), 'capability_summary')))
@@ -345,18 +374,10 @@ def tag_tasks(tasks: Mapping[int, str], llm: Callable[[str], str],
 def propose_families(tags: Sequence[TaskTag], llm: Callable[[str], str],
                      target_family_count: int | None = None) -> tuple[FamilyProposal, ...]:
     payload = json.dumps({'representative_tags': [tag.to_dict() for tag in tags]}, ensure_ascii=False)
-    target = f'Use exactly {target_family_count} families.\n' if target_family_count else \
-        'Choose the smallest defensible number of families.\n'
-    prompt = (
-        'You are proposing a reusable task family taxonomy from representative capability tags.\n'
-        'A family must share the same required operations, decision process, operation order, '
-        'and completion contract. Do not group by topic or answer entity.\n' + target +
-        'For each family return only family_id, name, definition, and trigger_conditions. '
-        'family_id must be an opaque sequential ID exactly matching family-p001, family-p002, and so on. '
-        'Trigger conditions are positive task requirements used for routing. Do not return '
-        'exclusion criteria or task IDs. Return JSON only with a families list.\n\n' +
-        FAMILY_CONTRACT + '\n' + payload
-    )
+    target = (PROPOSE_TARGET_FIXED.format(count=target_family_count) if target_family_count
+              else PROPOSE_TARGET_FREE)
+    prompt = (PROPOSE_INSTRUCTION + target + PROPOSE_SCHEMA + FAMILY_CONTRACT + '\n' + payload)
+
     def parse(value):
         proposals = parse_proposals(_repair_proposal_ids(value))
         if target_family_count is not None and len(proposals) != target_family_count:
@@ -364,7 +385,7 @@ def propose_families(tags: Sequence[TaskTag], llm: Callable[[str], str],
         return proposals
 
     return ask_json(llm, prompt, 'discovery.proposals', parse=parse,
-                    retry_suffix='\nPrevious output was invalid. Return only the requested family taxonomy.')
+                    retry_suffix=PROPOSE_RETRY_SUFFIX)
 
 
 def assign_families(tags: Sequence[TaskTag], proposals: Sequence[FamilyProposal],
@@ -391,20 +412,11 @@ def assign_families(tags: Sequence[TaskTag], proposals: Sequence[FamilyProposal]
         card = task_cards.get(tag.task_id) if task_cards is not None else None
         payload = json.dumps({'families': family_payload, 'task': tag.to_dict(),
                               'experience_card_projection': card}, ensure_ascii=False)
-        prompt = (
-            'Choose exactly one family for this task experience card. Compare the complete family '
-            'taxonomy with the task goal and required operations. Use the task goal as authoritative; '
-            'a partial or failed execution trace does not remove capabilities required by the goal. '
-            'Do not create a family and do not return null. If no family is perfect, choose the '
-            'closest family and set match_type to best_fit. Return JSON only: '
-            '{"task_id":123,"family_id":"family-p001","match_type":"direct|best_fit",'
-            '"rationale":"..."}.\n\n' + FAMILY_CONTRACT + '\n' + payload
-        )
+        prompt = ASSIGN_INSTRUCTION + FAMILY_CONTRACT + '\n' + payload
         return ask_json(
             llm, prompt, 'discovery.assignment',
             parse=lambda value: parse_assignments({'assignments': [value]}, [tag.task_id], proposals)[0],
-            retry_suffix=('\nPrevious output was invalid. Choose one supplied family_id '
-                          'and return the exact JSON schema.'))
+            retry_suffix=ASSIGN_RETRY_SUFFIX)
 
     pending = tuple(tag for tag in tags if tag.task_id not in completed)
     assignments: list[FamilyAssignment] = list(existing)

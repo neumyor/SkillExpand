@@ -10,7 +10,7 @@ from skillexpand.l2 import editor as ED
 from skillexpand.l2 import update as UP
 from skillexpand.l1 import patterns as BP
 from skillexpand.l1.artifacts import load_cold_start
-from skillexpand.persistence.io import RunLock, freeze, save
+from skillexpand.persistence.io import RunLock, freeze, prompt_digests, save
 from skillexpand.reliability.errors import (
     FrozenProtocolChanged, InvalidInput, JournalConflict, StoreError, classify,
 )
@@ -130,6 +130,15 @@ class SerialEvolutionLoop:
             "initial": [S.to_dict(s) for s in self.initial],
             "runtime": json.loads((paths.root / "config.json").read_text()),
         }
+        # The prompts that define the method: a changed text is a changed protocol.
+        sources = [ED, UP, BP]
+        if self.config.acceptance_mode == "predicted":
+            sources.append(VA.PredictedSkillScorer)
+        if self.config.acceptance_mode == SM.MODE:
+            sources += [SM, PairedDeltaReviewer]
+            if self.config.claim_verification == "on":
+                sources.append(TrajectoryVerifier)
+        identity["method_prompts"] = prompt_digests(*sources)
         new_run = not (paths.root / "l2_manifest.json").exists()
         self.skills = ST.SkillLibrary(paths.skills, benchmark=plan.benchmark)
         for skill in self.initial:

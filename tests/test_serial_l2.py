@@ -721,6 +721,19 @@ class SerialL2Tests(unittest.TestCase):
         with self.assertRaises(FrozenProtocolChanged):
             self._cli_l2(driver, target, "--resume", "--l2-planner-model", "other-model")
 
+    def test_changed_method_prompt_is_a_protocol_change(self):
+        from skillexpand.l1 import family_discovery as FD
+        from skillexpand.reliability.errors import FrozenProtocolChanged
+        driver = self.prepared()
+        for module, name in ((ED, "EDITING_STRATEGY"), (V.PredictedSkillScorer, "INSTRUCTIONS")):
+            with patch.object(module, name, getattr(module, name) + " changed"):
+                with self.assertRaises(FrozenProtocolChanged):
+                    L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root),
+                                          driver.config)
+        with patch.object(FD, "FAMILY_CONTRACT", FD.FAMILY_CONTRACT + " changed"):
+            with self.assertRaises(FrozenProtocolChanged):
+                self.cold()
+
     def test_snapshot_reuses_frozen_routes(self):
         import importlib.util
         from skillexpand.evaluation.routing import FrozenRoutes
