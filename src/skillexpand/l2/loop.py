@@ -10,8 +10,6 @@ from skillexpand.l2 import editor as ED
 from skillexpand.l2 import update as UP
 from skillexpand.l1 import patterns as BP
 from skillexpand.l1.artifacts import load_cold_start
-from skillexpand.persistence.io import code_signature
-from skillexpand.runtime.models.llm import provider_signature
 from skillexpand.persistence.io import RunLock, freeze, save
 from skillexpand.reliability.errors import (
     FrozenProtocolChanged, InvalidInput, JournalConflict, StoreError, classify,
@@ -94,11 +92,11 @@ class LoopPaths:
 class SerialEvolutionLoop:
     """Persist every batch decision before committing a reviewed Skill."""
 
-    def __init__(self, cfg, plan, paths, config=None, allow_code_change=False):
+    def __init__(self, cfg, plan, paths, config=None):
         with RunLock(paths.lock):
-            self._initialize(cfg, plan, paths, config, allow_code_change)
+            self._initialize(cfg, plan, paths, config)
 
-    def _initialize(self, cfg, plan, paths, config, allow_code_change=False):
+    def _initialize(self, cfg, plan, paths, config):
         self.cfg, self.plan, self.paths = cfg, plan, paths
         self.config = config or EvolutionConfig()
         input_cfg, checked_plan, self.initial, cold_cards = load_cold_start(paths.root)
@@ -131,8 +129,6 @@ class SerialEvolutionLoop:
             },
             "initial": [S.to_dict(s) for s in self.initial],
             "runtime": json.loads((paths.root / "config.json").read_text()),
-            "provider": provider_signature(),
-            "code": code_signature(),
         }
         new_run = not (paths.root / "l2_manifest.json").exists()
         self.skills = ST.SkillLibrary(paths.skills, benchmark=plan.benchmark)
@@ -147,7 +143,7 @@ class SerialEvolutionLoop:
             self.skills.head(s.family_id).version != 0 for s in self.initial
         ):
             raise JournalConflict("Import initial cold-start Skills into a new L2 run")
-        freeze(paths.root / "l2_manifest.json", identity, allow_code_change=allow_code_change)
+        freeze(paths.root / "l2_manifest.json", identity)
         self._recover_transactions()
         self.val_routes = None
         self.val_scorer = None

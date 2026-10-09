@@ -105,9 +105,9 @@ flowchart LR
 
 ## 工件与审计
 
-运行目录保存 `discovery/`、`evolution/round-N/`、`l2_proposals/`、`l2_batches/`、`skills.jsonl`、`routes/val/`、`routes/test/`、`val/`（predicted/empirical/sampled 的逐题预测、实测、抽检与判定缓存）和 `test/<library-hash>/`。`l2_manifest.json` 冻结 split、配置、代码和模型身份；每轮 audit 会校验 train 覆盖、卡片 hash、候选重放、Skill 版本链及 acceptance 记录。
+运行目录保存 `discovery/`、`evolution/round-N/`、`l2_proposals/`、`l2_batches/`、`skills.jsonl`、`routes/val/`、`routes/test/`、`val/`（predicted/empirical/sampled 的逐题预测、实测、抽检与判定缓存）和 `test/<library-hash>/`。`l2_manifest.json` 冻结 split、配置、卡片、初始 Skill 和模型身份；每轮 audit 会校验 train 覆盖、卡片 hash、候选重放、Skill 版本链及 acceptance 记录。
 
-改变 prompt、模型、split、配置或验收协议必须使用新的运行目录。只改源码时，`--resume` 默认拒绝继续；确认改动不影响协议后可加 `--allow-code-change`，漂移会追加到冻结 manifest 旁的 `code_changes.jsonl`，原 manifest 不改写。恢复只复用当前协议已落盘的逐单元结果。
+改变 prompt、模型、split、配置或验收协议必须使用新的运行目录。冻结身份只包含方法输入（任务数据、split、各角色模型名、prompt、协议参数、初始 Skill、卡片）；不记录源码版本、端点 URL 或超时，因此改端点、用 `--llm-relay` 续跑都不影响 `--resume`。恢复只复用当前协议已落盘的逐单元结果。
 
 ## 代码与脚本
 

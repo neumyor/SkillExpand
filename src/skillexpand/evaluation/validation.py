@@ -11,7 +11,6 @@ from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
 from skillexpand import schema as S
 from skillexpand.evaluation import workers as EW
-from skillexpand.runtime.models.llm import provider_signature
 from skillexpand.reliability.errors import InvalidInput, JournalConflict, StageIncomplete
 from skillexpand.reliability.policies import repair_policy
 from skillexpand.reliability.retry import call_with_repair, fresh
@@ -215,7 +214,6 @@ class FixedSkillScorer:
         self.protocol_hash = S.content_hash(
             {
                 "protocol": "fixed-skill-single-attempt-v1",
-                "provider": provider_signature(),
                 "config": OmegaConf.to_container(cfg, resolve=True),
                 "tasks": F.task_table(cfg),
                 "prompts": {k: getattr(adapter, k) for k in PROMPT_FIELDS},

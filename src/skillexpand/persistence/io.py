@@ -3,29 +3,20 @@
 This is the lowest persistence layer: it depends only on the standard library
 and :mod:`skillexpand.schema`, so every other package may import it.
 
-Frozen identities separate *protocol* from *provenance*.  Every key of a
-frozen JSON object must match exactly on resume, except the ``code`` source
-fingerprint: a code change is refused by default, and may be accepted with an
-explicit ``allow_code_change`` that appends the drift to ``code_changes.jsonl``
-beside the frozen file.  The original frozen file is never rewritten.
+Frozen identities contain method inputs only; ``freeze`` writes once and any
+later call must be equal, else ``FrozenProtocolChanged``.
 """
 
 import fcntl
 import json
 import os
-import time
 from contextlib import contextmanager
 from pathlib import Path
 
 from skillexpand import schema as S
 from skillexpand.reliability.errors import (
-    AuditFailure, FrozenCodeChanged, FrozenProtocolChanged, LedgerCorrupt, RunLocked,
+    AuditFailure, FrozenProtocolChanged, LedgerCorrupt, RunLocked,
 )
-
-#: Frozen-identity keys that record provenance rather than protocol.
-PROVENANCE_KEYS = ('code',)
-CODE_CHANGES = 'code_changes.jsonl'
-
 
 def require(condition, message):
     if not condition:
@@ -50,73 +41,15 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def code_signature():
-    """Content hash of every module in the installed ``skillexpand`` package."""
-    source = Path(__file__).resolve().parents[1]
-    return {
-        str(p.relative_to(source)): S.content_hash(p.read_text(encoding='utf-8'))
-        for p in sorted(source.rglob('*.py'))
-        if not p.name.startswith('._')
-    }
-
-
-def _code_drift(frozen, current):
-    frozen, current = frozen or {}, current or {}
-    return {
-        'changed': sorted(k for k in set(frozen) & set(current) if frozen[k] != current[k]),
-        'added': sorted(set(current) - set(frozen)),
-        'removed': sorted(set(frozen) - set(current)),
-    }
-
-
-def _record_code_change(path, frozen, current, drift):
-    ledger = path.parent / CODE_CHANGES
-    current_hash = S.content_hash(current)
-    rows = [r for r in read_jsonl(ledger, repair_tail=False) if r.get('frozen_file') == path.name]
-    if rows and rows[-1].get('current_code_hash') == current_hash:
-        return
-    append_jsonl(ledger, {'frozen_file': path.name, 'time': time.time(),
-                          'frozen_code_hash': S.content_hash(frozen),
-                          'current_code_hash': current_hash, **drift})
-
-
-def freeze(path, value, allow_code_change=False):
-    """Write ``value`` once; later calls must agree (see the module docstring)."""
+def freeze(path, value):
+    """Write ``value`` once; later calls must be equal."""
     path = Path(path)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         save(path, value)
         return
-    frozen = json.loads(path.read_text())
-    if frozen == value:
-        return
-    if os.environ.get('SKILLEXPAND_ALLOW_RELAY_CODE_DRIFT') == '1':
-        # A relay transport fix must be able to resume an immutable run.  Only
-        # runtime code/provider fingerprints may drift; every task, card,
-        # Skill, prompt, and protocol input remains frozen.
-        def runtime_only(obj):
-            if not isinstance(obj, dict):
-                return obj
-            return {k: runtime_only(v) for k, v in obj.items()
-                    if k not in ('code', 'provider', 'relay_base_url',
-                                 'llm_transport', 'direct_provider_fallback')}
-        if runtime_only(frozen) == runtime_only(value):
-            save(path, value)
-            return
-    if isinstance(frozen, dict) and isinstance(value, dict):
-        strip = lambda d: {k: v for k, v in d.items() if k not in PROVENANCE_KEYS}
-        if strip(frozen) == strip(value) and set(frozen) == set(value):
-            drift = _code_drift(frozen.get('code'), value.get('code'))
-            if not allow_code_change:
-                files = drift['changed'] + drift['added'] + drift['removed']
-                raise FrozenCodeChanged(
-                    f'Source code changed since {path} was frozen ({len(files)} files: '
-                    f'{", ".join(files[:8])}{" ..." if len(files) > 8 else ""}). '
-                    'Use a new run directory, or resume with --allow-code-change to '
-                    f'record the drift in {CODE_CHANGES}.')
-            _record_code_change(path, frozen.get('code'), value.get('code'), drift)
-            return
-    raise FrozenProtocolChanged(f'Frozen inputs changed: {path}; use a new run directory')
+    if json.loads(path.read_text()) != value:
+        raise FrozenProtocolChanged(f'Frozen inputs changed: {path}; use a new run directory')
 
 
 def read_split(path):

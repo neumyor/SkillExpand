@@ -109,7 +109,7 @@ CLI test 阶段和 `scripts/evaluate_snapshot.py`（评测第 N 轮结束时的�
 
 ```text
 schema, structured_skill    记录类型、序列化、结构化 Skill 格式（仅标准库）
-persistence                 io.py：原子写、freeze、JSONL、锁、源码指纹；store.py；usage.py
+persistence                 io.py：原子写、freeze、JSONL、锁；store.py；usage.py
 reliability                 异常分类与处置、重试/修复策略、单元失败记录（与 persistence 同层）
 benchmarks                  SearchQA / ALFWorld 环境与任务表
 runtime                     ReAct 执行器、LLM 客户端、JSON 输出解析、通用任务池、prompt 注册表
@@ -125,16 +125,13 @@ campaign, cli               冻结 campaign 启动器；单次运行 CLI
 
 ## 11. 冻结与来源
 
-`persistence/io.freeze` 对冻结身份逐字段比较，`code` 源码指纹除外：
+冻结身份只包含方法输入：任务数据、split、各角色模型名、prompt、协议参数、初始 Skill 与卡片。不包含源码版本、端点 URL、超时等运维参数。`persistence/io.freeze` 是写一次、之后必须逐字段相等，否则 `FrozenProtocolChanged`，必须新建运行目录。
 
-- 协议字段（split、config、prompt、模型、预算、验收模式等）任一变化都拒绝续跑，必须新建运行目录；
-- 只有源码指纹变化时默认拒绝；显式 `--allow-code-change` 后继续，并在冻结文件旁的 `code_changes.jsonl` 追加一条漂移记录（变更/新增/删除的文件、前后指纹），原 manifest 不改写。每次切换到与上一条记录不同的版本都会追加一条。
+**注意**：L2 的 Planner/Editor/Reviewer prompt、family discovery 与初始 Skill 合成 prompt 不在 manifest 中（cold-start manifest 只含 adapter prompt），因此改动这些 prompt 不会被检测到，按约定属于协议变更，必须新建运行目录。`--llm-relay` 不改写冻结 config：中继只设置环境变量并写信息性的 `relay_manifest.json`；`GPTWrapper` 在中继下运行时去掉模型名的 `openai/` 前缀。
 
-**注意**：L2 的 Planner/Editor/Reviewer prompt、family discovery 与初始 Skill 合成 prompt、验收逻辑都只体现在源码指纹里，不在 manifest 的协议字段中。改动这些内容属于协议变更，必须新建运行目录；`--allow-code-change` 只用于不改变模型输入与判定的修复（崩溃、日志、性能）。当前代码不读取旧版本的工件格式；2026-10-08 之前产生的 run（包括 campaign）只能用产生它的代码续跑或审计。
+campaign（`skillexpand.campaign`）在 prepare 时把源码复制到 `<root>/code/src` 并写入冻结启动器 `<root>/code/run_campaign.py`；之后所有动作都经由冻结启动器运行该副本。`verify` 只校验 `inputs/`（任务数据）的摘要；manifest 中的 `source_commit` 仅供参考，不做校验。
 
-campaign（`skillexpand.campaign`）在 prepare 时把源码复制到 `<root>/code/src` 并写入冻结启动器 `<root>/code/run_campaign.py`；之后所有动作都经由冻结启动器运行冻结代码。`verify` 只以 `code/` 与 `inputs/` 的摘要为准；源码仓库的 Git 状态在 prepare 时记录，漂移只在 `check` 中报告，不再导致校验失败。
-
-修复只允许两种形式：在新的运行目录中重建，或通过 `--resume` / `--allow-code-change` 留下可审计的记录。
+修复只允许在新的运行目录中重建。
 
 ## 12. 异常处理与断点恢复
 

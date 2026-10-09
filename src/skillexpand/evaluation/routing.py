@@ -11,7 +11,6 @@ from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
 from skillexpand import schema as S
 from skillexpand.persistence.io import freeze
-from skillexpand.runtime.models.llm import provider_signature
 from skillexpand.l1.adapters import resolve
 from skillexpand.persistence.io import save
 from skillexpand.evaluation.selector import SkillSelector
@@ -66,7 +65,6 @@ class FrozenRoutes:
             "protocol": "fixed-description-routes-v1",
             "split": split,
             "config": OmegaConf.to_container(cfg, resolve=True),
-            "provider": provider_signature(),
             "descriptions": list(self.descriptions),
             "tasks": {str(t): F.task_text_of(cfg, t) for t in self.ids},
             "prompt": resolve(cfg).selector_prompt(plan.benchmark),

@@ -3,10 +3,9 @@
 ``prepare`` copies this checkout's ``src`` into ``<root>/code/src`` and writes
 ``<root>/code/run_campaign.py``, a launcher that always imports that frozen
 copy.  Every later action, stage and supervisor runs through the frozen
-launcher, so a campaign never executes live source.  The source checkout's Git
-state is recorded at preparation as provenance; drift is reported by ``check``
-and is not a verification failure, because the frozen ``code/`` and ``inputs/``
-digests are what define the campaign.
+launcher, so a campaign never executes live source.  Only the ``inputs/``
+(task data and splits) digests are verified; the source commit recorded at
+preparation is informational.
 """
 import argparse
 from collections import Counter
@@ -48,7 +47,7 @@ CONCURRENCY = {
     },
 }
 REQUEST_INTERVAL_SECONDS = 0.5
-#: Written to ``<root>/code/run_campaign.py`` and covered by the frozen digests.
+#: Written to ``<root>/code/run_campaign.py`` and executed, not digested.
 FROZEN_LAUNCHER = '''#!/usr/bin/env python3
 """Frozen campaign launcher: always runs this campaign's own code/src."""
 import sys
@@ -142,7 +141,7 @@ def audit_usage_ledgers(run):
 
 
 def source_commit(repo):
-    """Record the source revision without making preparation depend on Git."""
+    """Informational source revision; never verified."""
     try:
         return subprocess.check_output(
             ['git', '-C', str(repo), 'rev-parse', 'HEAD'],
@@ -151,36 +150,6 @@ def source_commit(repo):
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
-
-
-def git_identity(repo):
-    """Record the exact source revision, including an intentional dirty tree."""
-    repo = str(repo)
-    commit = subprocess.check_output(
-        ['git', '-C', repo, 'rev-parse', 'HEAD'], text=True
-    ).strip()
-    status = subprocess.check_output(
-        ['git', '-C', repo, 'status', '--porcelain=v1', '--untracked-files=all'],
-        text=True,
-    )
-    return {
-        'commit': commit,
-        'dirty': bool(status),
-        'status_hash': hashlib.sha256(status.encode()).hexdigest(),
-    }
-
-
-def source_drift(manifest):
-    """Compare the live source checkout with the Git state recorded at preparation.
-
-    Provenance only: stages execute the frozen ``code/`` copy, never the checkout.
-    """
-    try:
-        current = git_identity(Path(manifest['repo']))
-    except (OSError, subprocess.CalledProcessError):
-        return {'available': False}
-    return {'available': True, 'changed': current != manifest['git'],
-            'recorded': manifest['git'], 'current': current}
 
 
 def locked(path):
@@ -221,7 +190,6 @@ def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predict
     if candidate_count < 1 or (single_candidate and candidate_count != 1):
         raise InvalidInput('single-candidate campaigns require candidate_count=1')
     repo = source_checkout()
-    source_git = git_identity(repo)
     runtime = configured_runtime()
     if root.exists() and any(root.iterdir()):
         raise InvalidInput('Prepare requires a new campaign directory')
@@ -249,13 +217,13 @@ def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predict
              {'assignment': {'0': 'train', '1': 'train', '2': 'val', '3': 'test'}})
         details[benchmark] = {'counts': counts, 'preflight_original_task_ids': selected,
                               'original_tasks': str(task_path), 'original_split': str(split_path)}
-    files = {str(p.relative_to(root)): digest(p) for folder in ('code', 'inputs')
-             for p in sorted((root / folder).rglob('*')) if p.is_file()}
+    files = {str(p.relative_to(root)): digest(p)
+             for p in sorted((root / 'inputs').rglob('*')) if p.is_file()}
     default_model = runtime.pop('model')
     role_models = {role: (models or {}).get(role) or default_model for role in ROLES}
     manifest = {
         'schema': 1, 'repo': str(repo),
-        'source_commit': source_commit(repo), 'git': source_git, **runtime,
+        'source_commit': source_commit(repo), **runtime,
         'models': role_models,
         'concurrency': CONCURRENCY, 'evolve_rounds': 2,
         'autonomous_attempts': autonomous_attempts, 'supervised_attempts': supervised_attempts,
@@ -901,8 +869,7 @@ def main():
         result = verify(root)
         print(json.dumps({'verified': True, 'models': result['models'],
                           'concurrency': result['concurrency'],
-                          'benchmarks': result['benchmarks'],
-                          'source_drift': source_drift(result)}))
+                          'benchmarks': result['benchmarks']}))
     elif args.action == 'independent-check':
         print(json.dumps(independent_checks(root)))
     elif args.action == 'health':

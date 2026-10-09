@@ -2,6 +2,7 @@ from pathlib import Path
 """Offline integration checks of serial L2, real local SearchQA execution and resume."""
 
 import json
+import os
 import unittest
 from contextlib import contextmanager
 from dataclasses import replace
@@ -675,6 +676,51 @@ class SerialL2Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'summary differs'):
             audit_test(target, final_dir)
 
+    def _cli_l2(self, driver, target, *extra):
+        with self.models(driver), patch.object(PL, "run_generic", side_effect=self.units):
+            evolve.main(["--benchmark", "searchqa", "--cold-start-dir", str(self.root),
+                         "--run-dir", str(target), "--phase", "l2", "--candidate-count", "3",
+                         "--skill-edit-mode", "rewrite", *extra])
+
+    def test_relay_start_leaves_frozen_config_byte_identical(self):
+        driver = self.prepared()
+        plain, relayed = self.root.parent / "plain", self.root.parent / "relayed"
+        self._cli_l2(driver, plain)
+
+        class Relay:
+            transport = SimpleNamespace(sandbox_id="sandbox")
+            start = staticmethod(lambda: "http://127.0.0.1:1/v1")
+            close = staticmethod(lambda: None)
+
+        with patch("skillexpand.runtime.llm_relay.relay_from_env", return_value=Relay()), \
+                patch.dict(os.environ, OPENAI_API_KEY="k"):
+            self._cli_l2(driver, relayed, "--llm-relay")
+        self.assertEqual((plain / "config.json").read_bytes(), (relayed / "config.json").read_bytes())
+        self.assertTrue((relayed / "relay_manifest.json").exists())
+        self.assertNotIn("EXPE_LLM_RELAY_REQUIRED", os.environ)
+
+    def test_resume_with_a_different_endpoint_is_accepted(self):
+        driver = self.prepared()
+        target = self.root.parent / "endpoint"
+        with patch.dict(os.environ, EXPE_LLM_BASE_URL="http://one.invalid/v1", OPENAI_API_KEY="k"):
+            self._cli_l2(driver, target)
+        before = (target / "l2_manifest.json").read_bytes()
+        with patch.dict(os.environ, EXPE_LLM_BASE_URL="http://two.invalid/v1", OPENAI_API_KEY="k"):
+            self._cli_l2(driver, target, "--resume")
+        self.assertEqual((target / "l2_manifest.json").read_bytes(), before)
+
+    def test_changed_candidate_count_or_model_name_is_a_protocol_change(self):
+        from skillexpand.reliability.errors import FrozenProtocolChanged
+        driver = self.prepared()
+        with self.assertRaises(FrozenProtocolChanged):
+            L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root),
+                                  L.EvolutionConfig(batch_size=1, candidate_count=2,
+                                                    skill_edit_mode="rewrite"))
+        target = self.root.parent / "model"
+        self._cli_l2(driver, target)
+        with self.assertRaises(FrozenProtocolChanged):
+            self._cli_l2(driver, target, "--resume", "--l2-planner-model", "other-model")
+
     def test_snapshot_reuses_frozen_routes(self):
         import importlib.util
         from skillexpand.evaluation.routing import FrozenRoutes
@@ -721,8 +767,7 @@ class SerialL2Tests(unittest.TestCase):
                 return SimpleNamespace(n=1, successes=1, score=1.0)
 
         target = self.root / "snapshot-flaky"
-        with patch.object(SN, "FixedSkillScorer", Scorer), \
-                patch.object(SN, "provider_signature", return_value="p"):
+        with patch.object(SN, "FixedSkillScorer", Scorer):
             with self.assertRaisesRegex(RuntimeError, "failed groups"):
                 SN.evaluate_library(self.cfg, None, self.root, skills, skills, routes, target, 1)
         self.assertEqual(calls, [s.skill_id for s in skills])
@@ -739,8 +784,7 @@ class SerialL2Tests(unittest.TestCase):
                 calls.append(skill.skill_id)
                 raise UnitFailed(failure_record(KeyError("bug"), unit_id=1, stage="x"))
 
-        with patch.object(SN, "FixedSkillScorer", Buggy), \
-                patch.object(SN, "provider_signature", return_value="p"):
+        with patch.object(SN, "FixedSkillScorer", Buggy):
             with self.assertRaises(UnitFailed):
                 SN.evaluate_library(self.cfg, None, self.root, skills, skills, routes,
                                     self.root / "snapshot-bug", 1)

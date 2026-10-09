@@ -98,9 +98,9 @@ CLI 的 `test` 阶段使用 `test` split：
 
 每个 task、模型响应、经验卡、候选、acceptance 和 batch 事务都逐单元落盘；恢复只补缺失单元。更改 prompt、模型、split、配置或协议必须新建运行目录。
 
-只改源码时 `--resume` 默认报 `FrozenCodeChanged` 并列出变化的文件。确认改动不影响协议（例如只修复崩溃或日志）后，加 `--allow-code-change` 续跑；漂移记录追加到 `manifest.json` / `l2_manifest.json` / `test/<hash>/protocol.json` 旁的 `code_changes.jsonl`，原 manifest 保持不变，审计时可以据此区分前后两段代码。
+冻结身份（`manifest.json`、`l2_manifest.json`、`test/<hash>/protocol.json`）只包含方法输入，不含源码版本、端点 URL 或超时；因此换端点或改用 `--llm-relay` 续跑都可以直接 `--resume`。协议输入（模型名、候选数等）变化会报 `FrozenProtocolChanged`。
 
-**注意**：L2 的 Planner/Editor/Reviewer prompt、family discovery 与初始 Skill 合成 prompt、验收逻辑都只体现在源码指纹里，不在 manifest 的协议字段中。改动这些内容属于协议变更，必须新建运行目录；`--allow-code-change` 只用于不改变模型输入与判定的修复（崩溃、日志、性能）。由于 2026-10-08 的重构移动了几乎所有模块，此前的 run 若用新代码续跑，漂移会覆盖全部文件，审计上无法逐文件区分，应尽量用原代码完成。
+**注意**：L2 的 Planner/Editor/Reviewer prompt 与初始 Skill 合成 prompt 不在 manifest 中，改动它们属于协议变更，必须新建运行目录。
 
 每轮 Evolve 完成后运行：
 
@@ -124,9 +124,9 @@ worker 只消费它保存的 trajectory 与 verifier 结果。任务表来自 `-
 - `configs/benchmark/terminalbench.yaml` 中 `rollout.runner_script` 指向 TB2.1 的 Tencent 启动脚本；
 - 远程机器若不能直连 provider，加 `--llm-relay`：全部 LLM 调用经一个常驻 Tencent E2B 中继沙箱转发
   （`runtime/llm_relay.py`；需安装 `.[tencent-relay]` extra 并设置 `E2B_API_KEY` 与
-  `TBENCH_E2B_RELAY_TEMPLATE`）。中继绑定临时回环端口并归一化模型名，因此 relay run 在 resume 时允许
-  一次性替换冻结 config 中的运行时 transport 字段；`SKILLEXPAND_ALLOW_RELAY_CODE_DRIFT=1` 仅供
-  中继代码修复续跑使用，其余输入仍冻结；
+  `TBENCH_E2B_RELAY_TEMPLATE`）。中继不改写冻结 config，只设置环境变量并写信息性的
+  `relay_manifest.json`；中继下 `GPTWrapper` 去掉模型名的 `openai/` 前缀，TB 沙箱的 `MODEL_API_BASE`
+  由 `EXPE_LLM_RELAY_REQUIRED` 与 `TBENCH_RELAY_PROVIDER_BASE` 决定；
 - TB 单元最长可运行 2 小时，worker 进度超时默认已放宽到 7500s。
 
 成本提示：sampled 验收的每道抽检题都是一次真实沙箱执行（两臂 × 抽样题数，默认上限 16 题），在 TB 上

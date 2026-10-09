@@ -127,8 +127,8 @@ Reviewer 的学习信号只有本节的案例记忆；没有 train-panel 校准�
   empirical 只计未命中缓存的 episode；sampled 固定计"两臂 × 抽样题数"，含缓存复用的旧臂。成本比较
   须统一口径（建议都用未命中缓存的 episode 数，从各自的 usage/score 缓存统计）。
 - 每个条件使用新的 run 目录。campaign manifest 冻结 commit、模型与 role 映射、split、candidate count = 1、
-  抽样上限、置信水平、记忆模式与判定者开关；val route 冻结在 run 目录的 `routes/val/`；prompt 版本体现在
-  源码指纹与 journal 的 `protocol_hash` 中。
+  抽样上限、置信水平、记忆模式与判定者开关；val route 冻结在 run 目录的 `routes/val/`；prompt 变更按约定须新建 run 目录，
+  journal 的 `protocol_hash` 只覆盖执行协议。
 
 ## 7. 审计不变量
 

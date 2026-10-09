@@ -10,26 +10,22 @@ from omegaconf import OmegaConf
 from skillexpand import schema as S
 from skillexpand.evaluation.audit import audit_test
 from skillexpand.evaluation.validation import FixedSkillScorer, ScoreCache, library_fingerprint
-from skillexpand.persistence.io import code_signature, freeze, save
+from skillexpand.persistence.io import freeze, save
 from skillexpand.reliability.errors import StageIncomplete
-from skillexpand.runtime.models.llm import provider_signature
 
 
-def freeze_protocol(cfg, skills, initial, target, protocol_extra=None, allow_code_change=False):
+def freeze_protocol(cfg, skills, initial, target, protocol_extra=None):
     """Freeze the library and execution protocol before any test task is touched."""
     freeze(target / 'library.json', [S.to_dict(s) for s in skills])
     freeze(target / 'protocol.json', {
-        'code': code_signature(),
-        'provider': provider_signature(),
         'config': OmegaConf.to_container(cfg, resolve=True),
         'routing_reference': [S.to_dict(s) for s in initial],
         **(protocol_extra or {}),
-    }, allow_code_change=allow_code_change)
+    })
 
 
 def evaluate_library(cfg, plan, run_root, skills, initial, routes, target, workers,
-                     protocol_extra=None, summary_extra=None, smoke=False,
-                     allow_code_change=False):
+                     protocol_extra=None, summary_extra=None, smoke=False):
     """Freeze, execute and audit ``skills`` once per routed test task.
 
     Routing uses the frozen initial descriptions, so every library of a run is
@@ -39,7 +35,7 @@ def evaluate_library(cfg, plan, run_root, skills, initial, routes, target, worke
     ``smoke`` measures one task per group and skips the full-coverage audit.
     """
     skills = tuple(skills)
-    freeze_protocol(cfg, skills, initial, target, protocol_extra, allow_code_change)
+    freeze_protocol(cfg, skills, initial, target, protocol_extra)
     scorer = FixedSkillScorer(cfg, ScoreCache(target / 'scores.jsonl'), routes, workers)
     freeze(target / 'score_protocol.json', {'hash': scorer.protocol_hash})
     per_skill, failed = {}, []

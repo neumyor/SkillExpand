@@ -155,10 +155,6 @@ class FrozenProtocolChanged(IntegrityError):
     """A frozen identity's protocol fields differ on resume."""
 
 
-class FrozenCodeChanged(IntegrityError):
-    """Only the source fingerprint of a frozen identity differs."""
-
-
 class AuditFailure(IntegrityError):
     """An offline audit found results inconsistent with their evidence."""
 

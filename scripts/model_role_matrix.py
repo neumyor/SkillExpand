@@ -231,20 +231,18 @@ def status(plan, root):
         row["models_match"] = manifest.get("models") == expected
         shared_files = {
             path: digest for path, digest in (manifest.get("files") or {}).items()
-            if path.startswith("code/") or path.startswith("inputs/")
+            if path.startswith("inputs/")
         }
-        shared_identity = (
-            manifest.get("source_commit"), manifest.get("llm_base_url"), shared_files
-        )
-        row["shared_inputs_code_match"] = (
+        shared_identity = (manifest.get("llm_base_url"), shared_files)
+        row["shared_inputs_match"] = (
             shared_reference is None or shared_identity == shared_reference
         )
         if shared_reference is None:
             shared_reference = shared_identity
         if not row["models_match"]:
             row["status"] = "model_mismatch"
-        elif not row["shared_inputs_code_match"]:
-            row["status"] = "shared_inputs_or_code_mismatch"
+        elif not row["shared_inputs_match"]:
+            row["status"] = "shared_inputs_mismatch"
         elif not protocol_matches(plan, manifest):
             row["status"] = "protocol_mismatch"
         elif (condition_root / "full" / "complete.json").exists():

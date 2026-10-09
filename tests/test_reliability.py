@@ -30,7 +30,6 @@ def no_sleep(monkeypatch):
     (E.RepairExhausted('x'), 'response', True, 'after_stage'),
     (E.ProviderRejected('x'), 'provider_rejected', False, 'stage'),
     (E.AuditFailure('x'), 'integrity', False, 'stage'),
-    (E.FrozenCodeChanged('x'), 'integrity', False, 'stage'),
     (E.InvalidInput('x'), 'configuration', False, 'stage'),
     (E.RunLocked('x'), 'configuration', False, 'stage'),
     (KeyError('x'), 'bug', False, 'all'),

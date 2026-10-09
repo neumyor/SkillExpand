@@ -45,7 +45,6 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--test-workers', type=int, default=256)
     p.add_argument('--smoke', action='store_true')
-    p.add_argument('--allow-code-change', action='store_true')
     args = p.parse_args()
     if not 1 <= args.test_workers <= 256:
         raise ValueError('test-workers must be between 1 and 256')
@@ -72,7 +71,7 @@ def main():
             cfg, plan, run, skills, initial, routes, output, args.test_workers,
             protocol_extra={'round': args.round, 'execution': 'fixed-skill-single-attempt-v1'},
             summary_extra={'benchmark': plan.benchmark, 'evolution_round': args.round},
-            smoke=args.smoke, allow_code_change=args.allow_code_change)
+            smoke=args.smoke)
         if args.smoke:
             save(output / 'smoke.json', {'status': 'passed', 'tasks': result['tasks']})
     print(json.dumps(result, indent=2))

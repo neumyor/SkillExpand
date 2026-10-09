@@ -1,3 +1,4 @@
+import os
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +35,17 @@ def test_model_requests_streaming_when_relay_required():
         wrapper = GPTWrapper('test', 'EMPTY', base_url='http://relay.invalid/v1')
         assert wrapper([]) == 'ok'
         assert factory.call_args.kwargs['streaming'] is True
+
+
+def test_openai_prefix_is_stripped_only_under_relay():
+    with patch('skillexpand.runtime.models.llm.ChatOpenAI') as factory:
+        with patch.dict('os.environ', EXPE_LLM_RELAY_REQUIRED='1'):
+            assert GPTWrapper('openai/m', 'EMPTY', base_url='http://relay.invalid/v1').model_name == 'm'
+            assert factory.call_args.kwargs['model'] == 'm'
+        with patch.dict('os.environ', {}, clear=False):
+            os.environ.pop('EXPE_LLM_RELAY_REQUIRED', None)
+            assert GPTWrapper('openai/m', 'EMPTY').model_name == 'openai/m'
+            assert factory.call_args.kwargs['model'] == 'openai/m'
 
 
 def test_retry_delay_stays_at_one_minute():

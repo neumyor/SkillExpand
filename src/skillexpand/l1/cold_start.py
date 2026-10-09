@@ -10,7 +10,7 @@ from skillexpand import schema as S
 from skillexpand.runtime import parallel as PL
 from skillexpand.l1 import workers as LW
 from skillexpand.persistence import store as ST
-from skillexpand.persistence.io import code_signature, freeze, save
+from skillexpand.persistence.io import freeze, save
 from skillexpand.reliability.errors import InvalidInput, JournalConflict
 from skillexpand.reliability.policies import repair_policy
 from skillexpand.reliability.retry import call_with_repair, fresh
@@ -54,7 +54,7 @@ class ColdStart:
     def __init__(self,cfg,plan,root,cold_start_workers=8,k=4,supervised=True,
                  supervised_attempts=1,
                  family_discovery_workers=8, ask=None,run_units=None,card_batch_size=12,
-                 skill_edit_mode='rewrite', allow_code_change=False):
+                 skill_edit_mode='rewrite'):
         self.cfg,self.plan,self.root=cfg,plan,Path(root)
         self.cold_start_workers,self.k,self.supervised=cold_start_workers,k,supervised
         self.supervised_attempts=supervised_attempts
@@ -76,9 +76,8 @@ class ColdStart:
             'prompts':{key:getattr(adapter,key) for key in PROMPT_FIELDS},
             'k':k,'supervised':supervised,'supervised_attempts':supervised_attempts,
             'card_batch_size':card_batch_size,
-            'skill_edit_mode':skill_edit_mode,
-            'code':code_signature()}
-        freeze(self.root/'manifest.json',identity,allow_code_change=allow_code_change)
+            'skill_edit_mode':skill_edit_mode}
+        freeze(self.root/'manifest.json',identity)
         freeze(self.root/'split.json',json.loads(json.dumps(S.to_dict(plan))))
 
     def ask(self,prompt, role='cold_start'):

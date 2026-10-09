@@ -282,7 +282,7 @@ def test_prepare_freezes_code_and_a_launcher_that_runs_only_the_frozen_copy(tmp_
     manifest = C.prepare(root, inputs)
     assert (root / 'code/src/skillexpand/campaign.py').is_file()
     assert (root / 'code/run_campaign.py').read_text() == C.FROZEN_LAUNCHER
-    assert 'code/run_campaign.py' in manifest['files']
+    assert manifest['files'] and all(f.startswith('inputs/') for f in manifest['files'])
     # A broken package earlier on PYTHONPATH must not shadow the frozen copy.
     shadow = tmp_path / 'shadow' / 'skillexpand'
     shadow.mkdir(parents=True)
@@ -294,17 +294,20 @@ def test_prepare_freezes_code_and_a_launcher_that_runs_only_the_frozen_copy(tmp_
     assert json.loads(output.strip().splitlines()[-1])['verified'] is True
 
 
-def test_source_git_drift_is_reported_not_fatal(tmp_path, monkeypatch):
+def test_only_inputs_are_verified_not_code(tmp_path, monkeypatch):
     inputs = _runtime(tmp_path, monkeypatch)
     root = tmp_path / 'campaign'
     C.prepare(root, inputs)
-    monkeypatch.setattr(C, 'git_identity', lambda repo: {'commit': 'other', 'dirty': True,
-                                                         'status_hash': 'x'})
-    manifest = C.verify(root)
-    assert C.source_drift(manifest)['changed'] is True
     (root / 'code/src/skillexpand/schema.py').write_text('# edited\n')
+    assert C.verify(root)['source_commit'] == C.source_commit(C.source_checkout())
+    victim = next(iter(read_files(root)))
+    (root / victim).write_text('[]')
     with pytest.raises(ValueError, match='Frozen campaign file changed'):
         C.verify(root)
+
+
+def read_files(root):
+    return json.loads((root / 'manifest.json').read_text())['files']
 
 
 def test_prepare_refuses_to_run_from_a_frozen_copy(tmp_path, monkeypatch):

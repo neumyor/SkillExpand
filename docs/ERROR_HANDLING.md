@@ -26,7 +26,7 @@
 | `infrastructure` | `ProviderUnavailable`、`EnvironmentFailure`/`EnvironmentTimeout`、`WorkerLost`、`StageIncomplete`（失败全部来自 `response` 时，类别也取 `response`） | 是 | 当前批次跑完后，阶段以 `StageIncomplete` 结束 |
 | `response` | `JsonExtractionError`、`SchemaViolation`、`ReferenceViolation`、`RepairExhausted` | 是 | 同上 |
 | `provider_rejected` | `ProviderRejected`（认证、权限、模型不存在、请求非法或超长） | 否 | 立即停止当前阶段 |
-| `integrity` | `FrozenProtocolChanged`、`FrozenCodeChanged`、`AuditFailure`、`JournalConflict`、`StoreError`/`LedgerCorrupt`、`IsolationViolation` | 否 | 立即停止当前阶段 |
+| `integrity` | `FrozenProtocolChanged`、`AuditFailure`、`JournalConflict`、`StoreError`/`LedgerCorrupt`、`IsolationViolation` | 否 | 立即停止当前阶段 |
 | `configuration` | `InvalidInput`、`RunLocked` | 否 | 立即停止当前阶段 |
 | `bug` | 其他任何异常 | 否 | **立即停止整个流程** |
 
@@ -41,7 +41,7 @@
 | `runtime/models/llm.py` | openai 的 `Timeout`、`APIConnectionError`、`RateLimitError`、`ServiceUnavailableError`、`TryAgain` → `ProviderUnavailable`；`APIError` 按 HTTP 状态区分：408、409、429、5xx 或无状态 → `ProviderUnavailable`，其余 4xx → `ProviderRejected`；`AuthenticationError`、`PermissionError`、`InvalidRequestError`、`InvalidAPIType`、`SignatureVerificationError` → `ProviderRejected` |
 | `benchmarks/base.py` | 原生环境调用超时 → `EnvironmentTimeout`；`BrokenPipeError`、`ConnectionResetError`、`EOFError` → `EnvironmentFailure` |
 | `runtime/parallel.py` | 进程池无进展 → `WorkerLost` |
-| `persistence/io.py` | 写锁冲突 → `RunLocked`；冻结身份不一致 → `FrozenProtocolChanged` / `FrozenCodeChanged`；JSONL 中间行损坏 → `LedgerCorrupt`；`require()` 失败 → `AuditFailure` |
+| `persistence/io.py` | 写锁冲突 → `RunLocked`；冻结身份不一致 → `FrozenProtocolChanged`；JSONL 中间行损坏 → `LedgerCorrupt`；`require()` 失败 → `AuditFailure` |
 | 各响应解析器 | 解析时出现的 `ValueError/KeyError/TypeError/AttributeError` 由 `call_with_repair` 统一转为 `SchemaViolation`；请求阶段的异常不做这种转换。同一个校验函数（例如 `DiscoveryError`）用于已落盘产物时属于 `integrity`，用于模型输出时属于 `response` |
 
 ## 4. 重试与修复策略
@@ -98,7 +98,7 @@ L1、路由和 fixed-Skill 执行的 worker 结果都带 `failure` 字段：成�
 续跑依次经过以下几层：
 
 1. **互斥**：`RunLock` / `exclusive_lock`，冲突时抛 `RunLocked`。
-2. **协议冻结**：`freeze`；只有代码变化时需加 `--allow-code-change`，漂移写入 `code_changes.jsonl`。
+2. **协议冻结**：`freeze` 只冻结方法输入，写一次、之后必须相等。
 3. **单元缓存**：已完成的单元跳过（冷启动 `results/`、evolution `cards/`、路由 `tasks/`、`ScoreCache`、L2 `l2_proposals/`）；失败的单元不写入缓存。
 4. **修复回放**：L2 的每次修复尝试都按 `hypotheses-<n>`（`n` 从 0 开始）落盘。续跑时先回放这些尝试且不计入预算，然后继续新的请求。
 5. **事务日志**：先写 L2 batch journal，再写 Skill 版本库；续跑时重放日志。
