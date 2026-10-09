@@ -107,19 +107,6 @@ def freeze(path, value, allow_code_change=False):
     frozen = json.loads(path.read_text())
     if frozen == value:
         return
-    if os.environ.get('SKILLEXPAND_ALLOW_RELAY_CODE_DRIFT') == '1':
-        # A relay transport fix must be able to resume an immutable run.  Only
-        # runtime code/provider fingerprints may drift; every task, card,
-        # Skill, prompt, and protocol input remains frozen.
-        def runtime_only(obj):
-            if not isinstance(obj, dict):
-                return obj
-            return {k: runtime_only(v) for k, v in obj.items()
-                    if k not in ('code', 'provider', 'relay_base_url',
-                                 'llm_transport', 'direct_provider_fallback')}
-        if runtime_only(frozen) == runtime_only(value):
-            save(path, value)
-            return
     if _relay_run():
         # Transport drift only: ignoring it must not hide a source-code change,
         # which still has to pass through ``allow_code_change`` below.

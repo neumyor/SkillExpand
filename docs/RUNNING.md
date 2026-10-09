@@ -145,9 +145,9 @@ worker 只消费它保存的 trajectory 与 verifier 结果。任务表来自 `-
 - `configs/benchmark/terminalbench.yaml` 中 `rollout.runner_script` 指向 TB2.1 的 Tencent 启动脚本；
 - 远程机器若不能直连 provider，加 `--llm-relay`：全部 LLM 调用经一个常驻 Tencent E2B 中继沙箱转发
   （`runtime/llm_relay.py`；需安装 `.[tencent-relay]` extra 并设置 `E2B_API_KEY` 与
-  `TBENCH_E2B_RELAY_TEMPLATE`）。中继绑定临时回环端口并归一化模型名，因此 relay run 在 resume 时允许
-  一次性替换冻结 config 中的运行时 transport 字段；`SKILLEXPAND_ALLOW_RELAY_CODE_DRIFT=1` 仅供
-  中继代码修复续跑使用，其余输入仍冻结；
+  `TBENCH_E2B_RELAY_TEMPLATE`）。中继绑定临时回环端口并归一化模型名，因此 relay run 在 resume 时只忽略
+  冻结身份中的 transport 字段（端点、`relay_base_url`、`llm_transport`、`direct_provider_fallback`、provider 签名），
+  冻结文件不被改写；源码漂移仍需 `--allow-code-change`，其余输入仍冻结；
 - TB 单元最长可运行 2 小时，worker 进度超时默认已放宽到 7500s。
 
 成本提示：sampled 验收的每道抽检题都是一次真实沙箱执行（两臂 × 抽样题数，默认上限 16 题），在 TB 上

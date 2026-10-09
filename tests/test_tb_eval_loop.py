@@ -485,3 +485,16 @@ def test_relay_run_still_refuses_a_real_protocol_change(world):
     use_relay(world, RELAY_B)
     with pytest.raises(FrozenProtocolChanged):
         world.run(progressive_config(candidate_count=2))
+
+
+def test_legacy_drift_env_switch_no_longer_waives_source_code_drift(world):
+    use_relay(world, RELAY_A)
+    crash_in_judge(world)
+    use_relay(world, RELAY_B)
+    world.monkeypatch.setenv('SKILLEXPAND_ALLOW_RELAY_CODE_DRIFT', '1')
+    before = (world.root / 'l2_manifest.json').read_bytes()
+    with patch('skillexpand.l2.loop.code_signature', return_value={'x.py': 'drifted'}):
+        with pytest.raises(FrozenCodeChanged):
+            world.run()
+    assert (world.root / 'l2_manifest.json').read_bytes() == before
+    assert not (world.root / 'code_changes.jsonl').exists()
