@@ -73,6 +73,11 @@ def harbor_rollout(cfg, task_id, skill, attempts, out_dir, evolution_round=0):
         'TBENCH_N_ATTEMPTS': str(int(attempts)), 'TBENCH_N_CONCURRENT': '1',
         'TBENCH_MAX_TRIAL_RETRIES': '0', 'RUN_ID': run_id,
         'JOBS_DIR': str(jobs_dir), 'TBENCH_SKILL_ROOT': str(skill_root), 'DRY_RUN': '0',
+        # The executor model comes from the frozen role map like every other
+        # role, never from the caller's environment: the runner silently falls
+        # back to its own default when MODEL_NAME is unset.  It adds the
+        # ``openai/`` provider prefix itself.
+        'MODEL_NAME': str(cfg.agent.llm).removeprefix('openai/'),
     })
     # Terminus runs inside the Tencent task sandbox.  A jinan40 loopback relay is
     # not visible from that sandbox; its model client already performs the HTTP

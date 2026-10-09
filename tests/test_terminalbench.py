@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from dataclasses import replace
+import unittest.mock
 from unittest.mock import patch
 
 from omegaconf import OmegaConf
@@ -63,6 +64,24 @@ class HarborAuditTests(unittest.TestCase):
         no_card = replace(experience(), experience_card={'schema_version': 4})
         with self.assertRaisesRegex(ValueError, 'schema-5'):
             audit_harbor_experience(no_card)
+
+
+class HarborRolloutTests(unittest.TestCase):
+    def test_the_executor_model_comes_from_the_frozen_config(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / 'tasks.json').write_text(json.dumps(
+            [{'task_name': 'tb-task', 'instruction': 'fix the failing test'}]))
+        (tmp / 'runner.sh').write_text('')
+        cfg = harbor_cfg(tmp)
+        cfg.agent = {'llm': 'openai/frozen-executor'}
+        from skillexpand.benchmarks import terminalbench as TB
+        completed = unittest.mock.Mock(returncode=0, stdout='', stderr='')
+        with patch.dict('os.environ', {'MODEL_NAME': 'stale-shell-model'}), patch.object(
+                TB.subprocess, 'run', return_value=completed) as run:
+            TB.harbor_rollout(cfg, 0, None, 1, tmp / 'out')
+        # The caller's environment never decides the model; the runner adds
+        # the provider prefix itself.
+        self.assertEqual(run.call_args.kwargs['env']['MODEL_NAME'], 'frozen-executor')
 
 
 class HarborL1WorkerTests(unittest.TestCase):
