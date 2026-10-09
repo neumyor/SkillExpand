@@ -28,7 +28,7 @@ Reviewer 的最终输出由 JSON Schema 约束为三个字段：`probability_tru
 
 ### empirical
 
-`empirical` 使用冻结 `routes/val/` 和相同 paired task IDs，启动真实 executor。每个候选都和旧 Skill 在相同 task panel 上比较实测成功率，只有严格提高才接受；它只看 val 的配对实测，不做逐卡 review。
+`empirical` 使用冻结 `routes/val/` 和相同 paired task IDs，启动真实 executor。每个候选都和旧 Skill 在相同 task panel 上比较实测成功率，只有严格提高才接受；它只看 val 的配对实测。
 
 ### sampled
 

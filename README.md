@@ -1,6 +1,6 @@
 # SkillExpand
 
-SkillExpand 从任务执行轨迹中提取经验卡，归纳初始 Skill，再通过 L2 演化 Skill。它维护自然语言 Skill 版本，不训练模型权重；当前支持 SearchQA 和 ALFWorld。
+SkillExpand 从任务执行轨迹中提取经验卡，归纳初始 Skill，再通过 L2 演化 Skill。它维护自然语言 Skill 版本，不训练模型权重；当前支持 SearchQA、ALFWorld 和 TerminalBench（TerminalBench 在远程 Harbor/Tencent 沙箱中执行，见 [TerminalBench 测试指南](docs/TERMINALBENCH_TESTING.md)）。
 
 ## 当前闭环
 
@@ -113,9 +113,9 @@ flowchart LR
 
 `src/skillexpand/` 按层组织，只允许向下依赖（`tests/test_layering.py` 强制检查）：`schema`/`structured_skill` → `persistence`（`io.py` 提供原子写、冻结、JSONL 和锁）与 `reliability`（异常分类、重试/修复策略、单元失败记录，见 [异常处理](docs/ERROR_HANDLING.md)）→ `benchmarks` → `runtime`（执行器、LLM、任务池）→ `l1` → `evaluation` → `l2` → `campaign`/`cli`。
 
-`scripts/` 只放可复用入口：`run_campaign.py`（冻结 campaign，逻辑在 `skillexpand.campaign`）、`check_fresh_campaign.py`、`evaluate_snapshot.py`、`model_role_matrix.py`、`summarize_model_role_matrix.py`、`prepare_data.py`、`probe_campaign_capacity.py`、`detach.py` 和环境脚本。代码不兼容旧版本产生的运行目录；旧 run 只能用产生它的代码续跑或审计。
+`scripts/` 只放可复用入口：`run_campaign.py`（冻结 campaign，逻辑在 `skillexpand.campaign`）、`check_fresh_campaign.py`、`evaluate_snapshot.py`、`model_role_matrix.py`、`summarize_model_role_matrix.py`、`prepare_data.py`、`probe_campaign_capacity.py`、`detach.py` 和环境脚本；TerminalBench 专用的有 `tb_eval_stage.py`、`import_terminalbench_batch.py`、`propose_terminalbench_library.py`、`materialize_terminalbench_library.py`、`validate_tb21_rollouts.py`。代码不兼容旧版本产生的运行目录；旧 run 只能用产生它的代码续跑或审计。
 
-安装和 benchmark 环境配置见 [运行指南](docs/RUNNING.md) 与 [Benchmark/L1 接口](docs/BENCHMARKS.md)；系统设计见 [架构](docs/ARCHITECTURE.md)，L2 审计见 [L2 审计](docs/L2_CARD_REVIEW_AUDIT.md)。
+安装和 benchmark 环境配置见 [运行指南](docs/RUNNING.md) 与 [Benchmark/L1 接口](docs/BENCHMARKS.md)；在远程服务器上跑 TerminalBench 见 [TerminalBench 测试指南](docs/TERMINALBENCH_TESTING.md)；系统设计见 [架构](docs/ARCHITECTURE.md)，L2 审计见 [L2 审计](docs/L2_CARD_REVIEW_AUDIT.md)。
 
 最近一次 SearchQA/ALFWorld campaign 的审计状态和历史 test 快照见
 [实验状态记录](docs/EXPERIMENT_STATUS_20260930.md)。

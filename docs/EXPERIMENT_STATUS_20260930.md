@@ -8,7 +8,8 @@ record, not a new benchmark measurement.
 Campaign: `runs/f1a117f-predicted-val-cold-evolve2-20260929/`
 
 The configuration used `acceptance_mode=predicted` and
-`predicted_review_scope=val`. Train-task L1 outcomes were:
+`predicted_review_scope=val` (that option has since been removed from the code; predicted
+acceptance now always scores the frozen val route). Train-task L1 outcomes were:
 
 | Benchmark | Cold start | Evolve-1 | Evolve-2 | Artifact state |
 |---|---:|---:|---:|---|
@@ -44,5 +45,5 @@ campaign completed Evolve-1 or Evolve-2.
 `probability_true`, `predicted_success`, and `reason` (at most 80 characters),
 while keeping reviewer thinking enabled. The parser accepts fenced JSON,
 commentary around a valid object, trailing commas, and Python-style literals;
-truncated output is rejected and retried once. The regression suite covers these
+truncated output is rejected and the request is resampled (`reviewer.predicted_val`, up to 32 attempts; see `reliability/policies.py`). The regression suite covers these
 cases in `tests/test_predicted_reviewer_format.py`.

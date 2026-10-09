@@ -1,5 +1,7 @@
 # TB-eval：TerminalBench 2.1 的 progressive library 实验（E3/E4）
 
+> 怎么在远程服务器上跑：见 [TerminalBench 测试指南](TERMINALBENCH_TESTING.md)；实测 smoke 见第 8 节。
+
 本文是分支 `TB-eval` 的实验规格（建立在精简后的 main 之上），复刻 `codex/tb21-progressive-relay-recovery` 的 TB2.1 实验，
 但用**一个开关**实现，且开关关闭时 main 的所有执行路径逐字节不变（旧 run 的卡片哈希、`l2_manifest`
 身份、searchqa/alfworld 行为均不受影响）。
@@ -35,7 +37,7 @@ terminalbench、`rollout.mode=harbor_rollout`；`__post_init__` 要求 `acceptan
 `--l1-model` 为执行模型，其余角色模型与 `--selector-model` 均为 method model，加 `--llm-relay`；环境
 `TBENCH_PERSIST_SANDBOXES=0`，`Popen(start_new_session=True)` 脱离进程组并写 pidfile。
 `--skill-edit-mode rewrite` 是 codex 基线的默认值，main 的默认值是 `structured`，所以必须显式给出。
-`--predicted-review-scope` 与 `--reviewer-update-mode` 在精简后的 main 中已不存在，不再传。
+`--predicted-review-scope` 与 `--reviewer-update-mode`（codex 基线里的开关）在精简后的 main 中已不存在，启动器不再传。
 
 ### M0 链路（模型生成的初始库）
 
@@ -96,3 +98,30 @@ campaign launcher；多于 1 轮的演化（`--evolve-rounds 1`，代码路径�
 
 遵循 AGENTS.md：先在 1–2 个任务上干跑全链路并跑 `audit_round`；真实 LLM 健康请求；从新 shell 确认 supervisor 存活；
 每个阶段完成后先做完整性审计再使用其数字。
+
+## 8. 实测 smoke 记录（2026-10-09）
+
+在远程节点 node29 上用本分支（`4d20bfa` 起，导入脚本修复后）端到端跑通一次最小 E3：2 个任务
+（`fix-git`、`dna-insert`），所有角色（执行、selector、Planner、Editor、Reviewer、M0 提议）均为
+`qwen3.6-plus-distill`，经 `--llm-relay`；`TB21_WORKERS=4`。操作步骤见
+[TERMINALBENCH_TESTING.md](TERMINALBENCH_TESTING.md)。
+
+| 项 | 结果 |
+|---|---|
+| E1 冷 rollouts（2 任务 × 3 次） | 11.4 分钟；6 trial，0 error；fix-git 3/3，dna-insert 1/3 |
+| prepare/导入 | `--expected-tasks 2 --attempts 3`，6 trial、4 个 reward=1 |
+| M0 | 约 1.2 分钟；2 个 Skill（`family-p001`、`family-p002`） |
+| E3（1 轮） | 约 52 分钟（L1 约 43 分钟，其后 L2 约 8 分钟）；fix-git 3/3，dna-insert 2/3 |
+| L2 | 2 批：family-p001 hold，family-p002 `review_approved`（v0→v1）；predicted Reviewer 请求 5 次，`val_executions=0` |
+| 审计 | `audit_round`（`audit.json` 与离线 `audit_offline.json`）通过，所有冷启动与 round-1 卡的 `audit_harbor_experience` 通过 |
+
+说明：
+
+- 这是链路验证，不是方法结论。2 个任务、闭集验收，`review_approved` 不是提升证据；dna-insert 的
+  1/3 → 2/3 在 3 次尝试的噪声内；
+- provider 不返回 token usage，`usage/` 里 token 为 0（请求数可信）；Harbor 的 `result.json` 有每次
+  rollout 的 token；
+- 过程中暴露并修掉两个导入问题：冻结 config 缺 `l2_verifier` 角色（`4d20bfa`）、任务表未排序导致
+  `Cold-start task data changed`（导入脚本改为按任务文件顺序编号）；另有一次在 M0 之前 launch 的失败 run
+  （`launch` 不检查 M0 是否存在）。两个失败 run 目录均按“冻结目录不可原地修复”的规则归档，没有复用；
+- 全量 89 × 3 的耗时没有实测，墙钟由最慢任务的 3 次串行尝试与沙箱配额决定。

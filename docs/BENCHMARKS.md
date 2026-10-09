@@ -46,7 +46,7 @@ models:
 本进程内：所有 L1/val/test 单元调用外部 Harbor/Tencent runner，真实 rollout 发生在远程任务沙箱中，
 `benchmarks/terminalbench.py` 负责提交任务、回收 trajectory 与 verifier 结果、审计经验卡
 （`audit_harbor_experience`）。进程内的 `TerminalBenchEnv` 只是守卫：任何本进程执行都会显式失败，而不是
-假装有 verifier 语义。运行方式与前置条件见 [RUNNING.md](RUNNING.md) 的 TerminalBench 一节。
+假装有 verifier 语义。运行方式、远程环境准备、排错与成本见 [TerminalBench 测试指南](TERMINALBENCH_TESTING.md)，摘要见 [RUNNING.md](RUNNING.md) 的 TerminalBench 一节。
 
 ## L1 预算
 

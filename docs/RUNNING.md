@@ -115,29 +115,26 @@ CLI 的 `test` 阶段使用 `test` split：
 ## TerminalBench（远程 Harbor 执行）
 
 TerminalBench 任务不在本进程内执行。`--benchmark terminalbench` 时，L1、val/test 单元都调用外部
-Harbor/Tencent runner（`benchmarks/terminalbench.harbor_rollout`）：真实 rollout 发生在远程任务沙箱内，
-worker 只消费它保存的 trajectory 与 verifier 结果。任务表来自 `--task-file`（默认
-`data/terminalbench/tb21.json`，每行含 `task_name` 与 `instruction`）。
+Harbor/Tencent runner（`benchmarks/terminalbench.harbor_rollout`）：真实 rollout 发生在 Tencent E2B 任务沙箱内，
+worker 只消费它保存的 trajectory 与 verifier 结果。任务表由 `--task-file` 给出（JSON 数组，每行
+`task_name` 与 `instruction`；仓库不附带该文件，没有默认路径可用）。
 
-前置条件：
+- `src/skillexpand/configs/benchmark/terminalbench.yaml` 的 `rollout.runner_script` 指向 TB2.1 的 Tencent
+  启动脚本；宿主机不能直连 provider 时加 `--llm-relay`（常驻 E2B 中继沙箱，`runtime/llm_relay.py`，需要
+  `.[tencent-relay]` extra、`E2B_API_KEY` 与 `TBENCH_E2B_RELAY_TEMPLATE`）。Harbor 里 agent 使用的模型来自
+  环境变量 `MODEL_NAME`，必须与 `--l1-model` 一致；
+- TB 单元最长可运行 2 小时，worker 进度超时默认 7500s（`EXPE_WORKER_TIMEOUT_SECONDS`）；
+- predicted Reviewer 遇到 provider 拒绝严格 `response_format`（HTTP 400 / 400006）时可设
+  `EXPE_REVIEWER_RESPONSE_FORMAT=omit`（协议哈希区分两种模式）；
+- sampled 验收的每道抽检题是两次真实沙箱执行，在 TB 上应按预算调小 `--acceptance-sample-size`。
+  sampled 在 TB 上的代码路径已接通但尚未端到端验证（详见指南第 8 节）。
 
-- `configs/benchmark/terminalbench.yaml` 中 `rollout.runner_script` 指向 TB2.1 的 Tencent 启动脚本；
-- 远程机器若不能直连 provider，加 `--llm-relay`：全部 LLM 调用经一个常驻 Tencent E2B 中继沙箱转发
-  （`runtime/llm_relay.py`；需安装 `.[tencent-relay]` extra 并设置 `E2B_API_KEY` 与
-  `TBENCH_E2B_RELAY_TEMPLATE`）。中继不改写冻结 config，只设置环境变量并写信息性的
-  `relay_manifest.json`；中继下 `GPTWrapper` 去掉模型名的 `openai/` 前缀，TB 沙箱的 `MODEL_API_BASE`
-  由 `EXPE_LLM_RELAY_REQUIRED` 与 `TBENCH_RELAY_PROVIDER_BASE` 决定；
-- TB 单元最长可运行 2 小时，worker 进度超时默认已放宽到 7500s。
+TB-eval（`--progressive-library`，E3/E4）由 `scripts/tb_eval_stage.py prepare|launch --stage E3|E4` 驱动，
+在独立 run 目录里用 progressive 库做闭集 predicted 验收，闭集结果不能与 main 的 val 面板结果比较，规格见
+[EXPERIMENT_PLAN_TB_EVAL.md](EXPERIMENT_PLAN_TB_EVAL.md)。
 
-成本提示：sampled 验收的每道抽检题都是一次真实沙箱执行（两臂 × 抽样题数，默认上限 16 题），在 TB 上
-应按预算调小 `--acceptance-sample-size`。
-
-Tencent provider 会偶发拒绝严格的 wire `response_format`（HTTP 400 / 400006）。predicted Reviewer 可用
-`EXPE_REVIEWER_RESPONSE_FORMAT=omit` 省去该字段（prompt 与解析不变，协议哈希会区分两种模式）。
-
-### TB-eval（progressive library，E3/E4）
-
-`--progressive-library` 让 TerminalBench 的 L1 在运行时从 Skill 目录里选一个 Skill 再加载其 body，并把 predicted 验收的面板换成全部 train 题（闭集）。它要求冻结 config 的 `benchmark.progressive_library`（由 `scripts/import_terminalbench_batch.py` 写入）、`--acceptance-mode predicted`，且只用于 `terminalbench` + Harbor；与冻结 config 不一致会在启动时直接报错。每个阶段用 `scripts/tb_eval_stage.py prepare|launch --stage E3|E4` 在独立 run 目录中原地运行（launch 写死完整开关集）。selector 溯源写入 `evolution/round-N/selection/`，`audit_round` 会与 manifest 的 `routes` 交叉核对。relay 端口在 resume 时变化无需任何容忍代码（relay 不改写冻结 config，身份里没有端点）。闭集验收不能与 main 的 val 面板结果比较，详见 `docs/EXPERIMENT_PLAN_TB_EVAL.md`。
+**完整的远程操作手册（环境准备、E1 → 导入 → M0 → launch → 监控 → 审计的全部命令、产物说明、
+常见故障、共享主机安全规则、成本参照）见 [TerminalBench 测试指南](TERMINALBENCH_TESTING.md)。**
 
 ## campaign launcher
 

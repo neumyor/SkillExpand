@@ -46,7 +46,7 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 
 ### empirical
 
-`empirical` 使用同一套冻结 val route 和 paired task IDs，但运行真实 executor：每个候选都与当前 head 在同一 task panel 上比较实测成功率，严格提高才接受。它只看 val 的配对实测，不做任何逐卡 review；`acceptance.executions` 记录执行的 episode 数。
+`empirical` 使用同一套冻结 val route 和 paired task IDs，但运行真实 executor：每个候选都与当前 head 在同一 task panel 上比较实测成功率，严格提高才接受。它只看 val 的配对实测；`acceptance.executions` 记录执行的 episode 数。
 
 ### sampled（协同进化协议）
 
