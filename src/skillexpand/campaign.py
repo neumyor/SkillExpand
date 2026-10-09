@@ -21,9 +21,9 @@ import urllib.request
 
 from skillexpand.l2 import sampled as SM
 from skillexpand.persistence import io as IO
+from skillexpand.persistence.usage import replay_ledger
 from skillexpand.reliability.errors import (
-    DISPOSITIONS, AuditFailure, Category, FrozenProtocolChanged, Halt, InvalidInput, LedgerCorrupt,
-    RunLocked, classify,
+    DISPOSITIONS, AuditFailure, Category, FrozenProtocolChanged, Halt, InvalidInput, RunLocked, classify,
 )
 from skillexpand.reliability.policies import STAGE_ATTEMPTS_BY_CATEGORY, repair_policy, stage_policy
 from skillexpand.reliability.units import exit_now
@@ -108,34 +108,14 @@ def audit_usage_ledgers(run):
         'total_tokens': 0, 'tokens_complete': True,
     }
     for path in sorted(Path(run).glob('**/*.requests.jsonl')):
+        ledger = replay_ledger(IO.read_jsonl(path, repair_tail=False))
         totals['files'] += 1
-        pending = set()
-        finished = set()
-        for raw in path.read_text().splitlines():
-            row = json.loads(raw)
-            run_id = row.get('run_id')
-            event = row.get('event')
-            if event == 'start':
-                if not run_id or run_id in pending or run_id in finished:
-                    raise LedgerCorrupt(f'Invalid usage ledger start: {path}')
-                pending.add(run_id)
-                totals['started_requests'] += 1
-                continue
-            if event not in ('end', 'error', 'abandoned') or run_id not in pending:
-                raise LedgerCorrupt(f'Invalid usage ledger terminal event: {path}')
-            pending.remove(run_id)
-            finished.add(run_id)
-            if event == 'end':
-                usage = (row.get('provider') or {}).get('token_usage')
-                if not usage:
-                    totals['tokens_complete'] = False
-                    continue
-                totals['successful_requests'] += 1
-                for field in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
-                    totals[field] += int(usage.get(field, 0))
-            else:
-                totals['failed_requests'] += 1
-        if pending:
+        totals['started_requests'] += ledger['started']
+        totals['successful_requests'] += ledger['successful']
+        totals['failed_requests'] += ledger['failed']
+        for field, value in ledger['tokens'].items():
+            totals[field] += value
+        if ledger['pending']:
             totals['tokens_complete'] = False
     return totals
 
@@ -391,11 +371,8 @@ def stage_args(root, mode, benchmark, stage):
 
 
 def audit_stage(root, mode, benchmark, stage):
-    from omegaconf import OmegaConf
-    from skillexpand.l1.adapters import resolve
-    from skillexpand.l1.audit import audit_checkpoint, audit_usage
+    from skillexpand.l1.audit import audit_usage
     from skillexpand.l1.artifacts import load_cold_start
-    from skillexpand.l2.audit import audit_round
     from skillexpand.evaluation.audit import audit_test
     run = root / mode / benchmark / 'run'
     cfg, plan, initial, _ = load_cold_start(run)
@@ -419,12 +396,12 @@ def audit_stage(root, mode, benchmark, stage):
             raise AuditFailure('Test usage ledger is incomplete')
         return result
     directory = run / ('discovery' if stage == 'cold-start' else 'evolution/round-' + stage.split('-')[1])
-    adapter = resolve(OmegaConf.load(run / 'config.json'))
+    # The checkpoint audit ran in the stage itself (cold-start collection, or the round
+    # audit saved below); this adds only what the stage cannot see: the request ledgers.
     rows = []
     for task in sorted(plan.tasks_in('train')):
         path = directory / 'trials' / f'{task}.json'
-        data = read(path)
-        rows.append(dict(audit_checkpoint(data, adapter), usage=audit_usage(path, data)))
+        rows.append({'task_id': task, 'usage': audit_usage(path, read(path))})
     result = {'integrity': 'passed', 'units': rows, 'skills': len(initial),
               # A transient provider failure is recorded in the usage report,
               # but a successful retry still makes the checkpoint auditable.
@@ -435,7 +412,7 @@ def audit_stage(root, mode, benchmark, stage):
     if not result['usage_complete']:
         raise AuditFailure(f'{stage} usage audit is incomplete')
     if stage != 'cold-start':
-        result['round'] = audit_round(run, int(stage.split('-')[1]))
+        result['round'] = read(directory / 'audit.json')
     return result
 
 
@@ -495,7 +472,6 @@ def run_job(root, mode, benchmark):
         for stage in STAGES:
             previous = state['stages'].get(stage, {})
             if previous.get('status') == 'complete':
-                audit_stage(root, mode, benchmark, stage)
                 continue
             first = previous.get('attempt', 0) + 1
             offset = 0

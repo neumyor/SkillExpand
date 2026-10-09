@@ -20,6 +20,7 @@ from skillexpand.l1 import workers as LW
 from skillexpand.evaluation.routing import FrozenRoutes
 from skillexpand.evaluation import validation as VA
 from skillexpand.l2 import sampled as SM
+from skillexpand.l2.audit import audit_round
 from skillexpand.evaluation.claim_check import TrajectoryVerifier
 from skillexpand.evaluation.delta_review import PairedDeltaReviewer
 from skillexpand.evaluation.sampled_validation import SampledDeltaValidator
@@ -263,11 +264,10 @@ class SerialEvolutionLoop:
         return [self.skills.head(f) for f in sorted(self.skills.families)]
 
     def _restore(self, value):
-        from skillexpand.l2.audit import audit_batch
-        directory = self.paths.root / 'evolution' / f'round-{value["round"]}' / 'cards'
-        cards = [S.from_dict(S.TaskExperience, json.loads((directory / f'{t}.json').read_text()))
-                 for t in value['task_ids']]
-        audit_batch(self.paths.root, value, self.skills.get(value['base_skill_key']), cards)
+        """Commit a journaled approval to the Skill library (idempotent).
+
+        Decision replay is ``audit_round``'s job, run once per round.
+        """
         raw = value.get("candidate")
         if raw:
             if value["outcome"] != "review_approved":
@@ -510,8 +510,6 @@ class SerialEvolutionLoop:
         lock.acquire()
         in_flight = None  # (round_index, batches) of the round being executed
         try:
-            self.skills = ST.SkillLibrary(self.paths.skills, benchmark=self.plan.benchmark)
-            self._recover_transactions()
             last_result = None
             started_rounds = [int(p.parent.name.split('-')[1]) for p in
                              (self.paths.root / 'evolution').glob('round-*/input.json')]
@@ -521,22 +519,18 @@ class SerialEvolutionLoop:
                 in_flight = (round_index, None)
                 round_summary = self.paths.root / 'evolution' / f'round-{round_index}' / 'summary.json'
                 if round_summary.exists() and json.loads(round_summary.read_text()).get('status') == 'complete':
-                    self.cards = self._read_evolution_cards(round_index)
-                    from skillexpand.l2.audit import audit_round
-                    audit_round(self.paths.root, round_index)
                     last_result = json.loads(round_summary.read_text())
-                    continue
-                cards = self._collect_evolution_cards(round_index)
-                self.cards = cards
-                batches = self._evolution_batches(round_index, cards)
-                in_flight = (round_index, batches)
-                freeze(round_summary.parent / 'batches.json', batches)
-                for batch in batches:
-                    self._run_batch(batch)
-                last_result = self.summary(batches)
-                save(self.paths.root / 'evolution' / f'round-{round_index}' / 'summary.json',
-                     last_result)
-                from skillexpand.l2.audit import audit_round
+                else:
+                    cards = self._collect_evolution_cards(round_index)
+                    self.cards = cards
+                    batches = self._evolution_batches(round_index, cards)
+                    in_flight = (round_index, batches)
+                    freeze(round_summary.parent / 'batches.json', batches)
+                    for batch in batches:
+                        self._run_batch(batch)
+                    last_result = self.summary(batches)
+                    save(round_summary, last_result)
+                # The one full offline replay of the round, fresh or resumed.
                 save(round_summary.parent / 'audit.json', audit_round(self.paths.root, round_index))
             result = dict(last_result)
             result.update({'evolve_rounds': rounds, 'latest_evolution_round': rounds,

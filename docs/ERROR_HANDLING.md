@@ -101,7 +101,7 @@ L1、路由和 fixed-Skill 执行的 worker 结果都带 `failure` 字段：成�
 2. **协议冻结**：`freeze` 只冻结方法输入，写一次、之后必须相等。
 3. **单元缓存**：已完成的单元跳过（冷启动 `results/`、evolution `cards/`、路由 `tasks/`、`ScoreCache`、L2 `l2_proposals/`）；失败的单元不写入缓存。
 4. **修复回放**：L2 的每次修复尝试都按 `hypotheses-<n>`（`n` 从 0 开始）落盘。续跑时先回放这些尝试且不计入预算，然后继续新的请求。
-5. **事务日志**：先写 L2 batch journal，再写 Skill 版本库；续跑时重放日志。
+5. **事务日志**：先写 L2 batch journal，再写 Skill 版本库；续跑时只核对提交一致性（候选已批准/选中、日志与版本库一致）并补写缺失的版本；批次决策的完整重放只在每轮结束的 `audit_round` 做一次。
 6. **账本自愈**：中断的最后一行移到 `.interrupted-tail`，补上缺失的换行；没有结束事件的请求记为 abandoned。abandoned 请求不再导致 L1 checkpoint 审计失败：被中断的 trial 已记为 interrupted 并重跑，checkpoint 不会使用这些响应，而它实际用到的每个响应都与账本逐一核对。它们的 token 成本未知，由 `tokens_complete=false` 和 `abandoned_requests` 计数反映。
 
 ## 8. 扩展指南

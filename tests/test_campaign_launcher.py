@@ -207,6 +207,11 @@ def test_usage_ledger_audit_requires_terminal_tokenized_requests(tmp_path):
     assert result['total_tokens'] == 5
     log.write_text(json.dumps({'event': 'start', 'run_id': 'r2'}) + '\n')
     assert C.audit_usage_ledgers(tmp_path)['tokens_complete'] is False
+    # An end without provider token usage is corrupt, in every ledger reader.
+    log.write_text(json.dumps({'event': 'start', 'run_id': 'r3'}) + '\n' +
+                   json.dumps({'event': 'end', 'run_id': 'r3', 'provider': None}) + '\n')
+    with pytest.raises(ValueError, match='token usage missing'):
+        C.audit_usage_ledgers(tmp_path)
 
 
 def test_campaign_requires_local_configuration(monkeypatch):

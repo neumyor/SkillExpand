@@ -632,9 +632,15 @@ class SerialL2Tests(unittest.TestCase):
             audit_round(self.root, 1)
         checkpoint.write_text(saved)
         response = next((self.root/'l2_proposals').glob('*/hypotheses-*.json'))
-        data = json.loads(response.read_text())
-        data['raw'] = '{}'
-        response.write_text(json.dumps(data))
+        original = response.read_text()
+        response.write_text(json.dumps(dict(json.loads(original), raw='{}')))
+        with self.assertRaises(ValueError):
+            audit_round(self.root, 1)
+        response.write_text(original)
+        # The batch decision journal is replayed by the round audit alone.
+        journal = next((self.root/'l2_batches').glob('*.json'))
+        batch = json.loads(journal.read_text())
+        journal.write_text(json.dumps(dict(batch, reason='tampered')))
         with self.assertRaises(ValueError):
             audit_round(self.root, 1)
 

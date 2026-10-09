@@ -5,7 +5,49 @@ import time
 from pathlib import Path
 from langchain.callbacks.openai_info import OpenAICallbackHandler
 
+from skillexpand.persistence.io import read_jsonl, save
 from skillexpand.reliability.errors import LedgerCorrupt
+
+TOKEN_FIELDS = ('prompt_tokens', 'completion_tokens', 'total_tokens')
+
+
+def replay_ledger(rows):
+    """Fold request events into counts and token totals: the one ledger state machine.
+
+    An ``end`` without provider token usage is corrupt (the strictest handling): its
+    tokens cannot be verified, and a total that skipped it would understate cost.
+    ``pending`` lists requests with no terminal event; the caller decides what that means.
+    """
+    pending, finished = {}, set()
+    out = {'started': 0, 'successful': 0, 'failed': 0, 'abandoned': 0, 'error_types': [],
+           'tokens': dict.fromkeys(TOKEN_FIELDS, 0)}
+    for row in rows:
+        rid, event = row.get('run_id'), row.get('event')
+        if event == 'start':
+            if not rid or rid in pending or rid in finished:
+                raise LedgerCorrupt('Duplicate or missing request ID in usage log')
+            pending[rid] = row
+            out['started'] += 1
+            continue
+        if event not in ('end', 'error', 'abandoned') or rid not in pending:
+            raise LedgerCorrupt('Unmatched terminal event in usage log')
+        del pending[rid]
+        finished.add(rid)
+        if event == 'end':
+            usage = (row.get('provider') or {}).get('token_usage')
+            if not usage or any(field not in usage for field in TOKEN_FIELDS):
+                raise LedgerCorrupt('Provider token usage missing; cannot verify totals')
+            out['successful'] += 1
+            for field in TOKEN_FIELDS:
+                out['tokens'][field] += int(usage[field])
+        else:
+            out['failed'] += 1
+            if event == 'abandoned':
+                out['abandoned'] += 1
+            else:
+                out['error_types'].append(row.get('error_type'))
+    return dict(out, pending=list(pending))
+
 
 class PersistentUsage(OpenAICallbackHandler):
     raise_error=True
@@ -16,42 +58,20 @@ class PersistentUsage(OpenAICallbackHandler):
         self.previous=json.loads(self.path.read_text()) if self.path.exists() else {}
         request_path = self.path.with_suffix('.requests.jsonl')
         if request_path.exists():
-            from skillexpand.persistence.io import read_jsonl
-            rows = read_jsonl(request_path)
-            pending, finished = {}, set()
-            totals = dict.fromkeys((*self.fields, 'started_requests', 'failed_requests'), 0)
-            for row in rows:
-                if row['event'] == 'start':
-                    if not row['run_id'] or row['run_id'] in pending or row['run_id'] in finished:
-                        raise LedgerCorrupt('Duplicate or missing request ID in usage log')
-                    pending[row['run_id']] = row
-                    totals['started_requests'] += 1
-                else:
-                    if row['event'] not in ('end', 'error', 'abandoned') or row['run_id'] not in pending:
-                        raise LedgerCorrupt('Unmatched terminal event in usage log')
-                    pending.pop(row['run_id'])
-                    finished.add(row['run_id'])
-                    if row['event'] in ('error', 'abandoned'):
-                        totals['failed_requests'] += 1
-                    elif row['event'] == 'end':
-                        usage = (row.get('provider') or {}).get('token_usage')
-                        if usage:
-                            totals['successful_requests'] += 1
-                            for field in self.fields[:-1]:
-                                totals[field] += usage.get(field, 0)
+            ledger = replay_ledger(read_jsonl(request_path))
             # Called only by the owner of a task/campaign lock. A start with no
             # terminal event belongs to the previous process, not a live request.
-            for rid in pending:
+            for rid in ledger['pending']:
                 self.audit('abandoned', run_id=rid, error_type='InterruptedProcess', tokens_unknown=True)
-                totals['failed_requests'] += 1
-            self.previous = totals
+            self.previous = {**ledger['tokens'], 'successful_requests': ledger['successful'],
+                             'started_requests': ledger['started'],
+                             'failed_requests': ledger['failed'] + len(ledger['pending'])}
         self.started=self.previous.get('started_requests',0)
         self.failed=self.previous.get('failed_requests',0)
         if request_path.exists():
             self.persist()
 
     def persist(self):
-        from skillexpand.persistence.io import save
         values={k:self.previous.get(k,0)+getattr(self,k) for k in self.fields}
         values.update(started_requests=self.started,failed_requests=self.failed,
             usage_note='Provider-reported successful-response usage; failed or in-flight tokens may be unknown')
