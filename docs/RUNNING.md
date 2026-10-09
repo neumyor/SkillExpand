@@ -121,8 +121,9 @@ worker 只消费它保存的 trajectory 与 verifier 结果。任务表由 `--ta
 
 - `src/skillexpand/configs/benchmark/terminalbench.yaml` 的 `rollout.runner_script` 指向 TB2.1 的 Tencent
   启动脚本；宿主机不能直连 provider 时加 `--llm-relay`（常驻 E2B 中继沙箱，`runtime/llm_relay.py`，需要
-  `.[tencent-relay]` extra、`E2B_API_KEY` 与 `TBENCH_E2B_RELAY_TEMPLATE`）。Harbor 里 agent 使用的模型来自
-  环境变量 `MODEL_NAME`，必须与 `--l1-model` 一致；
+  `.[tencent-relay]` extra、`E2B_API_KEY` 与 `TBENCH_E2B_RELAY_TEMPLATE`）。Harbor 里 agent 使用的模型与其他
+  角色一样取自冻结的角色表（`l1_executor`，即 `--l1-model`），`harbor_rollout` 据此设置 runner 的 `MODEL_NAME`，
+  不继承外部环境；
 - TB 单元最长可运行 2 小时，worker 进度超时默认 7500s（`EXPE_WORKER_TIMEOUT_SECONDS`）；
 - predicted Reviewer 遇到 provider 拒绝严格 `response_format`（HTTP 400 / 400006）时可设
   `EXPE_REVIEWER_RESPONSE_FORMAT=omit`（协议哈希区分两种模式）；

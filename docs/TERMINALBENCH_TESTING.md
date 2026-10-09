@@ -38,9 +38,10 @@ SkillExpand 只负责提交任务、回收 trajectory 与 verifier 结果，并�
 - **宿主机不能直连 provider**，所以宿主机上的所有方法侧 LLM 调用（Planner、Editor、Reviewer、
   selector、M0 提议）都经 `--llm-relay` 的常驻 E2B 中继沙箱转发；任务沙箱内的 Terminus 则直接请求
   provider（`TBENCH_RELAY_PROVIDER_BASE`，由 `EXPE_LLM_RELAY_REQUIRED` 触发改写 `MODEL_API_BASE`）。
-- **执行 agent 用的模型来自环境变量 `MODEL_NAME`**，不是 `--l1-model`。`harbor_rollout` 直接继承
-  进程环境；`--l1-model`/`--executor-model` 不会传给 Harbor，只进入冻结身份。两者必须设成同一个值，否则身份与实际执行
-  的模型不一致。
+- **执行 agent 的模型与其他角色一样取自冻结的角色表**（`l1_executor`，由 `--l1-model`，即 launch 的
+  `--executor-model` 设置）。`harbor_rollout` 用它设置 runner 的 `MODEL_NAME`（去掉 `openai/` 前缀，runner
+  自己会加），不继承外部环境——runner 在 `MODEL_NAME` 缺省时会静默回落到自己的默认模型。唯一的例外是
+  步骤 2 的 E1：它直接调用 runner 脚本，不经过 SkillExpand，所以要在命令里显式给 `MODEL_NAME`。
 - 一个任务的多次尝试在一次 runner 调用内**顺序**执行（`TBENCH_N_CONCURRENT=1`）；并行发生在任务之间
   （`TB21_WORKERS`）。所以墙钟时间由最慢的任务决定。
 - Harbor 数据集、runner 脚本、适配器只读地来自 `/data2/liyishan/...`，**不要写 `/data2`**。
@@ -98,7 +99,6 @@ set -a
 . "<PATH_TO_DOTENV>"                          # 定义 E2B_API_KEY / E2B_DOMAIN / TBENCH_LLM_KEY
 set +a
 export OPENAI_API_KEY="$TBENCH_LLM_KEY"       # relay 与 Harbor 读这个名字
-export MODEL_NAME=<MODEL>                     # 执行 agent 的模型；必须与 --executor-model 一致
 export TBENCH_E2B_RELAY_TEMPLATE=<RELAY_TEMPLATE>   # smoke: code-agent-cfs2-new
 export TBENCH_TENCENT_ENV_FILE=/nonexistent/.env    # 让 runner 不再去加载另一份 .env
 export RETRY_ARCHIVE_ROOT=$_R/work/retry_archives   # 默认会写 /data2，改到自己的目录
@@ -180,7 +180,8 @@ $PYTHON ../work/health.py
 E1 是“无 Skill 的 bare rollouts”，产出后续导入用的原始 Harbor trial 目录。
 
 ```bash
-export TBENCH_RUN_MODE=selected TBENCH_TASK_NAMES="<TASK_A> <TASK_B>" \
+export MODEL_NAME=<MODEL> \
+       TBENCH_RUN_MODE=selected TBENCH_TASK_NAMES="<TASK_A> <TASK_B>" \
        TBENCH_EVAL_MODE=bare TBENCH_N_ATTEMPTS=3 TBENCH_N_CONCURRENT=6 \
        TBENCH_MAX_TRIAL_RETRIES=0 RUN_ID=e1_cold \
        JOBS_DIR=$HOME/<WORKSPACE>/work/e1/jobs
@@ -419,7 +420,7 @@ $PYTHON -m skillexpand --benchmark terminalbench --cold-start-dir ../work/main_c
   --evolve-l1-workers 4 --l2-review-workers 4 --test-workers 4
 ```
 
-env 与 progressive 模式相同（`MODEL_NAME` 必须与 `--l1-model` 一致）。这两个模式的结果**互不可比**。
+env 与 progressive 模式相同（执行模型由 `--l1-model` 决定，不需要 `MODEL_NAME`）。这两个模式的结果**互不可比**。
 
 ## 9. 时间与成本参照（smoke，2 任务 × 3 次尝试，`TB21_WORKERS=4`）
 
