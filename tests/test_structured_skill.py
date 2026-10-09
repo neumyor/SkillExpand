@@ -4,7 +4,6 @@ import unittest
 from types import SimpleNamespace
 
 from skillexpand import structured_skill as SS
-from skillexpand.l2.card_review import review_payload
 from skillexpand.l2.editor import SkillEditor, REASON_NO_OPERATIONS
 from skillexpand import schema as S
 
@@ -48,20 +47,6 @@ class StructuredSkillTests(unittest.TestCase):
         added = SS.apply_edit(self.sections, {"op": "add", "section": "conditions",
                                             "target_id": None, "text": "Another rule."})
         self.assertEqual(added["conditions"][-1]["id"], "C2")
-
-    def test_review_diff_ignores_section_headers_and_stable_ids(self):
-        base = S.Skill("searchqa.f", "f", 0, "lookup", "scope", SS.render(self.sections))
-        changed = SS.render(SS.apply_edit(self.sections, {
-            "op": "replace", "section": "conditions", "target_id": "C1",
-            "text": "If names collide, verify the requested date and role.",
-        }))
-        payload = review_payload(base, [{"id": "C1", "body": changed}], {"card_id": "e1"})
-        self.assertEqual(len(payload["current_rules"]), 4)
-        self.assertEqual(payload["current_rules"][2], {
-            "section": "conditions", "id": "C1",
-            "text": "If names collide, check the distinguishing detail.",
-        })
-        self.assertEqual(payload["candidates"][0]["changed_rule_ids"], ["C1"])
 
     def test_planner_edit_is_applied_without_editor_llm_and_invalid_ids_hold(self):
         base = S.Skill("searchqa.f", "f", 0, "lookup", "scope", SS.render(self.sections))

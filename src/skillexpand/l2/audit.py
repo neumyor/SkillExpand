@@ -5,18 +5,15 @@ from pathlib import Path
 
 from skillexpand import schema as S
 from skillexpand.persistence.io import require, save
-from skillexpand.persistence import io as IO
 from skillexpand.persistence import store as ST
 from skillexpand.reliability.errors import StoreError
 from skillexpand.l2.editor import SkillEditor
 from skillexpand.l2.update import SkillPatchRunner
-from skillexpand.l2.card_review import OUTCOMES as CR_OUTCOMES
 from skillexpand.l1.patterns import validate_cache
 from skillexpand.l1.audit import audit_checkpoint
 from skillexpand.l1.adapters import resolve
 from omegaconf import OmegaConf
 from skillexpand import structured_skill as SS
-from skillexpand.l2 import reviewer_coevolution as RC
 from skillexpand.l2 import sampled_audit
 
 
@@ -27,12 +24,10 @@ def audit_batch(root, batch, base, cards):
     config = protocol['config']
     mode = config['skill_edit_mode']
     acceptance_mode = config['acceptance_mode']
-    predicted_scope = config['predicted_review_scope']
     runner = SkillPatchRunner(
-        SkillEditor(None, skill_edit_mode=mode), None,
+        SkillEditor(None, skill_edit_mode=mode),
         root / 'l2_proposals', read_only=True,
         acceptance_mode=acceptance_mode,
-        predicted_review_scope=predicted_scope,
         single_candidate=config['single_candidate'],
     )
     pattern_path = root / 'l2_patterns' / (batch['batch_id'] + '.json')
@@ -41,27 +36,15 @@ def audit_batch(root, batch, base, cards):
     validate_cache(patterns, cards)
     result = runner.run(base, cards, batch['requested_candidates'],
                         batch_patterns=patterns['patterns'],
-                        acceptance_record=batch.get('acceptance')
-                        if acceptance_mode in ('empirical', 'jev', 'sampled') or
-                        (acceptance_mode == 'predicted' and predicted_scope == 'val')
-                        else None)
+                        acceptance_record=batch.get('acceptance'))
     require(all(batch.get(k) == v for k, v in result.record.items()),
             'L2 journal differs from cached proposal/review replay')
     require(batch.get('candidate') == (S.to_dict(result.candidate) if result.candidate else None),
             'committed candidate differs from replayed decision')
-    if acceptance_mode == 'predicted' and predicted_scope == 'train_cards':
-        # Card review is a paired-outcome protocol: the effect is derived, so the
-        # raw old/new outcomes must stay auditable in every card judgment.
-        for review in result.record.get('reviews', ()):
-            for judgment in review.get('judgments', ()):
-                require(judgment.get('old_outcome') in CR_OUTCOMES and
-                        judgment.get('new_outcome') in CR_OUTCOMES,
-                        'predicted review lacks canonical old/new outcomes')
-    if acceptance_mode == 'predicted' and predicted_scope == 'val':
+    if acceptance_mode == 'predicted':
         acceptance = result.record.get('acceptance', {})
-        require(acceptance.get('mode') == 'predicted' and
-                acceptance.get('scope') == 'val',
-                'predicted val acceptance scope is missing')
+        require(acceptance.get('mode') == 'predicted',
+                'predicted val acceptance mode is missing')
         require(acceptance.get('executions', 0) == 0,
                 'predicted val acceptance executed benchmark episodes')
         candidate_ids = {row.get('candidate_id') for row in acceptance.get('candidates', ())}
@@ -144,9 +127,6 @@ def audit_round(root, round_index):
     heads = {s['family_id']: S.from_dict(S.Skill, s) for s in inputs['skills']}
     protocol = json.loads((root / 'l2_manifest.json').read_text())
     expected_acceptance_mode = protocol['config']['acceptance_mode']
-    expected_predicted_scope = protocol['config']['predicted_review_scope']
-    require(expected_predicted_scope in ('val', 'train_cards'),
-            'unknown predicted review scope in frozen config')
     require(inputs['round'] == manifest['round'] == round_index, 'round identity mismatch')
     require(len(heads) == len(inputs['skills']), 'duplicate input Skill family')
     if round_index == 1:
@@ -222,11 +202,6 @@ def audit_round(root, round_index):
         require(batch['base_skill_key'] == base.key, 'broken sequential Skill chain')
         require(bool(batch.get('candidate')) == (batch['outcome'] == 'review_approved'),
                 'approval/candidate mismatch')
-        require(batch['outcome'] != 'review_approved' or
-                bool(batch['reviews']) or
-                (expected_acceptance_mode == 'predicted' and expected_predicted_scope == 'val')
-                or expected_acceptance_mode == 'sampled',
-                'approval without reviews')
         audit_batch(root, batch, base, [cards[t] for t in batch['task_ids']])
         require(batch.get('card_hashes'), 'round batch has no card hashes')
         for task_id in batch['task_ids']:
@@ -256,10 +231,6 @@ def audit_round(root, round_index):
                     'prediction was mislabeled as empirical validation')
             require(batch.get('acceptance', {}).get('executions', 0) == 0,
                     'predicted acceptance executed val tasks')
-            require(batch.get('predicted_review_scope') == expected_predicted_scope,
-                    'batch predicted review scope mismatch')
-            require(batch.get('acceptance', {}).get('scope') == expected_predicted_scope,
-                    'predicted acceptance scope mismatch')
         elif expected_mode == 'empirical':
             require(batch.get('empirically_validated') is bool(batch.get('acceptance', {}).get('candidates')),
                     'empirical validation flag mismatch')
@@ -275,26 +246,8 @@ def audit_round(root, round_index):
                         'empirical acceptance does not cover every proposed candidate')
         elif expected_mode == 'sampled':
             # Coverage, replay and memories were checked by sampled_audit above.
-            require(batch.get('empirically_validated') is False
-                    and batch.get('jev_validated') is False,
-                    'sampled acceptance was mislabeled as another validation')
-        else:
             require(batch.get('empirically_validated') is False,
-                    'JEV acceptance was mislabeled as empirical validation')
-            require(batch.get('jev_validated') is bool(batch.get('acceptance', {}).get('candidates')),
-                    'JEV validation flag mismatch')
-            acceptance = batch.get('acceptance', {})
-            require(acceptance.get('executions', 0) == 0,
-                    'JEV acceptance executed benchmark episodes')
-            if acceptance.get('candidates'):
-                candidate_ids = {row.get('candidate_id') for row in acceptance['candidates']}
-                proposed_ids = {
-                    row['edit']['candidate']['candidate_id']
-                    for row in batch.get('proposals', [])
-                    if row.get('edit', {}).get('candidate')
-                }
-                require(candidate_ids == proposed_ids,
-                        'JEV acceptance does not cover every proposed candidate')
+                    'sampled acceptance was mislabeled as empirical validation')
     require(tuple(sorted(seen)) == expected_tasks,
             'round batches do not cover each train task exactly once')
     for skill in heads.values():
@@ -308,170 +261,19 @@ def audit_round(root, round_index):
         expected_mode = expected_acceptance_mode
         require(summary.get('acceptance_mode') == expected_mode,
                 'summary acceptance mode mismatch')
-        require(summary.get('predicted_review_scope') == expected_predicted_scope,
-                'summary predicted review scope mismatch')
         if expected_mode == 'predicted':
             require(summary.get('val_executions') == 0,
                     'val execution leaked into predicted evolution')
         elif expected_mode == 'sampled':
             sampled_audit.audit_summary(summary, journals, protocol['config'])
-        elif expected_mode == 'jev':
-            expected_jev_validated = bool(journals) and all(
-                bool(b.get('acceptance', {}).get('candidates')) for b in journals
-            )
-            require(summary.get('empirically_validated') is False and
-                    summary.get('jev_validated') is expected_jev_validated,
-                    'JEV summary validation flags mismatch')
-            require(summary.get('val_executions') == 0,
-                    'JEV summary counted judge requests as val executions')
-            require(summary.get('jev_requests') == sum(
-                int(b.get('acceptance', {}).get('jev_requests', 0)) for b in journals
-            ), 'JEV request count mismatch')
         require(summary['skills'] == {s.skill_id: s.key for s in heads.values()}, 'summary Skill mismatch')
         require(summary['completed_batches'] == summary['batches'] == len(journals), 'batch count mismatch')
         require(summary['review_approved_updates'] == sum(b['outcome'] == 'review_approved' for b in journals),
                 'approval count mismatch')
-        if expected_mode == 'predicted' and expected_predicted_scope == 'val':
+        if expected_mode == 'predicted':
             require(summary.get('predicted_val_candidates') == sum(
                 len(b.get('acceptance', {}).get('candidates', ())) for b in journals
             ), 'predicted val candidate count mismatch')
-    if protocol['config'].get('reviewer_update_mode', 'none') != 'none':
-        # Later rounds append to shared ledgers. A historical round audit must
-        # replay the evidence available at its boundary, even during resume.
-        all_feedback = IO.read_jsonl(root / 'reviewer_feedback.jsonl', repair_tail=False)
-        all_updates = IO.read_jsonl(root / 'reviewer_updates.jsonl', repair_tail=False)
-        known_rounds = {int(json.loads(path.read_text())['round'])
-                        for path in (root / 'evolution').glob('round-*/input.json')}
-        RC.validate_feedback_records(all_feedback, strict=True)
-        require(all(int(row.get('round_index', 0)) in known_rounds for row in all_feedback),
-                'feedback references an unstarted round')
-        require(all(int(row.get('generation_round', 0)) in known_rounds for row in all_updates),
-                'Reviewer update references an unstarted round')
-        feedback_rows = tuple(row for row in all_feedback
-                              if int(row.get('round_index', 0)) <= round_index)
-        updates = tuple(row for row in all_updates
-                        if int(row.get('generation_round', 0)) <= round_index)
-        if feedback_rows:
-            require(updates, 'Reviewer feedback has no versioned update artifact')
-            train_ids = {int(task_id) for task_id, value in split['assignment'].items()
-                         if value == S.SPLIT_TRAIN}
-            feedback_ids = set()
-            groups = {}
-            for row in feedback_rows:
-                require(int(row.get('round_index', 0)) <= round_index,
-                        'feedback row is ahead of audited round')
-                task_id = int(row.get('task_id', -1))
-                require(task_id in train_ids, 'feedback task is not in frozen train split')
-                base_skill_id = str(row['base_skill_key']).split('@', 1)[0]
-                candidate_skill_id = str(row['candidate_skill_key']).split('@', 1)[0]
-                require(base_skill_id == candidate_skill_id,
-                        'feedback arms refer to different Skill identities')
-                require(mapping.get(str(task_id)) == base_skill_id,
-                        'feedback task does not belong to its Skill family')
-                family = base_skill_id.rsplit('.', 1)[-1]
-                require(row.get('family_id') == family,
-                        'feedback family does not match task mapping')
-                require(row.get('base_probability') is not None and
-                        row.get('candidate_probability') is not None and
-                        isinstance(row.get('predicted_improve'), bool),
-                        'feedback is missing a complete Reviewer prediction')
-                feedback_id = row.get('feedback_id')
-                require(feedback_id not in feedback_ids, 'duplicate feedback ID')
-                feedback_ids.add(feedback_id)
-                key = (int(row['round_index']), row['batch_id'],
-                       row['base_skill_key'], row['candidate_skill_key'])
-                group = groups.setdefault(key, [])
-                group.append(row)
-            for key, group in groups.items():
-                task_ids = sorted(int(row['task_id']) for row in group)
-                skill_id = key[2].split('@', 1)[0]
-                expected = sorted(task for task in train_ids if mapping[str(task)] == skill_id)
-                feedback_size = int(protocol['config'].get('reviewer_feedback_size', 0))
-                if feedback_size:
-                    expected = expected[:feedback_size]
-                require(task_ids == expected,
-                        'feedback panel does not cover the frozen family subset exactly')
-                provenance = {(row.get('route_fingerprint'), row.get('panel_key'),
-                               row.get('executor_protocol'),
-                               row.get('reviewer_protocol_hash'),
-                               int(row.get('reviewer_prompt_version', -1))) for row in group}
-                require(len(provenance) == 1, 'feedback provenance differs within a pair')
-                expected_version = max(
-                    (int(update['reviewer_prompt_version']) for update in updates
-                     if int(update.get('generation_round', 0)) < key[0]),
-                    default=0,
-                )
-                require(next(iter(provenance))[4] == expected_version,
-                        'feedback used an unexpected Reviewer prompt version')
-            expected_pairs = set()
-            for path in (root / 'l2_batches').glob('*.json'):
-                batch = json.loads(path.read_text())
-                batch_round = int(batch.get('round', 0))
-                if batch_round < 1 or batch_round > round_index:
-                    continue
-                found_candidate = False
-                for proposal in batch.get('proposals', ()):
-                    raw = (proposal.get('edit', {}).get('candidate') or
-                           proposal.get('candidate'))
-                    if raw:
-                        found_candidate = True
-                        candidate = S.from_dict(S.CandidateSkill, raw)
-                        expected_pairs.add((batch_round, batch['batch_id'],
-                                            batch['base_skill_key'],
-                                            candidate.skill.key))
-                if not found_candidate and batch.get('candidate'):
-                    candidate = S.from_dict(S.CandidateSkill, batch['candidate'])
-                    expected_pairs.add((batch_round, batch['batch_id'],
-                                        batch['base_skill_key'], candidate.skill.key))
-            require(set(groups) == expected_pairs,
-                    f'feedback does not cover every materialized candidate exactly once: '
-                    f'actual={sorted(groups)!r} expected={sorted(expected_pairs)!r}')
-            versions = []
-            for index, update in enumerate(updates):
-                require(update.get('protocol') == RC.PROTOCOL,
-                        'Reviewer update protocol mismatch')
-                ids = set(update.get('feedback_ids', ()))
-                require(ids and ids <= feedback_ids,
-                        'Reviewer update references unknown feedback')
-                generation = int(update.get('generation_round', 0))
-                require(0 < generation <= round_index,
-                        'Reviewer update round is ahead of audited round')
-                expected_ids = {row['feedback_id'] for row in feedback_rows
-                                if int(row.get('round_index', 0)) == generation}
-                require(ids == expected_ids,
-                        'Reviewer update does not cover exactly its generation feedback')
-                version = int(update.get('reviewer_prompt_version', 0))
-                parent = update.get('parent_version')
-                if protocol['config'].get('reviewer_update_mode') == 'rules':
-                    generation_rows = tuple(S.from_dict(RC.PairedFeedback, row)
-                                            for row in feedback_rows
-                                            if int(row['round_index']) == generation)
-                    if update.get('skip_reason') == 'no_observed_rules':
-                        computed = RC.summarize_feedback(generation_rows)
-                        require(not RC._rules_from_feedback(generation_rows, computed),
-                                'empty-rules update skipped available rule evidence')
-                        require(update.get('generator') == 'program' and
-                                update.get('rules') == [] and not update.get('raw_output') and
-                                update.get('summary') == computed and
-                                update.get('calibration_block') == RC.render_calibration_block(computed, ()) and
-                                update.get('input_prompt') == RC.update_prompt(computed, ()),
-                                'empty-rules update differs from computed feedback')
-                    else:
-                        require(not update.get('skip_reason') and
-                                update.get('generator') == 'llm' and
-                                update.get('input_prompt') and update.get('raw_output'),
-                                'rules update lacks Reviewer generation provenance')
-                else:
-                    require(update.get('generator', 'program') == 'program',
-                            'summary update was generated by an unexpected mechanism')
-                require(version == (versions[-1] + 1 if versions else 1),
-                        'Reviewer update versions are not contiguous')
-                require(parent == (versions[-1] if versions else None),
-                        'Reviewer update parent chain is broken')
-                versions.append(version)
-        else:
-            require(not updates,
-                    'Reviewer update exists without any paired feedback records')
     return {'round': round_index, 'tasks': len(cards), 'batches': len(journals),
             'review_approved': sum(x.get('outcome') == 'review_approved' for x in journals),
             'acceptance_mode': expected_acceptance_mode,

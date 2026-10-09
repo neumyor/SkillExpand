@@ -2,9 +2,8 @@ from pathlib import Path
 """Offline integration checks of serial L2, real local SearchQA execution and resume."""
 
 import json
-import threading
-import time
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,7 +20,7 @@ from skillexpand.runtime import parallel as PL
 from skillexpand.l1 import workers as LW
 from skillexpand.evaluation import workers as EW
 from skillexpand.reliability.errors import (
-    EnvironmentTimeout, ProviderUnavailable, RepairExhausted, StageIncomplete, UnitFailed,
+    EnvironmentTimeout, ProviderUnavailable, StageIncomplete, UnitFailed,
 )
 from skillexpand.reliability.units import failure_record
 from skillexpand import schema as S
@@ -29,7 +28,6 @@ from skillexpand.evaluation import validation as V
 from skillexpand.evaluation import routing as R
 
 
-from skillexpand.l2 import card_review as CR
 from skillexpand.l2 import editor as ED
 
 
@@ -39,7 +37,7 @@ class SerialL2Tests(unittest.TestCase):
     ask = fixtures.ExperienceFirstTests.ask
 
     def units(self, specs, worker, workers, on_result, **kw):
-        """Run L1 offline; a Skill-aware first attempt fails so v6 review can see a gap."""
+        """Run L1 offline; the first Skill-aware attempt fails, so the cards show a gap."""
         output = []
         for spec in specs:
             self.executed.append(spec)
@@ -59,14 +57,10 @@ class SerialL2Tests(unittest.TestCase):
         C.freeze(
             self.root / "config.json", OmegaConf.to_container(self.cfg, resolve=True)
         )
-        # These integration tests exercise the card-review protocol; the product
-        # default is the independent val-panel protocol.
-        config.setdefault("predicted_review_scope", "train_cards")
-        # The scripted Planner/Editor/Reviewer speak the rewrite protocol with
-        # three candidates and no calibration; pin it instead of product defaults.
+        # The scripted Planner/Editor speak the rewrite protocol with three
+        # candidates; pin it instead of the product defaults.
         config.setdefault("candidate_count", 3)
         config.setdefault("skill_edit_mode", "rewrite")
-        config.setdefault("reviewer_update_mode", "none")
         return L.SerialEvolutionLoop(
             self.cfg,
             plan,
@@ -75,7 +69,8 @@ class SerialL2Tests(unittest.TestCase):
         )
 
     def hosts(self, driver, fail_review=False, identical=False, tie=False):
-        self.editor_prompts, self.reviewer_prompts = [], []
+        """Scripted Planner/Editor host and predicted-val judge host."""
+        self.editor_prompts, self.judge_prompts = [], []
 
         def editor_llm(messages, **kw):
             self.editor_prompts.append(messages)
@@ -125,68 +120,73 @@ class SerialL2Tests(unittest.TestCase):
                 }
             )
 
-        def reviewer_llm(messages, **kw):
-            self.reviewer_prompts.append(messages)
+        def judge_llm(messages, **kw):
+            self.judge_prompts.append(messages)
             if fail_review:
                 raise RuntimeError("review service unavailable")
-            payload = json.loads(messages[-1].content)
-            self.assertEqual(set(payload), {"current_skill_key", "current_rules", "candidates", "card"})
-            entries = []
-            observed = payload["card"]["current_observed_outcome"]
-            for c in payload["candidates"]:
-                good = tie or any("inspect" in r["text"] for r in c["rules"])
-                # An improving candidate succeeds where CURRENT did; otherwise both
-                # policies share CURRENT's observed outcome.
-                old = observed if observed != "unknown" else ("failure" if good else "unknown")
-                new = "success" if good else old
-                entries.append(
-                    {
-                        "id": c["id"],
-                        "old_outcome": old,
-                        "new_outcome": new,
-                        "evidence_ids": [payload["card"]["evidence"][0]["id"]],
-                        "rule_ids": c["changed_rule_ids"][:1],
-                        "reason": "Inspection supplies the missing evidence check.",
-                    }
-                )
-            return json.dumps({"candidates": entries})
+            body = json.loads(messages[-1].content)["skill"]["body"]
+            # A Skill that checks the evidence is forecast to succeed; with
+            # ``tie`` every Skill gets the same forecast.
+            good = tie or "inspect" in body
+            return json.dumps({
+                "probability_true": 0.8 if good else 0.2,
+                "predicted_success": good,
+                "reason": "controlled test forecast",
+            })
 
         return (
             SimpleNamespace(token_counter=len, llm=editor_llm),
-            SimpleNamespace(token_counter=len, llm=reviewer_llm),
+            SimpleNamespace(token_counter=len, llm=judge_llm),
         )
 
-    def run_offline(self, driver, **kwargs):
-        editor, reviewer = self.hosts(driver, **kwargs)
+    @contextmanager
+    def models(self, driver, **kwargs):
+        """Route Planner/Editor and predicted-judge hosts; val routes are fixed."""
+        editor, judge = self.hosts(driver, **kwargs)
+
+        class Routes:
+            fingerprint = "test-val-routes"
+            groups = {skill.skill_id: (2,) for skill in driver.initial}
 
         def factory(cfg, path, role=None):
-            return reviewer if "reviewer-" in str(path) else editor
+            return judge if "predicted-" in str(path) else editor
 
         with patch.object(F, "build_reasoning_host", side_effect=factory), patch.object(
-            PL,
-            "run_generic",
-            side_effect=self.units,
+            L.FrozenRoutes, "run", return_value=Routes()
+        ):
+            yield editor, judge
+
+    def run_offline(self, driver, **kwargs):
+        with self.models(driver, **kwargs), patch.object(
+            PL, "run_generic", side_effect=self.units
         ):
             return driver.run()
 
-    def test_review_only_batch_isolation_frozen_description_l3_and_resume(self):
+    def test_predicted_val_round_isolation_frozen_description_resume_and_audit(self):
+        from skillexpand.l2.audit import audit_round
         driver = self.prepared()
         summary = self.run_offline(driver)
         self.assertEqual(summary["completed_batches"], 2)
         self.assertEqual(summary["review_approved_updates"], 1)
         self.assertFalse(summary["empirically_validated"])
         self.assertEqual(summary["val_executions"], 0)
+        self.assertGreater(summary["predicted_val_requests"], 0)
         self.assertEqual(
             driver.skill_heads()[0].description, driver.initial[0].description
         )
-        self.assertFalse((self.root / "routes").exists())
         self.assertFalse((self.root / "panel_scores.jsonl").exists())
         self.assertFalse((self.root / "meta_decisions.jsonl").exists())
-        for prompt in self.reviewer_prompts:
+        self.assertTrue(self.judge_prompts)
+        for prompt in self.judge_prompts:
             payload = json.loads(prompt[-1].content)
-            self.assertIn("card_id", payload["card"])
-            self.assertNotIn("cards", payload)
-            self.assertNotIn("selected_hypothesis", payload)
+            # The forecast sees only the Skill and a task: no card or trajectory.
+            self.assertEqual(set(payload), {"task", "skill", "instructions", "output_schema"})
+        for path in (self.root / "l2_batches").glob("*.json"):
+            batch = json.loads(path.read_text())
+            self.assertEqual(batch["acceptance"]["mode"], "predicted")
+            self.assertEqual(batch["acceptance"]["executions"], 0)
+            self.assertTrue(batch["acceptance"]["panel"].startswith("val:"))
+        self.assertEqual(audit_round(self.root, 1)["review_approved"], 1)
         restored = L.SerialEvolutionLoop(
             self.cfg, driver.plan, L.LoopPaths(self.root), driver.config
         )
@@ -195,160 +195,57 @@ class SerialL2Tests(unittest.TestCase):
         ):
             self.assertEqual(restored.run(), summary)
 
-    def test_predicted_val_scope_uses_paired_skill_forecast_and_audits_offline(self):
-        driver = self.prepared(batch_size=50, predicted_review_scope="val")
-        editor, _ = self.hosts(driver)
-        judge_calls = []
-
-        class Routes:
-            fingerprint = "test-val-routes"
-            groups = {skill.skill_id: (2,) for skill in driver.initial}
-
-        class Judge:
-            token_counter = len
-
-            @staticmethod
-            def llm(messages, **kwargs):
-                payload = json.loads(messages[-1].content)
-                body = payload["skill"]["body"]
-                judge_calls.append(body)
-                return json.dumps({
-                    "probability_true": 0.8 if body.startswith("NEW ") else 0.2,
-                    "predicted_success": body.startswith("NEW "),
-                    "reason": "controlled test forecast",
-                })
-
-        def factory(cfg, path, role=None):
-            return Judge() if "predicted-" in str(path) else editor
-
-        fake_routes = Routes()
-        with patch.object(PL, "run_generic", side_effect=self.units), patch.object(
-            F, "build_reasoning_host", side_effect=factory
-        ), patch.object(L.FrozenRoutes, "run", return_value=fake_routes), patch.object(
-            CR.CardReviewer, "review", side_effect=AssertionError("card reviewer must be skipped")
-        ):
-            summary = driver.run()
-
-        self.assertEqual(summary["predicted_review_scope"], "val")
-        self.assertGreater(summary["predicted_val_requests"], 0)
-        self.assertEqual(summary["val_executions"], 0)
-        self.assertTrue(judge_calls)
-        for path in (self.root / "l2_batches").glob("*.json"):
-            batch = json.loads(path.read_text())
-            self.assertEqual(batch["predicted_review_scope"], "val")
-            self.assertEqual(batch["acceptance"]["scope"], "val")
-            self.assertEqual(batch["acceptance"]["executions"], 0)
-            self.assertTrue(batch["acceptance"]["panel"].startswith("val:"))
-            self.assertEqual(batch["reviews"], [])
-
-    def test_reviewer_coevolution_writes_train_feedback_and_versioned_update(self):
-        driver = self.prepared(
-            batch_size=50,
-            predicted_review_scope="val",
-            candidate_count=1,
-            single_candidate=True,
-            reviewer_update_mode="rules",
-        )
-        editor, _ = self.hosts(driver)
-
-        class Routes:
-            fingerprint = "test-val-routes"
-            groups = {skill.skill_id: (2,) for skill in driver.initial}
-
-        class Judge:
-            token_counter = len
-
-            @staticmethod
-            def llm(messages, **kwargs):
-                payload = json.loads(messages[-1].content)
-                body = payload["skill"]["body"]
-                good = body.startswith("NEW")
-                return json.dumps({
-                    "probability_true": 0.8 if good else 0.2,
-                    "predicted_success": good,
-                    "reason": "controlled coevolution forecast",
-                })
-
-        def factory(cfg, path, role=None):
-            if "predicted-" in str(path):
-                return Judge()
-            if "reviewer-update-" in str(path):
-                raise AssertionError("empty rule observations must skip model construction")
-            return editor
-
-        def feedback_units(specs, worker, workers, on_result, **kwargs):
-            if worker is LW.execute_experience:
-                return self.units(specs, worker, workers, on_result, **kwargs)
-            return self.fake_units(specs, worker, workers, on_result, **kwargs)
-
-        with patch.object(PL, "run_generic", side_effect=feedback_units), patch.object(
-            F, "build_reasoning_host", side_effect=factory
-        ), patch.object(L.FrozenRoutes, "run", return_value=Routes()):
-            result = driver.run_evolutions(1)
-
-        self.assertEqual(result["reviewer_prompt_version"], 1)
-        self.assertGreater(result["reviewer_feedback_count"], 0)
-        feedback = json.loads((self.root / "reviewer_feedback.jsonl").read_text().splitlines()[0])
-        self.assertEqual(feedback["split"], "train")
-        update = json.loads((self.root / "reviewer_updates.jsonl").read_text().splitlines()[0])
-        self.assertEqual(update["generation_round"], 1)
-        self.assertIn(feedback["feedback_id"], update["feedback_ids"])
-        self.assertEqual(update["generator"], "program")
-        self.assertEqual(update["skip_reason"], "no_observed_rules")
-        self.assertEqual(update["rules"], [])
-        self.assertIn("observed_rules", update["input_prompt"])
-        self.assertEqual(update["raw_output"], "")
-        from skillexpand.campaign import evidence_hashes
-        before = evidence_hashes(self.root)
-        restored = L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root), driver.config)
-        with patch.object(F, "build_reasoning_host", side_effect=AssertionError("resume model")):
-            self.assertEqual(restored.run_evolutions(1), result)
-        self.assertEqual(evidence_hashes(self.root), before)
+    def test_empirical_round_decides_from_the_paired_val_measurement(self):
         from skillexpand.l2.audit import audit_round
-        feedback_path = self.root / "reviewer_feedback.jsonl"
-        original = feedback_path.read_text()
-        invalid_future = dict(feedback, round_index=999, feedback_id="unstarted-round")
-        feedback_path.write_text(original + json.dumps(invalid_future) + "\n")
-        with self.assertRaisesRegex(ValueError, "unstarted round"):
-            audit_round(self.root, 1)
-        feedback_path.write_text(original)
+        driver = self.prepared(batch_size=50, acceptance_mode="empirical")
+        self.assertEqual(driver.config.acceptance_mode, "empirical")
 
-    def test_card_reviews_use_bounded_pool_and_keep_card_order(self):
-        driver = self.prepared(batch_size=50, l2_review_workers=2)
-        editor, reviewer = self.hosts(driver)
-        lock = threading.Lock()
-        active = 0
-        peak = 0
-        original = reviewer.llm
+        class Routes:
+            fingerprint = "test-val-routes"
+            groups = {skill.skill_id: (2,) for skill in driver.initial}
 
-        def overlapping(messages, **kwargs):
-            nonlocal active, peak
-            with lock:
-                active += 1
-                peak = max(peak, active)
-            try:
-                time.sleep(0.03)
-                return original(messages, **kwargs)
-            finally:
-                with lock:
-                    active -= 1
+        def units(specs, worker, workers, on_result, **kw):
+            if worker is LW.execute_experience:
+                return self.units(specs, worker, workers, on_result, **kw)
+            self.assertIs(worker, EW.execute_fixed)
+            output = []
+            for spec in specs:
+                helped = spec.skill_body.startswith("NEW inspect")
+                actions = ["Finish[Toyota]"] if helped else ["Finish[Honda]"]
+                item = {"task_id": spec.task_id, "success": helped, "steps": len(actions),
+                        "events": [{"model_text": a, "action": a, "observation": "seen"}
+                                   for a in actions],
+                        "skill_key": spec.skill_key, "failure": None}
+                output.append(item)
+                on_result(item)
+            return output
 
-        reviewer.llm = overlapping
-        def factory(cfg, path, role=None):
-            return reviewer if "reviewer-" in str(path) else editor
-
-        with patch.object(F, "build_reasoning_host", side_effect=factory), patch.object(
-            PL, "run_generic", side_effect=self.units
-        ):
-            driver.run()
-        self.assertGreaterEqual(peak, 2)
+        editor, _ = self.hosts(driver)
+        with patch.object(PL, "run_generic", side_effect=units), patch.object(
+            F, "build_reasoning_host",
+            side_effect=lambda cfg, path, role=None: editor
+        ), patch.object(L.FrozenRoutes, "run", return_value=Routes()):
+            summary = driver.run()
+        self.assertTrue(summary["empirically_validated"])
+        self.assertEqual(summary["review_approved_updates"], 1)
+        self.assertGreater(summary["val_executions"], 0)
+        self.assertEqual(driver.skill_heads()[0].version, 1)
+        self.assertEqual(driver.skill_heads()[0].body, "NEW inspect evidence")
         batch = json.loads(next((self.root / "l2_batches").glob("*.json")).read_text())
-        card_ids = [item["card_id"] for item in batch["reviews"][0]["judgments"]]
-        self.assertEqual([card_id.rsplit(":", 1)[-1] for card_id in card_ids], ["0", "1"])
+        self.assertEqual(batch["acceptance"]["mode"], "empirical")
+        self.assertEqual(batch["acceptance"]["predicted_requests"], 0)
+        self.assertEqual(audit_round(self.root, 1)["review_approved"], 1)
+        restored = L.SerialEvolutionLoop(
+            self.cfg, driver.plan, L.LoopPaths(self.root), driver.config
+        )
+        with patch.object(
+            F, "build_reasoning_host", side_effect=AssertionError("resume model")
+        ), patch.object(PL, "run_generic", side_effect=AssertionError("resume execution")):
+            self.assertEqual(restored.run(), summary)
 
     def test_review_failure_resumes_saved_generation(self):
         driver = self.prepared(batch_size=50)
-        with self.assertRaisesRegex(RuntimeError, "review service"):
+        with self.assertRaises(RuntimeError):
             self.run_offline(driver, fail_review=True)
         self.assertEqual(driver.skill_heads()[0].version, 0)
         with patch.object(
@@ -360,7 +257,7 @@ class SerialL2Tests(unittest.TestCase):
 
     def test_corrupt_cached_pattern_is_rejected_before_editing(self):
         driver=self.prepared(batch_size=50)
-        with self.assertRaisesRegex(RuntimeError,'review service'):
+        with self.assertRaises(RuntimeError):
             self.run_offline(driver,fail_review=True)
         path=next((self.root/'l2_patterns').glob('*.json'))
         data=json.loads(path.read_text())
@@ -373,21 +270,7 @@ class SerialL2Tests(unittest.TestCase):
 
     def test_supported_pattern_reaches_l2_editor_and_round_audit(self):
         driver=self.prepared(batch_size=50)
-        editor,reviewer=self.hosts(driver)
-        original=editor.llm
         observed=[]
-
-        def patterned(messages,**kw):
-            payload=json.loads(messages[-1].content)
-            if isinstance(payload,list):
-                return json.dumps({'patterns':[{'text':'Search for the product before answering',
-                    'support':[{'card_id':item['card_id'],'evidence_id':'t1:e1'}
-                               for item in payload], 'counter_card_ids':[]}]})
-            if 'K' in payload:
-                observed.extend(payload['batch_patterns'])
-            return original(messages,**kw)
-
-        editor.llm=patterned
 
         def units(specs,worker,workers,on_result,**kw):
             for spec in specs:
@@ -396,9 +279,21 @@ class SerialL2Tests(unittest.TestCase):
                           Model(['Action 1: Search[Prius]','Action 2: Finish[Toyota]']))):
                     on_result(worker(spec))
 
-        with patch.object(PL,'run_generic',side_effect=units), patch.object(
-                F,'build_reasoning_host',side_effect=lambda cfg,path,role=None:
-                    reviewer if 'reviewer-' in str(path) else editor):
+        with self.models(driver) as (editor, _), patch.object(
+                PL,'run_generic',side_effect=units):
+            original=editor.llm
+
+            def patterned(messages,**kw):
+                payload=json.loads(messages[-1].content)
+                if isinstance(payload,list):
+                    return json.dumps({'patterns':[{'text':'Search for the product before answering',
+                        'support':[{'card_id':item['card_id'],'evidence_id':'t1:e1'}
+                                   for item in payload], 'counter_card_ids':[]}]})
+                if 'K' in payload:
+                    observed.extend(payload['batch_patterns'])
+                return original(messages,**kw)
+
+            editor.llm=patterned
             driver.run_evolutions(1)
         self.assertEqual(len(observed),1)
         self.assertEqual(len(observed[0]['support']),2)
@@ -421,10 +316,10 @@ class SerialL2Tests(unittest.TestCase):
         ):
             self.assertEqual(restored.run()["review_approved_updates"], 1)
 
-    def test_duplicate_bodies_reviewed_once_and_tied_distinct_candidates_hold(self):
+    def test_duplicate_bodies_are_scored_once(self):
         driver = self.prepared(batch_size=50)
         self.assertEqual(
-            self.run_offline(driver, identical=True)["reviewed_candidates"], 1
+            self.run_offline(driver, identical=True)["predicted_val_candidates"], 1
         )
 
     def test_equal_predictions_hold_current_skill(self):
@@ -434,88 +329,7 @@ class SerialL2Tests(unittest.TestCase):
         )
         self.assertEqual(driver.skill_heads()[0].version, 0)
 
-    def test_reviewer_checks_candidate_and_local_id_coverage(self):
-        base = S.Skill("searchqa.s", "s", 0, "S", "scope", "1. keep\n2. old")
-        candidates = [
-            {"id": "C1", "body": "1. keep\n2. new"},
-            {"id": "C2", "body": "1. keep\n2. alternative"},
-        ]
-        card = {"card_id": "one", "evidence": [{"id": "E1", "path": "/evidence/E1", "value": "observed"}]}
-        entries = [
-            {
-                "id": c["id"],
-                "old_outcome": "failure",
-                "new_outcome": "success",
-                "evidence_ids": ["E1"],
-                "rule_ids": [c["id"] + "R2"],
-                "reason": "changed mechanism",
-            }
-            for c in candidates
-        ]
-        raw = {"candidates": entries}
-        parsed = CR.parse_card_review(json.dumps(raw), base, candidates, card)
-        self.assertEqual(set(parsed), {"C1", "C2"})
-        for key, value in [
-            ("id", "C2"),
-            ("id", []),
-            ("label", "improve"),
-            ("new_outcome", "solved"),
-            ("evidence_ids", ["E999"]),
-            ("rule_ids", ["C2R2"]),
-            ("rule_ids", ["B1"]),
-            ("evidence_ids", []),
-            ("evidence_ids", ["E1", "E1"]),
-        ]:
-            changed = json.loads(json.dumps(raw))
-            changed["candidates"][0][key] = value
-            with self.assertRaises(ValueError):
-                CR.parse_card_review(json.dumps(changed), base, candidates, card)
-        with self.assertRaises(ValueError):
-            CR.parse_card_review(
-                json.dumps({"candidates": entries[:1]}), base, candidates, card
-            )
-
-    def test_removed_rule_is_valid_directional_reference(self):
-        base = S.Skill("searchqa.s", "s", 0, "S", "scope", "1. keep\n2. removed")
-        candidates = [{"id": "C1", "body": "1. keep"}]
-        card = {"card_id": "one", "evidence": [{"id": "E1", "path": "/evidence/E1", "value": "observed"}]}
-        raw = {
-            "candidates": [
-                {
-                    "id": "C1",
-                    "old_outcome": "success",
-                    "new_outcome": "failure",
-                    "evidence_ids": ["E1"],
-                    "rule_ids": ["B2"],
-                    "reason": "lost safeguard",
-                }
-            ]
-        }
-        self.assertEqual(
-            CR.parse_card_review(json.dumps(raw), base, candidates, card)["C1"]["effect"],
-            "regress",
-        )
-
-    def test_full_50_card_aggregation_and_invalid_unit_rejected(self):
-        candidates = [{"id": "C1", "body": "new"}]
-        cards = [{"card_id": str(i)} for i in range(50)]
-        units = {
-            c["card_id"]: {"C1": {"card_id": c["card_id"], "effect": CR.EFFECTS[i % 4]}}
-            for i, c in enumerate(cards)
-        }
-        result = CR.aggregate(candidates, cards, units)[0]
-        self.assertEqual(
-            result["counts"],
-            {"improve": 13, "regress": 13, "unchanged": 12, "unknown": 12},
-        )
-        self.assertEqual(result["unknown_fraction"], 12 / 50)
-        with self.assertRaises(ValueError):
-            CR.aggregate(candidates, cards, dict(list(units.items())[:-1]))
-        units["0"]["C1"]["effect"] = "invalid"
-        with self.assertRaises(ValueError):
-            CR.aggregate(candidates, cards, units)
-
-    def test_evidence_ids_preserve_context_and_are_deterministic(self):
+    def test_card_payload_preserves_evidence_context_and_is_deterministic(self):
         card = {"schema_version": 5, "card_id": "one", "task": {"text": "q"},
                 "execution": {"success": True}, "claims": [], "claim_status": "valid",
                 "evidence": [{"id": "t1:e2", "trial": 1, "phase": "autonomous",
@@ -523,100 +337,10 @@ class SerialL2Tests(unittest.TestCase):
                               "effect": "observed", "method": True,
                               "observation_truncated": True}]}
         exp = SimpleNamespace(experience_id="one", experience_card=card)
-        self.assertEqual(CR.card_payload([exp]), CR.card_payload([exp]))
-        self.assertEqual(CR.card_payload([exp])[0]["evidence"][0]["id"], "t1:e2")
-        self.assertEqual(CR.card_payload([exp])[0]["evidence"][0]["path"], "/evidence/0")
-        self.assertTrue(CR.card_payload([exp])[0]["evidence"][0]["value"]["observation_truncated"])
-        base = SimpleNamespace(key="searchqa.example@v0", body="1. keep\n2. retain")
-        payload = CR.review_payload(
-            base, [{"id": "C1", "body": "2. keep\n3. retain"}], {}
-        )
-        self.assertEqual(payload["candidates"][0]["changed_rule_ids"], [])
-
-    def test_resume_reuses_completed_card_review(self):
-        driver = self.prepared(batch_size=50)
-        original = CR.CardReviewer.review
-        calls = []
-
-        def flaky(reviewer, base, candidates, card, correction=None):
-            calls.append(card["card_id"])
-            if len(calls) == 2:
-                raise RuntimeError("second card interrupted")
-            return original(reviewer, base, candidates, card, correction)
-
-        with patch.object(CR.CardReviewer, "review", new=flaky):
-            with self.assertRaisesRegex(RuntimeError, "second card interrupted"):
-                self.run_offline(driver)
-        with patch.object(
-            ED.SkillEditor, "plan", side_effect=AssertionError("replan")
-        ), patch.object(
-            ED.SkillEditor, "propose", side_effect=AssertionError("regenerate")
-        ):
-            self.assertEqual(self.run_offline(driver)["review_approved_updates"], 1)
-        self.assertEqual(len(self.reviewer_prompts), 1)
-        self.assertEqual(
-            json.loads(self.reviewer_prompts[0][-1].content)["card"]["card_id"],
-            calls[1],
-        )
-
-    def test_exhausted_card_review_fails_batch_retryably_and_resume_resamples(self):
-        driver = self.prepared(batch_size=50)
-        original = CR.CardReviewer.review
-        calls = {}
-
-        def partly_invalid(reviewer, base, candidates, card, correction=None):
-            cid = card["card_id"]
-            calls[cid] = calls.get(cid, 0) + 1
-            if cid == next(iter(calls)):
-                return "invalid json"
-            return original(reviewer, base, candidates, card, correction)
-
-        with patch.object(CR.CardReviewer, "review", new=partly_invalid):
-            with self.assertRaises(RepairExhausted) as raised:
-                self.run_offline(driver)
-        self.assertTrue(raised.exception.retryable)
-        self.assertEqual(sorted(calls.values()), [1, 2])
-        self.assertFalse(any((self.root / "l2_batches").glob("*.json")))
-        self.assertEqual(driver.skill_heads()[0].version, 0)
-
-        # Resume replays both invalid responses without spending budget, then
-        # resamples with a correction; the valid card is not requested again.
-        first = next(iter(calls))
-        resumed = []
-
-        def record(reviewer, base, candidates, card, correction=None):
-            resumed.append((card["card_id"], correction is not None))
-            # The fixture's fake Reviewer checks the uncorrected payload shape.
-            return original(reviewer, base, candidates, card)
-
-        with patch.object(CR.CardReviewer, "review", new=record):
-            result = self.run_offline(driver)
-        self.assertEqual(resumed, [(first, True)])
-        self.assertEqual(result["completed_batches"], result["batches"])
-        self.assertEqual(len(list((self.root / "l2_proposals").glob("*/review-*-2.json"))), 1)
-
-    def test_unknown_can_reverse_gain_and_equal_predictions_hold(self):
-        def row(cid, net, unknown=0):
-            return {
-                "id": cid,
-                "predicted_net": net,
-                "counts": {"unknown": unknown},
-            }
-
-        self.assertIsNone(CR.choose([row("C1", 1, 1)])[0])
-        self.assertIsNone(CR.choose([row("C1", 2, 1), row("C2", 1)])[0])
-        self.assertIsNone(CR.choose([row("C1", 1), row("C2", 0, 2)])[0])
-        self.assertIsNone(CR.choose([row("C1", 2), row("C2", 2)])[0])
-
-    def test_exhausted_review_is_never_journaled_as_a_hold(self):
-        driver = self.prepared(batch_size=50)
-        with patch.object(CR.CardReviewer, "review", return_value="not json"):
-            with self.assertRaises(RepairExhausted):
-                self.run_offline(driver)
-        self.assertFalse(any((self.root / "l2_batches").glob("*.json")))
-        summary = json.loads((self.root / "summary.json").read_text())
-        self.assertEqual(summary["status"], "needs_attention")
-        self.assertEqual(driver.skill_heads()[0].version, 0)
+        self.assertEqual(ED.card_payload([exp]), ED.card_payload([exp]))
+        self.assertEqual(ED.card_payload([exp])[0]["evidence"][0]["id"], "t1:e2")
+        self.assertEqual(ED.card_payload([exp])[0]["evidence"][0]["path"], "/evidence/0")
+        self.assertTrue(ED.card_payload([exp])[0]["evidence"][0]["value"]["observation_truncated"])
 
     def test_editor_enforces_frozen_description(self):
         driver = self.prepared()
@@ -632,7 +356,6 @@ class SerialL2Tests(unittest.TestCase):
         from skillexpand import structured_skill as SS
         from skillexpand.l2.audit import audit_round
         driver = self.prepared(batch_size=50, skill_edit_mode='structured')
-        _, reviewer = self.hosts(driver)
 
         planner_calls = []
         def planner_llm(messages, **kw):
@@ -651,12 +374,10 @@ class SerialL2Tests(unittest.TestCase):
                              'text': 'inspect the supporting source before Finish.'},
                 }]})
 
-        editor = SimpleNamespace(token_counter=len, llm=planner_llm)
-        def factory(cfg, path, role=None):
-            return reviewer if 'reviewer-' in str(path) else editor
-        with patch.object(PL, 'run_generic', side_effect=self.units), patch.object(
-            F, 'build_reasoning_host', side_effect=factory
+        with self.models(driver) as (editor, _), patch.object(
+            PL, 'run_generic', side_effect=self.units
         ):
+            editor.llm = planner_llm
             result = driver.run_evolutions(1)
         self.assertTrue(planner_calls)
         self.assertEqual(result['review_approved_updates'], 1)
@@ -712,7 +433,6 @@ class SerialL2Tests(unittest.TestCase):
         from skillexpand.l2.audit import audit_round
         driver = self.prepared(batch_size=50, skill_edit_mode="structured",
                                acceptance_mode="sampled", candidate_count=1,
-                               predicted_review_scope="val", reviewer_update_mode=None,
                                acceptance_sample_size=2)
         calls = {"l2_reviewer": [], "l2_verifier": []}
         rule = "inspect the supporting source before Finish."
@@ -775,7 +495,6 @@ class SerialL2Tests(unittest.TestCase):
 
         n = len(val_tasks)
         accepted = int(n >= 2)
-        self.assertEqual(driver.config.reviewer_update_mode, "none")
         self.assertEqual(result["review_approved_updates"], accepted)
         self.assertEqual(driver.skill_heads()[0].version, accepted)
         self.assertEqual(result["val_executions"], 2 * n)
@@ -785,7 +504,6 @@ class SerialL2Tests(unittest.TestCase):
         decision = batch["acceptance"]["candidates"][0]["result"]["decision"]
         self.assertEqual(decision["reason"], "accepted" if accepted else "insufficient_sample")
         self.assertEqual((batch["planner_memory"], batch["reviewer_memory_version"]), ("", 0))
-        self.assertFalse((self.root / "reviewer_feedback.jsonl").exists())
         self.assertEqual(audit_round(self.root, 1)["review_approved"], accepted)
         restored = L.SerialEvolutionLoop(self.cfg, driver.plan, L.LoopPaths(self.root),
                                          driver.config)
@@ -805,32 +523,19 @@ class SerialL2Tests(unittest.TestCase):
 
     def test_cli_defaults_and_tail_batches(self):
         # The product defaults are the single-candidate structured protocol with
-        # rule-based Reviewer calibration; this fixture overrides them above.
+        # predicted val acceptance; this fixture overrides them above.
         defaults = L.EvolutionConfig()
         self.assertEqual((defaults.candidate_count, defaults.batch_size), (1, 50))
-        self.assertEqual((defaults.skill_edit_mode, defaults.reviewer_update_mode),
-                         ("structured", "rules"))
+        self.assertEqual((defaults.skill_edit_mode, defaults.acceptance_mode),
+                         ("structured", "predicted"))
         self.assertEqual([len(b) for b in L.family_task_batches(range(123), 50)], [50, 50, 23])
         parsed = evolve.build_parser().parse_args(["--run-dir", "x"])
         self.assertEqual((parsed.candidate_count, parsed.skill_edit_mode), (1, "structured"))
-        # The Reviewer calibration default follows the acceptance protocol.
-        self.assertIsNone(parsed.reviewer_update_mode)
-        self.assertEqual(L.EvolutionConfig(acceptance_mode="sampled").reviewer_update_mode,
-                         "none")
-        self.assertEqual(
-            (parsed.acceptance_mode, parsed.predicted_review_scope), ("predicted", "val")
-        )
+        self.assertEqual(parsed.acceptance_mode, "predicted")
 
     def test_evolve_round_runs_skill_aware_l1_then_l2_and_resumes(self):
         driver = self.prepared(batch_size=1)
-        editor, reviewer = self.hosts(driver)
-
-        def factory(cfg, path, role=None):
-            return reviewer if "reviewer-" in str(path) else editor
-
-        with patch.object(PL, "run_generic", side_effect=self.units), patch.object(
-            F, "build_reasoning_host", side_effect=factory
-        ):
+        with self.models(driver), patch.object(PL, "run_generic", side_effect=self.units):
             result = driver.run_evolutions(1)
         self.assertEqual(result["latest_evolution_round"], 1)
         self.assertEqual(driver.skill_heads()[0].version, 1)
@@ -840,9 +545,7 @@ class SerialL2Tests(unittest.TestCase):
 
         resumed = L.SerialEvolutionLoop(
             driver.cfg, driver.plan, L.LoopPaths(self.root),
-            L.EvolutionConfig(batch_size=1, predicted_review_scope="train_cards",
-                              candidate_count=3, skill_edit_mode="rewrite",
-                              reviewer_update_mode="none"),
+            L.EvolutionConfig(batch_size=1, candidate_count=3, skill_edit_mode="rewrite"),
         )
         with patch.object(PL, "run_generic", side_effect=AssertionError("resampled")), patch.object(
             F, "build_reasoning_host", side_effect=AssertionError("resampled")
@@ -853,9 +556,6 @@ class SerialL2Tests(unittest.TestCase):
 
     def test_partial_round_resume_and_extend_use_real_l1(self):
         driver = self.prepared(batch_size=1)
-        editor, reviewer = self.hosts(driver)
-        def factory(cfg, path, role=None):
-            return reviewer if 'reviewer-' in str(path) else editor
         original = driver._run_batch
         calls = []
         def crash(batch):
@@ -863,8 +563,9 @@ class SerialL2Tests(unittest.TestCase):
             if len(calls) == 2:
                 raise TimeoutError('between batches')
             original(batch)
-        with patch.object(PL, 'run_generic', side_effect=self.units), patch.object(
-                F, 'build_reasoning_host', side_effect=factory), patch.object(driver, '_run_batch', side_effect=crash):
+        with self.models(driver), patch.object(
+                PL, 'run_generic', side_effect=self.units), patch.object(
+                driver, '_run_batch', side_effect=crash):
             with self.assertRaises(TimeoutError):
                 driver.run_evolutions(1)
         failed = json.loads((self.root/'summary.json').read_text())
@@ -875,12 +576,11 @@ class SerialL2Tests(unittest.TestCase):
         self.assertEqual(failed['completed_batches'], 1)
         frozen = (self.root/'evolution/round-1/input.json').read_bytes()
         resumed = L.SerialEvolutionLoop(driver.cfg, driver.plan, L.LoopPaths(self.root), driver.config)
-        with patch.object(PL, 'run_generic', side_effect=AssertionError('L1 repeated')), patch.object(
-                F, 'build_reasoning_host', side_effect=factory):
+        with self.models(resumed), patch.object(
+                PL, 'run_generic', side_effect=AssertionError('L1 repeated')):
             resumed.run_evolutions(1)
         self.assertEqual((self.root/'evolution/round-1/input.json').read_bytes(), frozen)
-        with patch.object(PL, 'run_generic', side_effect=self.units), patch.object(
-                F, 'build_reasoning_host', side_effect=factory):
+        with self.models(resumed), patch.object(PL, 'run_generic', side_effect=self.units):
             resumed.run_evolutions(2)
         from skillexpand.l2.audit import audit_round
         for index in (1, 2):
@@ -911,17 +611,14 @@ class SerialL2Tests(unittest.TestCase):
                 driver.run()
         self.assertFalse((self.root/'l2_batches').exists())
         saved = (self.root/'evolution/round-1/cards/0.json').read_bytes()
-        editor, reviewer = self.hosts(driver)
         def remaining(specs, *args, **kw):
             self.assertEqual([s.task_id for s in specs], [1])
             return self.units(specs, *args, **kw)
-        with patch.object(PL, 'run_generic', side_effect=remaining), patch.object(
-                F, 'build_reasoning_host', side_effect=lambda cfg, path, role=None:
-                    reviewer if 'reviewer-' in str(path) else editor):
+        with self.models(driver), patch.object(PL, 'run_generic', side_effect=remaining):
             driver.run()
         self.assertEqual((self.root/'evolution/round-1/cards/0.json').read_bytes(), saved)
 
-    def test_round_audit_rejects_checkpoint_and_raw_review_corruption(self):
+    def test_round_audit_rejects_checkpoint_and_raw_response_corruption(self):
         from skillexpand.l2.audit import audit_round
         driver = self.prepared(batch_size=50)
         self.run_offline(driver)
@@ -933,22 +630,17 @@ class SerialL2Tests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit_round(self.root, 1)
         checkpoint.write_text(saved)
-        review = next((self.root/'l2_proposals').glob('*/review-*.json'))
-        data = json.loads(review.read_text())
+        response = next((self.root/'l2_proposals').glob('*/hypotheses-*.json'))
+        data = json.loads(response.read_text())
         data['raw'] = '{}'
-        review.write_text(json.dumps(data))
+        response.write_text(json.dumps(data))
         with self.assertRaises(ValueError):
             audit_round(self.root, 1)
 
     def test_cli_import_and_test_remain_separate(self):
         driver = self.prepared()
         target = self.root.parent / "cli-import"
-        editor, reviewer = self.hosts(driver)
-
-        def factory(cfg, path, role=None):
-            return reviewer if "reviewer-" in str(path) else editor
-
-        with patch.object(F, "build_reasoning_host", side_effect=factory), patch.object(
+        with self.models(driver), patch.object(
             PL, "run_generic", side_effect=self.units
         ):
             evolve.main(
@@ -961,17 +653,14 @@ class SerialL2Tests(unittest.TestCase):
                     str(target),
                     "--phase",
                     "l2",
-                    "--predicted-review-scope",
-                    "train_cards",
                     "--candidate-count", "3",
                     "--skill-edit-mode", "rewrite",
-                    "--reviewer-update-mode", "none",
                 ]
             )
         summary = json.loads((target / "summary.json").read_text())
         self.assertEqual(summary["review_approved_updates"], 1)
         self.assertEqual(len(list((target/'discovery/initial_skills').glob('*-patterns.json'))),2)
-        self.assertFalse((target / "routes").exists())
+        self.assertEqual(summary["val_executions"], 0)
         cfg, plan, _, _ = A.load_cold_start(target)
         with patch.object(PL, "run_generic", side_effect=self.fake_units):
             final = evolve.test_evaluate(cfg, plan, target, 1)

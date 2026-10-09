@@ -434,9 +434,8 @@ class PredictedPanelScore:
 class PredictedSkillScorer:
     """Predict Skill success independently on a frozen validation panel.
 
-    This is separate from JEV: it uses the configured L2 reviewer model through
-    the normal chat host, while JEV uses its dedicated judge endpoint. Both share
-    the same route groups and paired comparison for direct calibration.
+    It uses the configured L2 reviewer model through the normal chat host and
+    shares the route groups and paired comparison of the empirical scorer.
     """
 
     PROTOCOL = "predicted-val-skill-success-v2-json-schema"
@@ -471,7 +470,7 @@ class PredictedSkillScorer:
         }
 
     def __init__(self, cfg, routes, cache, workers=8, judge_factory=None,
-                 threshold=0.5, calibration_block="", reviewer_prompt_version=0):
+                 threshold=0.5):
         self.cfg = cfg
         self.routes = routes
         self.cache = cache
@@ -490,8 +489,6 @@ class PredictedSkillScorer:
             "EXPE_REVIEWER_RESPONSE_FORMAT", "omit" if legacy_omit else "json_schema")
         if self.wire_response_format not in {"json_schema", "omit"}:
             raise ValueError("EXPE_REVIEWER_RESPONSE_FORMAT must be json_schema or omit")
-        self.calibration_block = str(calibration_block or "")
-        self.reviewer_prompt_version = int(reviewer_prompt_version)
         if not 0.0 <= self.threshold <= 1.0:
             raise InvalidInput("prediction threshold must be between 0 and 1")
         self.protocol_hash = S.content_hash({
@@ -500,8 +497,6 @@ class PredictedSkillScorer:
             "benchmark": cfg.benchmark.name,
             "routes": routes.fingerprint,
             "threshold": self.threshold,
-            "reviewer_prompt_version": self.reviewer_prompt_version,
-            "calibration_block": self.calibration_block,
             **({"wire_response_format": "omit"} if self.wire_response_format == "omit" else {}),
         })
 
@@ -527,8 +522,6 @@ class PredictedSkillScorer:
                 "reason": f"string, <= {self.REASON_MAX_CHARS} characters",
             },
         }
-        if self.calibration_block:
-            payload["calibration_block"] = self.calibration_block
         return json.dumps(payload, ensure_ascii=False)
 
     def _parse_response(self, raw):
@@ -674,7 +667,6 @@ class PredictedSkillScorer:
                     "base_reason": str(base_row.get("reason", "")),
                     "candidate_reason": str(candidate_row.get("reason", "")),
                     "reviewer_protocol_hash": str(candidate_row.get("protocol_hash", "")),
-                    "reviewer_prompt_version": self.reviewer_prompt_version,
                 }
                 for task_id, base_row, candidate_row in zip(
                     base.task_ids, base.predictions, candidate.predictions

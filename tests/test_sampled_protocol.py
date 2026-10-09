@@ -165,16 +165,15 @@ class ClaimTests(unittest.TestCase):
         # The claim sits inside the structured hard schema, not in a second one.
         self.assertIn('"change":"...",' + SM.CLAIM_FIELD, host.prompt)
 
-    def test_sampled_requires_structured_editing_and_no_train_calibration(self):
+    def test_sampled_requires_structured_editing(self):
         def options(**overrides):
             return {**SM.DEFAULTS, 'acceptance_mode': 'sampled',
-                    'skill_edit_mode': 'structured', 'reviewer_update_mode': 'none',
+                    'skill_edit_mode': 'structured',
                     **overrides}
 
         SM.validate_options(options())
-        SM.validate_options(options(acceptance_mode='predicted', skill_edit_mode='rewrite',
-                                    reviewer_update_mode='rules'))
-        for bad in ({'skill_edit_mode': 'rewrite'}, {'reviewer_update_mode': 'rules'},
+        SM.validate_options(options(acceptance_mode='predicted', skill_edit_mode='rewrite'))
+        for bad in ({'skill_edit_mode': 'rewrite'},
                     {'acceptance_sample_size': 1}, {'claim_verification': 'maybe'}):
             with self.subTest(**bad), self.assertRaises(InvalidInput):
                 SM.validate_options(options(**bad))
@@ -485,10 +484,10 @@ class SampledBatchJournalTests(unittest.TestCase):
             SimpleNamespace(), self.routes, reviewer, StubExecutor(improvement),
             sample_size=sample_size, confidence=0.9, verifier=verifier)
         runner = UP.SkillPatchRunner(
-            SkillEditor(self.planner, skill_edit_mode='structured'), None,
+            SkillEditor(self.planner, skill_edit_mode='structured'),
             self.root / 'l2_proposals', acceptance_mode='sampled',
             sampled_validator=validator, single_candidate=True)
-        return runner.run(self.base, [fake_experience()], 1, l2_review_workers=1)
+        return runner.run(self.base, [fake_experience()], 1)
 
     def test_a_measured_improvement_is_accepted_and_the_journal_replays(self):
         result = self.journal()
@@ -498,7 +497,6 @@ class SampledBatchJournalTests(unittest.TestCase):
         acceptance = result.record['acceptance']
         self.assertEqual(acceptance['mode'], 'sampled')
         self.assertGreater(acceptance['executions'], 0)
-        self.assertEqual(acceptance['jev_requests'], 0)
         claim = result.record['hypotheses'][0]['claim']
         self.assertEqual(claim['claim_id'], self.claim.claim_id)
         self.assertEqual(result.record['proposals'][0]['claim'], claim)
@@ -993,7 +991,6 @@ class SampledCampaignTests(unittest.TestCase):
                             ('--reviewer-memory-mode', 'cases')):
             self.assertEqual(args[args.index(flag) + 1], value, flag)
         self.assertIn('--l2-verifier-model', args)
-        self.assertNotIn('--predicted-review-scope', args)
 
     def test_a_tampered_manifest_is_rejected_before_any_stage(self):
         self.prepare()

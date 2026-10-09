@@ -1,6 +1,6 @@
 # L2 提案、验收与审计
 
-本文描述当前 `serial-card-id-review-v6-relative-outcomes` 实现。L2 只消费当前 Evolve round 的 train 经验卡；test task 永不进入 L2，val 只在明确配置为验收面板时使用。
+本文描述当前 L2 实现。L2 只消费当前 Evolve round 的 train 经验卡；test task 永不进入 L2，val 只在明确配置为验收面板时使用。
 
 ## 提案生成
 
@@ -13,7 +13,7 @@
 
 ## 验收模式
 
-### predicted + val（默认）
+### predicted（默认）
 
 `PredictedSkillScorer` 使用 selector 冻结的 `routes/val/` 分组。对当前 head 与每个候选，在同一组 val task 上逐题请求 `l2_reviewer` 模型。prompt 只包含 task 和 Skill，要求判断一次 autonomous attempt 的成功概率；不提供经验卡、轨迹、答案，也不假设 rejected answer 可以重试。
 
@@ -26,13 +26,9 @@ Reviewer 的最终输出由 JSON Schema 约束为三个字段：`probability_tru
 字面量，`extract_json()` 会提取完整对象；不合格的输出按 `reviewer.predicted_val` 策略重新采样（最多 32 次，
 可用 `EXPE_REVIEWER_ATTEMPTS` 覆盖），用尽后该 task 记为可重试失败并保留错误工件。
 
-### predicted + train_cards
+### empirical
 
-这是兼容的卡片路径。每次 Reviewer 读取一张 train 经验卡、当前 Skill 和全部匿名候选；它为每个候选输出 `old_outcome` 与 `new_outcome`。程序推导：failure→success 为 improve，success→failure 为 regress，两个已知结果相同为 unchanged，其余为 unknown。Reviewer 预测不是实测成功率。
-
-### empirical / jev
-
-两者也使用冻结 `routes/val/` 和相同 paired task IDs。`empirical` 启动真实 executor，`jev` 调用 JEV 服务。每个候选都和旧 Skill 在相同 task panel 上比较，只有严格提高才接受。
+`empirical` 使用冻结 `routes/val/` 和相同 paired task IDs，启动真实 executor。每个候选都和旧 Skill 在相同 task panel 上比较实测成功率，只有严格提高才接受；它只看 val 的配对实测，不做逐卡 review。
 
 ### sampled
 
@@ -42,21 +38,21 @@ Reviewer 的最终输出由 JSON Schema 约束为三个字段：`probability_tru
 
 `l2_batches/<batch-id>.json` 至少记录：
 
-- `predicted_review_scope`、`acceptance.mode`、`acceptance.scope`
+- `acceptance.mode`
 - `panel`、`task_ids`、`protocol_hash`
-- 每个候选的 `candidate_id`、`ValidationResult` 或逐卡判断
+- 每个候选的 `candidate_id` 与 `ValidationResult`
 - `predicted_requests`、`executions`、选择理由和最终 candidate
 - sampled 批次另记录每个候选的 `claim_id`、`executions`、`reviewer_requests`，以及 `sample_size`、`confidence`、`planner_memory`、`reviewer_memory_version`
 
-`summary.json` 区分 `reviewed_candidates`（train-card review）与 `predicted_val_candidates`；不能把 predicted approval 报成实测提升。`predicted_val_candidates` 统计所有 `acceptance.scope == "val"` 的候选，因此也包含 sampled 候选；sampled 的实测数字见 `val_executions` 与 `reviewer_metrics`。
+`summary.json` 的 `predicted_val_candidates` 统计 predicted 与 sampled 的候选，`empirically_validated` 标明实测验收；不能把 predicted approval 报成实测提升。sampled 的实测数字见 `val_executions` 与 `reviewer_metrics`。
 
 ## 离线审计
 
 `skillexpand.l2.audit` 不发模型请求，也不执行 benchmark：
 
 1. 校验 round 的 train 卡覆盖、checkpoint、Skill provenance 和 card hash；
-2. 读取已保存的 proposal/review/prediction，重放候选解析和选择；
-3. 对 val predicted 检查 scope、冻结 panel、候选覆盖、paired task IDs、`executions=0`；
+2. 读取已保存的 proposal 与验收记录，重放候选解析和选择；
+3. 对 predicted 检查冻结 panel、候选覆盖、paired task IDs、`executions=0`；
 4. 校验 Skill 版本链、batch 顺序、summary 和最终提交一致。
 
 审计通过后才能把 round 数字用于后续分析。审计只验证记录和程序不变量，不证明 LLM 的自然语言因果判断正确。

@@ -1,8 +1,6 @@
 # 实验计划：Planner–Reviewer 协同进化（第一版）
 
-本文件是当前实验的设计与验收标准。它取代
-[EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md](EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)（已 deprecated）。
-本文不声称已有 benchmark 结果；所有数字都必须来自固定 test 集上的独立评测。
+本文件是当前实验的设计与验收标准。本文不声称已有 benchmark 结果；所有数字都必须来自固定 test 集上的独立评测。
 
 ## 1. 科研问题与假设
 
@@ -92,9 +90,7 @@ ALFWorld 的动作序列都难以用程序可靠比较，硬做会引入大量�
 声明兑现（触发 k/N，N 为抽检题数；符合声明 m/k，分母为触发数）。"触发"指判定者认定规则引起了差异，
 `no_difference` 与 `unrelated` 不计入；判定者关闭时不报告这两项。
 
-**与旧校准的关系**：sampled 协议下 `reviewer_update_mode` 默认且只能为 `none`（即使关闭 Reviewer 记忆
-也一样），不启用旧的 train-panel 校准，Reviewer 的学习信号只有本节的案例记忆。注意其它协议下该参数
-默认仍为 `rules`。
+Reviewer 的学习信号只有本节的案例记忆；没有 train-panel 校准。
 
 ## 5. 预注册指标
 
@@ -117,12 +113,12 @@ ALFWorld 的动作序列都难以用程序可靠比较，硬做会引入大量�
 
 | 条件 | 候选 | 验收 | 声明核实 | Reviewer 记忆 | Planner 记忆 |
 |---|---:|---|---|---|---|
-| **A0** 历史参照 | 1 | `predicted` + `reviewer_update_mode=rules`（旧 C3，绝对概率） | — | — | — |
+| **A0** 历史参照 | 1 | `predicted`（val 上两侧独立的绝对概率） | — | — | — |
 | **A1** PPI | 1 | `sampled` | off | off | off |
 | **A2** +Reviewer 记忆 | 1 | `sampled` | on | on | off |
 | **A3** 完整方案 | 1 | `sampled` | on | on | on |
 | **A4** 无声明核实 | 1 | `sampled` | **off** | on | on |
-| **A5** 实测验收 | 1 | `empirical`（全量 panel 实测，无抽样上限）+ `reviewer_update_mode=none` | — | — | — |
+| **A5** 实测验收 | 1 | `empirical`（全量 panel 实测，无抽样上限） | — | — | — |
 
 - 主比较 **A3 vs A2**（Planner 记忆的价值），**A2 vs A1**（Reviewer 记忆的价值），
   **A1 vs A0**（配对预测 + PPI 的价值），**A4 vs A3**（可核实声明的价值）。
@@ -130,7 +126,6 @@ ALFWorld 的动作序列都难以用程序可靠比较，硬做会引入大量�
   那么"用预测代替执行"的动机不成立，必须如实报告。两边的 `acceptance.executions` 口径不同：
   empirical 只计未命中缓存的 episode；sampled 固定计"两臂 × 抽样题数"，含缓存复用的旧臂。成本比较
   须统一口径（建议都用未命中缓存的 episode 数，从各自的 usage/score 缓存统计）。
-- A0 与 A5 必须显式写出 `reviewer_update_mode`：非 sampled 协议下它默认为 `rules`，会额外在 train 上执行。
 - 每个条件使用新的 run 目录。campaign manifest 冻结 commit、模型与 role 映射、split、candidate count = 1、
   抽样上限、置信水平、记忆模式与判定者开关；val route 冻结在 run 目录的 `routes/val/`；prompt 版本体现在
   源码指纹与 journal 的 `protocol_hash` 中。
@@ -189,8 +184,6 @@ ALFWorld 的动作序列都难以用程序可靠比较，硬做会引入大量�
 
 ## 10. 与旧协议的关系
 
-旧协议的终止点：`docs/EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md` 描述的 C0/C2/C3 条件（train 反馈、
-模板规则、双侧绝对概率）已 deprecated。代码中对应的 `acceptance_mode=predicted` 与
-`reviewer_update_mode=rules` 路径保留为 A0 历史参照，不参与新协议的主比较。注意 `rules` 仍是非 sampled
-协议的默认值，不显式指定就会启用。
+旧的 Reviewer 校准（train 反馈、模板规则）与逐卡 Reviewer、JEV 验收都已从代码中删除，可从 git 历史恢复；
+`acceptance_mode=predicted` 保留为 A0 历史参照，不参与新协议的主比较。
 新协议使用独立的模块与协议版本号；新旧 run 互不兼容，也不复用。

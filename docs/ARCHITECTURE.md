@@ -7,7 +7,7 @@
 | Split | 作用 | 是否可进入 L1/L2 | 是否用于最终报告 |
 |---|---|---:|---:|
 | `train` | 冷启动经验卡、family、初始 Skill，以及每轮 Skill-aware L1 | 是 | 否 |
-| `val` | predicted/empirical/JEV/sampled 的候选验收面板（sampled 另在其中抽检执行） | 仅验收时读取 | 否，结果会被选择过程污染 |
+| `val` | predicted/empirical/sampled 的候选验收面板（sampled 另在其中抽检执行） | 仅验收时读取 | 否，结果会被选择过程污染 |
 | `test` | 独立路由和单次真实评测 | 否 | 是 |
 
 CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写入 `test/<library-hash>/`。
@@ -36,21 +36,17 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 
 ## 4. L2 acceptance
 
-`EvolutionConfig.acceptance_mode` 支持 `predicted`、`empirical`、`jev`、`sampled`。
+`EvolutionConfig.acceptance_mode` 支持 `predicted`、`empirical`、`sampled`。
 
-### predicted + val（默认）
+### predicted（默认）
 
 `PredictedSkillScorer` 使用冻结的 val route。对同一 Skill family 的旧 Skill 和每个候选 Skill，逐 task 请求独立的 `l2_reviewer` 模型。prompt 只包含 task 与 Skill，要求预测“一次自主尝试是否成功”，不提供经验卡、执行轨迹、答案或重试假设。程序缓存每个 `(panel, task, Skill body, protocol)` 结果，并以候选平均 `probability_true` 严格高于旧 Skill 为接受条件。
 
 这条路径不执行 benchmark 环境，`acceptance.executions` 必须为 0；LLM 请求数记录为 `predicted_requests`。
 
-### predicted + train_cards
+### empirical
 
-这是兼容路径。`CardReviewer` 每次只读取一张 train 经验卡、当前 Skill 和匿名候选。reviewer 输出每个候选的 `old_outcome` 与 `new_outcome`，程序推导相对 effect 并聚合选择。它是预测性验收，不是实测成功率。
-
-### empirical / jev
-
-两者使用同一套冻结 val route 和 paired task IDs。`empirical` 运行真实 executor；`jev` 调用 JEV endpoint。每个候选都与当前 head 在同一 task panel 上比较，严格提高才接受。
+`empirical` 使用同一套冻结 val route 和 paired task IDs，但运行真实 executor：每个候选都与当前 head 在同一 task panel 上比较实测成功率，严格提高才接受。它只看 val 的配对实测，不做任何逐卡 review；`acceptance.executions` 记录执行的 episode 数。
 
 ### sampled（协同进化协议）
 
@@ -77,8 +73,6 @@ CLI 使用 `--phase test` 执行独立评测；它读取 `test` split，并写�
 5. **判定者**：两条轨迹有没有差异、差异在哪里，完全交给 `TrajectoryVerifier` 判断，程序不比较动作序列（自由文本搜索词与家居动作序列都难以用程序可靠比较）。判定者对每道抽样题调用一次，读取两臂的逐步记录（执行器输出 + 环境观察，`claim_check.trajectory_view`），最后一步的观察被去掉，因为它就是成败反馈（如 `Answer is CORRECT`）；其余内容完整传入、不截断——触发条件常常写在观察里（搜索返回的文档、当前可执行动作列表），无标注的截断会让判定者把半页内容当成全部。输出五类之一（`no_difference` / `claim_confirmed` / `claim_not_confirmed` / `unrelated` / `indeterminate`）、首个不同的步骤与理由。`--claim-verification off` 关闭判定者。
 6. **两份记忆**（`l2/memory.py`，只由**当前轮之前**的账本派生）：Planner 得到改动层聚合——按节/操作汇总的有效/无效/证据不足计数、预测与实测的均值，以及（判定者开启时）"触发 k/N（N 为抽检题数）、符合声明 m/k（分母为触发数）"，另逐条列出最近 8 个提案；其渲染不读取任何 val 题目。注意"触发"只算 `claim_confirmed`/`claim_not_confirmed`：轨迹有差异不等于规则触发（`unrelated` 是执行器漂移）。Reviewer 得到检索式案例——同节、同操作，高估、低估与正确各优先取一例，每题最多 3 例，排除当前改动与当前题。
 
-sampled 协议**不使用**旧的 train-panel Reviewer 校准：`reviewer_update_mode` 在该协议下默认且只能为 `none`（即使关闭 Reviewer 记忆也一样），否则两套学习信号会同时作用于同一个 Reviewer。
-
 每个 batch journal 记录当轮的 `planner_memory` 文本与 `reviewer_memory_version`（Reviewer 记忆覆盖的更早候选数）；审计逐字符重算 Planner 记忆、核对 Reviewer 记忆覆盖范围。round summary 的 `reviewer_metrics` 只覆盖本轮候选，给出 `sampled_pairs`、`candidates`、逐题 Δ-Brier、零基线 Brier、skill score、`accepted` 与 `false_accepts`（被接受但抽检实测无效的候选数）；审计要求它可由 journal 重算。该指标只报告点值，不计算置信区间。
 
 ## 5. test 评测
@@ -89,7 +83,7 @@ CLI test 阶段和 `scripts/evaluate_snapshot.py`（评测第 N 轮结束时的�
 
 ## 6. 并发与持久化
 
-冷启动 train L1、family 请求、每轮 train L1 和 val/test task evaluation 可并发。Planner、Editor、batch commit 和 round transition 保持串行；train-card Reviewer、predicted-val judge，以及 sampled 的配对 Δ Reviewer、抽检执行与判定者，都使用受限 `l2_review_workers` pool。每个请求和每个 task 都先落盘再汇总，目录锁防止重复 writer，恢复依赖 manifest、job lock 和逐单元缓存。
+冷启动 train L1、family 请求、每轮 train L1 和 val/test task evaluation 可并发。Planner、Editor、batch commit 和 round transition 保持串行；predicted-val judge，以及 sampled 的配对 Δ Reviewer、抽检执行与判定者，都使用受限 `l2_review_workers` pool。每个请求和每个 task 都先落盘再汇总，目录锁防止重复 writer，恢复依赖 manifest、job lock 和逐单元缓存。
 
 ## 7. 关键工件
 
@@ -97,28 +91,15 @@ CLI test 阶段和 `scripts/evaluate_snapshot.py`（评测第 N 轮结束时的�
 - `discovery/results/<task>.json`：冷启动 train 经验卡和 checkpoint。
 - `evolution/round-N/cards/`：本轮 train 卡；各轮相互隔离。
 - `l2_proposals/`：hypothesis、candidate 和原始 reviewer/judge 响应。
-- `l2_batches/`：候选别名、acceptance scope、panel、task IDs、预测/实测结果和提交事务。
+- `l2_batches/`：候选别名、acceptance 记录、panel、task IDs、预测/实测结果和提交事务。
 - `routes/val/`、`routes/test/`：冻结的 selector 路由。
 - `val/predicted_scores.jsonl`：predicted-val 逐 task 缓存。
 - `val/delta_predictions.jsonl`、`val/sampled_scores.jsonl`、`val/verifications.jsonl`：sampled 协议的预测、实测与判定缓存。
 - `skills.jsonl`：Skill 版本链；`test/<library-hash>/`：独立 test 评测。
 
-## 8. Reviewer 协同演化
+## 8. 单候选协议
 
-> `reviewer_feedback.jsonl` / `reviewer_updates.jsonl` 描述的 train-panel 校准属于旧协议，
-> 已由 [EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md](EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)（deprecated）
-> 取代；新的协同进化协议见第 4 节 `sampled` 与
-> [EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md](EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)。
-> 本条保留为 `predicted` + `rules` 组合的说明，该组合不再参与主比较。注意 `rules` 仍是 predicted/empirical/jev
-> 不传 `--reviewer-update-mode` 时的默认值；主比较的条件需显式指定 `none` 或使用 `sampled`。
-
-`--single-candidate` 把每个 batch 限制为一个候选。`--reviewer-update-mode` 为 `summary` 或 `rules` 时，每轮 L2 结束后 `SerialEvolutionLoop._collect_reviewer_feedback` 在固定的 train family panel（`--reviewer-feedback-size` 截取前 N 题）上，用同一路由各执行一次旧 head 和本轮候选，把预测与真实 paired outcome 写入 `reviewer_feedback.jsonl`。`l2/reviewer_coevolution.py` 据此计算 paired precision、false-positive regression、Brier、ECE，生成版本化的 `reviewer_updates.jsonl`。
-
-- `none`：不收集反馈；
-- `summary`：反馈和 update 只用于审计，Reviewer prompt 保持初始版本；
-- `rules`：Reviewer LLM 把带 feedback ID 的统计压缩成有限规则，作为 calibration block 进入下一轮 predicted-val Reviewer 的 prompt，并计入其 protocol hash。这是 predicted/empirical/jev 的默认值；sampled 下默认且只能为 `none`。
-
-反馈只来自 train；val 只用于当轮验收，test 只用于报告。`audit_round` 校验反馈只引用冻结 train split 中、属于同一 family 的 task，feedback ID 不重复，update 只引用已存在的 feedback，且 version/parent 版本链连续。
+`--single-candidate` 把每个 batch 限制为一个候选（要求 `--candidate-count 1`），使"提出一个修改 → 验收 → 接受或拒绝"成为可归因的单一因果链。sampled 协议的主比较使用它。
 
 ## 9. 模型角色
 
@@ -133,8 +114,8 @@ reliability                 异常分类与处置、重试/修复策略、单元
 benchmarks                  SearchQA / ALFWorld 环境与任务表
 runtime                     ReAct 执行器、LLM 客户端、JSON 输出解析、通用任务池、prompt 注册表
 l1                          修复循环、经验卡、family 发现、冷启动、冷启动工件导入、L1 worker
-evaluation                  路由、val/test 打分、JEV、配对 Δ Reviewer、PPI、判定者、sampled 单候选验证、快照评测、fixed-Skill worker
-l2                          Planner/Editor/Reviewer、batch 事务、多轮闭环、审计、Reviewer 协同演化、sampled 协议与两份记忆
+evaluation                  路由、val/test 打分、配对 Δ Reviewer、PPI、判定者、sampled 单候选验证、快照评测、fixed-Skill worker
+l2                          Planner/Editor/Reviewer、batch 事务、多轮闭环、审计、sampled 协议与两份记忆
 campaign, cli               冻结 campaign 启动器；单次运行 CLI
 ```
 

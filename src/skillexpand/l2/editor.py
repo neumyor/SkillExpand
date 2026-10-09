@@ -65,6 +65,25 @@ When updating a skill:
 """
 
 
+def card_payload(experiences):
+    result = []
+    for experience in experiences:
+        card = projection(experience.experience_card)
+        result.append({
+            "card_id": experience.experience_id,
+            "task": card['task']['text'],
+            "execution": card['execution'],
+            "claims": card['claims'],
+            "evidence": [{'id': row['id'], 'path': f'/evidence/{index}',
+                          'value': {'action': row['action'], 'observation': row['observation'],
+                                    'observation_truncated': row['observation_truncated'],
+                                    'phase': row['phase'], 'effect': row['effect'],
+                                    'method': row['method']}}
+                         for index, row in enumerate(card['evidence'])],
+        })
+    return result
+
+
 def accepts(base_skill, experience):
     return experience.split == S.SPLIT_TRAIN and (
         (experience.selected_skill_id == base_skill.skill_id)
@@ -236,8 +255,6 @@ class SkillEditor:
             raise ValueError("Cards must belong to this train Skill")
         prompt, kind, stats = self.build_prompt(base_skill, base_skill.body, experiences, ())
         if hypothesis is not None:
-            from skillexpand.l2.card_review import card_payload
-
             references = {
                 (ref["card_id"], ref["evidence_id"]) for ref in hypothesis["evidence"]
             }
@@ -375,7 +392,6 @@ class SkillEditor:
 
     def plan(self, base_skill, experiences, candidate_count, correction=None,
              batch_patterns=(), claim_required=False, planner_memory=""):
-        from skillexpand.l2.card_review import card_payload
         from skillexpand.l2 import sampled as SM
 
         system = (

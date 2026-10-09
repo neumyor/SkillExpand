@@ -21,7 +21,7 @@ SearchQA 使用 Search、Lookup、Finish；自主预算耗尽后可以使用 ben
 
 卡片由程序保存 task、split、Skill provenance、尝试结果、动作/观察证据、claim、claim 状态和审计路径。LLM 只能从实际证据中提出 task-local claim；程序检查 evidence ID、phase、effect、method 和 success/failure 约束。失败、重试和 supervised repair 都保留，后续尝试不会自动变成可复用规则。
 
-L2 的 train-card Reviewer 读取卡片的 `projection()`：它保留 task、execution、claims 和带 evidence ID 的证据，同时隐藏未请求的运行目录细节。predicted-val Reviewer 不读取 projection，只读取 task 文本和 Skill。
+L2 的 Planner 读取卡片的 `projection()`：它保留 task、execution、claims 和带 evidence ID 的证据，同时隐藏未请求的运行目录细节。predicted-val Reviewer 不读取 projection，只读取 task 文本和 Skill。
 
 ## Skill 角色配置
 

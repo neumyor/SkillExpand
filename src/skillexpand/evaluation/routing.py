@@ -79,7 +79,7 @@ class FrozenRoutes:
     def load_existing(cls, cfg, plan, library, root, split):
         """Load a completed frozen route without revalidating its provider hash.
 
-        This is intentionally read-only.  It is used for post-hoc calibration when
+        This is intentionally read-only.  It is used for post-hoc evaluation when
         the selector service version has changed since the route was measured; the
         task-to-Skill assignment is the frozen input we want to reuse, while a new
         selector call would silently change the evaluation panel.

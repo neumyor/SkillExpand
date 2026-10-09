@@ -66,22 +66,17 @@ _REVIEWER_BACKOFF = (1, 2, 4, 8, 16, 30)
 REPAIR: Dict[str, RepairPolicy] = {p.name: p for p in (
     # Independent per-task success prediction on the frozen val panel.
     RepairPolicy('reviewer.predicted_val', 32, _REVIEWER_BACKOFF),
-    # Compression of program-computed calibration statistics into rules.
-    RepairPolicy('reviewer.calibration_rules', 32, _REVIEWER_BACKOFF),
     # Paired per-task delta prediction for one rule change on the val panel.
     RepairPolicy('reviewer.delta_review', 32, _REVIEWER_BACKOFF),
     # Third-party attribution of a trajectory difference to one rule.
     RepairPolicy('verifier.claim', 8, _REVIEWER_BACKOFF),
-    # L2 Planner hypotheses and per-card Reviewer judgments.
+    # L2 Planner hypotheses.
     RepairPolicy('planner.hypotheses', 2),
-    RepairPolicy('reviewer.card', 2),
     # Cold-start family discovery and initial Skill synthesis.
     RepairPolicy('discovery.tags', 3, (1, 2)),
     RepairPolicy('discovery.proposals', 3, (1, 2)),
     RepairPolicy('discovery.assignment', 3, (1, 2)),
     RepairPolicy('discovery.initial_skill', 3, (1, 2)),
-    # Campaign preflight probe of the card Reviewer's output format.
-    RepairPolicy('campaign.reviewer_probe', 3),
     # Protocol outcomes: an invalid response is recorded, not retried.
     RepairPolicy('editor.candidate', 1, exhausted=EXHAUSTED_DEGRADE),
     RepairPolicy('patterns.batch', 1, exhausted=EXHAUSTED_DEGRADE),
@@ -91,7 +86,6 @@ REPAIR: Dict[str, RepairPolicy] = {p.name: p for p in (
 #: Environment overrides of repair budgets, for experiments that need a different one.
 ATTEMPT_OVERRIDES = {
     'reviewer.predicted_val': 'EXPE_REVIEWER_ATTEMPTS',
-    'reviewer.calibration_rules': 'EXPE_REVIEWER_ATTEMPTS',
     'reviewer.delta_review': 'EXPE_REVIEWER_ATTEMPTS',
 }
 

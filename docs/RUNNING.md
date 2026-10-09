@@ -33,20 +33,10 @@ SearchQA 需要 `--task-file`；ALFWorld 正式执行必须使用 `.env` 中的 
   --benchmark searchqa \
   --run-dir runs/searchqa-example \
   --phase evolve --evolve-rounds 2 --resume \
-  --acceptance-mode predicted \
-  --predicted-review-scope val
+  --acceptance-mode predicted
 ```
 
-切换回基于 train 经验卡的 predicted Reviewer：
-
-```bash
-.venv/bin/python -m skillexpand \
-  --benchmark searchqa --run-dir runs/searchqa-example \
-  --phase evolve --evolve-rounds 2 --resume \
-  --acceptance-mode predicted --predicted-review-scope train_cards
-```
-
-`--acceptance-mode empirical` 使用 val 真实执行；`--acceptance-mode jev` 使用 val 上的 JEV 预测。`--acceptance-mode sampled` 使用配对增量预测，并用随机 val 抽检修正（见 [协同进化实验计划](EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)）。验收协议冻结在运行目录中，因此 sampled 需新建运行目录并导入已完成的冷启动：
+`--acceptance-mode empirical` 使用 val 真实执行。`--acceptance-mode sampled` 使用配对增量预测，并用随机 val 抽检修正（见 [协同进化实验计划](EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)）。验收协议冻结在运行目录中，因此 sampled 需新建运行目录并导入已完成的冷启动：
 
 ```bash
 .venv/bin/python -m skillexpand \
@@ -60,23 +50,12 @@ SearchQA 需要 `--task-file`；ALFWorld 正式执行必须使用 `.env` 中的 
   --planner-memory-mode aggregate --reviewer-memory-mode cases
 ```
 
-`--claim-verification off`、`--planner-memory-mode off`、`--reviewer-memory-mode off` 分别关闭判定者、Planner 记忆与 Reviewer 记忆，用于单因素消融。sampled 协议下 `--reviewer-update-mode` 默认且只能为 `none`（即使关闭 Reviewer 记忆也一样）；其它协议默认仍为 `rules`。`--acceptance-sample-size` 是按 family 自适应的上限，小于 2 时启动即被拒绝：panel 更小的 family 全量执行；panel 只有 1 题时无法给出置信区间，候选一律拒绝并记为 `insufficient_sample`；panel 为空时整批 hold。
+`--claim-verification off`、`--planner-memory-mode off`、`--reviewer-memory-mode off` 分别关闭判定者、Planner 记忆与 Reviewer 记忆，用于单因素消融。`--acceptance-sample-size` 是按 family 自适应的上限，小于 2 时启动即被拒绝：panel 更小的 family 全量执行；panel 只有 1 题时无法给出置信区间，候选一律拒绝并记为 `insufficient_sample`；panel 为空时整批 hold。
 
 structured Skill 编辑可在冷启动和 Evolve 中保持一致地启用：
 
 ```bash
 --skill-edit-mode structured
-```
-
-旧协议的 Reviewer 校准（deprecated；协同进化的当前实现见上面的 `sampled`）。同样需新建运行目录并导入冷启动：
-
-```bash
-.venv/bin/python -m skillexpand \
-  --benchmark searchqa --cold-start-dir runs/searchqa-example \
-  --run-dir runs/searchqa-c3 \
-  --phase evolve --evolve-rounds 2 --resume \
-  --single-candidate --candidate-count 1 \
-  --reviewer-update-mode rules --reviewer-feedback-size 20
 ```
 
 各角色模型可单独指定，例如 `--l2-reviewer-model <model>`；其余角色见 README。
@@ -168,6 +147,6 @@ python <campaign>/code/run_campaign.py start --root <campaign> --mode full
 python <campaign>/code/run_campaign.py test --root <campaign> --benchmark searchqa
 ```
 
-默认 `predicted_review_scope` 为 `val`，也可以在 prepare 时显式传 `train_cards`。单候选、Reviewer 更新模式（未指定时 sampled 为 `none`、其它为 `rules`）以及 sampled 的五个抽样与记忆开关都在 prepare 时冻结并校验。`stage_args()` 把冻结参数传给每个 cold-start/evolve 阶段（`--predicted-review-scope` 只在 predicted 下传，sampled 开关只在 sampled 下传），避免恢复时意外切换验收口径。sampled campaign 的 `independent-check` 还会在 4 道 preflight 题上真实跑一次 sampled 验收（配对 Δ 预测、两臂执行、判定者、PPI 下界），并用离线审计重放，弥补 preflight 只有 1 道 val 题、跑不到接受路径的缺口。`check` 以 `code/` 与 `inputs/` 的摘要为准，源码仓库的 Git 漂移只在输出的 `source_drift` 中报告。
+单候选以及 sampled 的五个抽样与记忆开关都在 prepare 时冻结并校验。`stage_args()` 把冻结参数传给每个 cold-start/evolve 阶段（sampled 开关只在 sampled 下传），避免恢复时意外切换验收口径。sampled campaign 的 `independent-check` 还会在 4 道 preflight 题上真实跑一次 sampled 验收（配对 Δ 预测、两臂执行、判定者、PPI 下界），并用离线审计重放，弥补 preflight 只有 1 道 val 题、跑不到接受路径的缺口。`check` 以 `code/` 与 `inputs/` 的摘要为准，源码仓库的 Git 漂移只在输出的 `source_drift` 中报告。
 
 长任务应通过独立 session 启动，并使用 pidfile、job lock 和产物文件判断进度；不要用模糊进程名判断存活。启动前先做 1–2 个 task 的全链路 smoke、真实 LLM 健康请求和离线审计。

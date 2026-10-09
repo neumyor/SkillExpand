@@ -700,10 +700,10 @@ class ValidationResult:
     reasons: Tuple[str, ...] = ()
     #: Per-task success rates under each arm, as ``(task_id, base, candidate)``.
     pairs: Tuple[Tuple[int, float, float], ...] = ()
-    #: Raw reviewer probabilities retained for post-hoc calibration.  The existing
-    #: ``pairs`` field intentionally stays compact and boolean-like; this field keeps
-    #: the per-task probabilities needed to compare a prediction with later train
-    #: feedback without calling the reviewer again.
+    #: Raw per-task reviewer probabilities and reasons.  The ``pairs`` field
+    #: intentionally stays compact and boolean-like; this field keeps the
+    #: unit-level evidence so the analysis can be redone without calling the
+    #: reviewer again.
     prediction_rows: Tuple[Dict[str, Any], ...] = ()
     returned_to_editor: bool = False
 

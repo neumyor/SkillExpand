@@ -32,7 +32,7 @@ def test_cli_and_packaged_configs_work_outside_checkout(tmp_path):
 def test_fingerprint_covers_environment_prompts_and_all_stages():
     signature = code_signature()
     assert {'benchmarks/alfworld.py', 'benchmarks/searchqa.py', 'l1/runner.py',
-            'l2/card_review.py', 'runtime/prompts/alfworld.py',
+            'l2/update.py', 'runtime/prompts/alfworld.py',
             'runtime/models/llm.py', 'evaluation/validation.py'} <= signature.keys()
     assert signature == code_signature()
 

@@ -119,7 +119,6 @@ def build_plan(default_model, strong_model, include_optional=False):
             "splits": {"searchqa": [400, 200, 1400], "alfworld": [39, 18, 134]},
             "evolve_rounds": 2,
             "acceptance_mode": "predicted",
-            "predicted_review_scope": "val",
             "skill_edit_mode": "rewrite",
             "batch_size": 50,
             "candidate_count": 3,
@@ -159,7 +158,6 @@ def prepare_commands(plan, root, inputs):
             "--root", str(root / condition["name"]), "--inputs", str(inputs),
             "--skill-edit-mode", plan["protocol"]["skill_edit_mode"],
             "--acceptance-mode", plan["protocol"]["acceptance_mode"],
-            "--predicted-review-scope", plan["protocol"]["predicted_review_scope"],
         ]
         for role in ROLES:
             command.extend([ROLE_FLAGS[role], condition["models"][role]])
@@ -280,7 +278,7 @@ def test_complete(condition_root):
 def protocol_matches(plan, manifest):
     """Check the campaign fields that must be identical across conditions."""
     protocol = plan["protocol"]
-    shared = ("evolve_rounds", "acceptance_mode", "predicted_review_scope", "skill_edit_mode",
+    shared = ("evolve_rounds", "acceptance_mode", "skill_edit_mode",
               "batch_size", "candidate_count", "autonomous_attempts", "supervised_attempts",
               "request_interval_seconds", "concurrency")
     if not manifest.get("llm_base_url") or any(manifest.get(k) != protocol[k] for k in shared):

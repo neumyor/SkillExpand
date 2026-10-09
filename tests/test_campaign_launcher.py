@@ -17,8 +17,7 @@ def campaign(tmp_path, monkeypatch):
     manifest = {'repo': str(tmp_path), 'python': 'python', 'concurrency': C.CONCURRENCY,
                 'autonomous_attempts': 4, 'supervised_attempts': 1, 'batch_size': 50,
                 'candidate_count': 3, 'single_candidate': False, 'skill_edit_mode': 'rewrite',
-                'acceptance_mode': 'predicted', 'predicted_review_scope': 'val',
-                'reviewer_update_mode': 'none', 'reviewer_feedback_size': 0,
+                'acceptance_mode': 'predicted',
                 'models': {role: 'm' for role in C.ROLES}}
     C.save(tmp_path / 'manifest.json', manifest)
     monkeypatch.setattr(C, 'verify', lambda root: manifest)
@@ -79,7 +78,6 @@ def test_explicit_stage_arguments_and_concurrency(campaign):
             if stage.startswith('evolve-'):
                 assert args[args.index('--evolve-rounds') + 1] == stage[-1]
             assert args[args.index('--task-file') + 1].endswith(f'{benchmark}-tasks.json')
-            assert args[args.index('--predicted-review-scope') + 1] == 'val'
 
 
 def test_full_start_requires_matching_preflight(campaign):

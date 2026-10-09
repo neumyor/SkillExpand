@@ -1,4 +1,4 @@
-"""Complete L1 cold start, then batch-local L2 card review, with independent test evaluation."""
+"""Complete L1 cold start, then batch-local L2 evolution, with independent test evaluation."""
 
 import argparse
 import json
@@ -57,37 +57,26 @@ def build_parser():
     )
     p.add_argument(
         "--candidate-count", type=int, default=1,
-        help="Maximum candidate bodies independently reviewed on each train-card batch",
+        help="Maximum candidate bodies proposed for each train-card batch",
     )
     p.add_argument(
         "--single-candidate", action="store_true",
-        help="Enforce the reviewer co-evolution single-candidate protocol (requires --candidate-count 1)",
-    )
-    p.add_argument(
-        "--reviewer-update-mode", choices=("none", "summary", "rules"),
-        help="Use no Reviewer calibration, program summary only, or validated calibration "
-             "rules (default: rules, or none under sampled acceptance)",
-    )
-    p.add_argument(
-        "--reviewer-feedback-size", type=int, default=0,
-        help="Fixed train feedback tasks per Skill family; 0 means all train tasks",
+        help="Enforce the single-candidate protocol (requires --candidate-count 1)",
     )
     p.add_argument("--evolve-rounds", type=int, default=1,
         help="Number of Skill-aware L1 -> L2 evolution rounds")
     p.add_argument("--skill-edit-mode", choices=("rewrite", "structured"),
         default="structured", help="Rewrite complete Skill bodies or apply one structured rule edit")
     p.add_argument("--acceptance-mode",
-        choices=("predicted", "empirical", "jev", "sampled"),
+        choices=("predicted", "empirical", "sampled"),
         default="predicted",
-        help="Accept by card review, paired execution, JEV validation, or a "
+        help="Accept by a predicted val-panel forecast, paired val execution, or a "
              "paired delta corrected by a random val sample")
-    p.add_argument("--predicted-review-scope", choices=("val", "train_cards"),
-        default="val", help="Evidence scope for predicted acceptance")
     SM.add_arguments(p)
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent train tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,
-        help="Concurrent per-card LLM reviews within each L2 batch")
+        help="Concurrent val-panel predictions or executions within each L2 batch")
     p.add_argument(
         "--test-workers",
         type=int,
@@ -98,7 +87,7 @@ def build_parser():
     p.add_argument('--cold-start-model', help='LLM used by cold-start discovery and Skill synthesis')
     p.add_argument('--l2-planner-model', help='LLM used to propose L2 hypotheses')
     p.add_argument('--l2-editor-model', help='LLM used to materialize rewrite-mode candidates')
-    p.add_argument('--l2-reviewer-model', help='LLM used by per-card L2 reviewers')
+    p.add_argument('--l2-reviewer-model', help='LLM used by the L2 reviewer')
     p.add_argument('--l2-verifier-model', help='LLM used by the claim verifier')
     p.add_argument('--selector-model', help='LLM used to route validation/test tasks')
     p.add_argument("--resume", action="store_true")
@@ -359,10 +348,7 @@ def main(argv=None):
                 l2_review_workers=args.l2_review_workers,
                 skill_edit_mode=args.skill_edit_mode,
                 acceptance_mode=args.acceptance_mode,
-                predicted_review_scope=args.predicted_review_scope,
                 single_candidate=args.single_candidate,
-                reviewer_update_mode=args.reviewer_update_mode,
-                reviewer_feedback_size=args.reviewer_feedback_size,
                 **SM.options_from(args),
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config,

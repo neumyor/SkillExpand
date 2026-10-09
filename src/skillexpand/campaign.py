@@ -27,7 +27,6 @@ from skillexpand.reliability.errors import (
     RunLocked, classify,
 )
 from skillexpand.reliability.policies import STAGE_ATTEMPTS_BY_CATEGORY, repair_policy, stage_policy
-from skillexpand.reliability.retry import call_with_repair
 from skillexpand.reliability.units import exit_now
 
 BENCHMARKS = ('searchqa', 'alfworld')
@@ -208,30 +207,19 @@ def validate_inputs(tasks, split):
 
 def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predicted', models=None,
             autonomous_attempts=4, supervised_attempts=1,
-            predicted_review_scope='val', candidate_count=1,
-            single_candidate=False, reviewer_update_mode=None,
-            reviewer_feedback_size=0, **sampled_options):
+            candidate_count=1, single_candidate=False, **sampled_options):
     if skill_edit_mode not in ('rewrite', 'structured'):
         raise InvalidInput('Unknown Skill edit mode')
-    if acceptance_mode not in ('predicted', 'empirical', 'jev', 'sampled'):
+    if acceptance_mode not in ('predicted', 'empirical', 'sampled'):
         raise InvalidInput('Unknown acceptance mode')
-    if reviewer_update_mode is None:
-        reviewer_update_mode = SM.default_reviewer_update_mode(acceptance_mode)
     unknown = set(sampled_options) - set(SM.DEFAULTS)
     if unknown:
         raise InvalidInput(f'Unknown campaign option(s): {sorted(unknown)}')
     sampled_options = {**SM.DEFAULTS, **sampled_options}
     SM.validate_options(dict(sampled_options, acceptance_mode=acceptance_mode,
-                             skill_edit_mode=skill_edit_mode,
-                             reviewer_update_mode=reviewer_update_mode))
-    if predicted_review_scope not in ('val', 'train_cards'):
-        raise InvalidInput('Unknown predicted review scope')
+                             skill_edit_mode=skill_edit_mode))
     if candidate_count < 1 or (single_candidate and candidate_count != 1):
         raise InvalidInput('single-candidate campaigns require candidate_count=1')
-    if reviewer_update_mode not in ('none', 'summary', 'rules'):
-        raise InvalidInput('Unknown reviewer update mode')
-    if reviewer_feedback_size < 0:
-        raise InvalidInput('reviewer_feedback_size must be nonnegative')
     repo = source_checkout()
     source_git = git_identity(repo)
     runtime = configured_runtime()
@@ -273,11 +261,8 @@ def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predict
         'autonomous_attempts': autonomous_attempts, 'supervised_attempts': supervised_attempts,
         'batch_size': 50, 'candidate_count': candidate_count,
         'single_candidate': single_candidate,
-        'reviewer_update_mode': reviewer_update_mode,
-        'reviewer_feedback_size': reviewer_feedback_size,
         **sampled_options,
         'skill_edit_mode': skill_edit_mode, 'acceptance_mode': acceptance_mode,
-        'predicted_review_scope': predicted_review_scope,
         'benchmarks': details,
         'request_interval_seconds': REQUEST_INTERVAL_SECONDS,
         'files': files, 'created': time.time(),
@@ -297,28 +282,22 @@ def verify(root):
     models = manifest['models']
     candidate_count = int(manifest['candidate_count'])
     single_candidate = manifest['single_candidate']
-    reviewer_update_mode = manifest['reviewer_update_mode']
-    feedback_size = int(manifest['reviewer_feedback_size'])
     if (candidate_count < 1 or not isinstance(single_candidate, bool) or
-            (single_candidate and candidate_count != 1) or
-            reviewer_update_mode not in ('none', 'summary', 'rules') or
-            feedback_size < 0):
-        raise FrozenProtocolChanged('Unexpected Reviewer coevolution protocol')
+            (single_candidate and candidate_count != 1)):
+        raise FrozenProtocolChanged('Unexpected candidate protocol')
     if set(models) != set(ROLES) or not all(models.values()):
         raise InvalidInput('Every model role must be configured')
     if (manifest['concurrency'] != CONCURRENCY or
             manifest['evolve_rounds'] != 2 or
             manifest['skill_edit_mode'] not in ('rewrite', 'structured') or
-            manifest['acceptance_mode'] not in ('predicted', 'empirical', 'jev',
-                                                'sampled') or
-            manifest['predicted_review_scope'] not in ('val', 'train_cards') or
+            manifest['acceptance_mode'] not in ('predicted', 'empirical', 'sampled') or
             int(manifest['autonomous_attempts']) < 1 or
             int(manifest['supervised_attempts']) < 0 or
             manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
         raise FrozenProtocolChanged('Unexpected campaign protocol')
     try:
         SM.validate_options({key: manifest[key] for key in (
-            *SM.DEFAULTS, 'acceptance_mode', 'skill_edit_mode', 'reviewer_update_mode')})
+            *SM.DEFAULTS, 'acceptance_mode', 'skill_edit_mode')})
     except (InvalidInput, KeyError) as exc:
         raise FrozenProtocolChanged(f'Unexpected sampled acceptance protocol: {exc}') from exc
     for key, kind in (('python', 'file'), ('overlay', 'dir'), ('alfworld_data', 'dir'),
@@ -424,13 +403,8 @@ def stage_args(root, mode, benchmark, stage):
         '--candidate-count', str(manifest['candidate_count']), '--resume']
     args += ['--skill-edit-mode', manifest['skill_edit_mode']]
     args += ['--acceptance-mode', manifest['acceptance_mode']]
-    if manifest['acceptance_mode'] == 'predicted':
-        args += ['--predicted-review-scope', manifest['predicted_review_scope']]
     if manifest['single_candidate']:
         args += ['--single-candidate']
-    args += ['--reviewer-update-mode', manifest['reviewer_update_mode']]
-    if manifest['reviewer_feedback_size']:
-        args += ['--reviewer-feedback-size', str(manifest['reviewer_feedback_size'])]
     if manifest['acceptance_mode'] == SM.MODE:
         for key in SM.DEFAULTS:
             args += ['--' + key.replace('_', '-'), str(manifest[key])]
@@ -643,19 +617,6 @@ def evidence_hashes(run):
 REPLAY_ATTEMPT = 999
 
 
-PROBE_CORRECTION = (
-    'Return exactly {"candidates":[{"id":"C1",'
-    '"evidence_ids":[],"rule_ids":[],"reason":"...",'
-    '"old_outcome":"failure","new_outcome":"unknown"}, ...]} '
-    'with C1, C2, C3 once each. The top-level keys must NOT be '
-    'C1/C2/C3. Use only supplied IDs; do not use placeholders such '
-    'as etc. Copy card.current_observed_outcome into old_outcome '
-    'when known; otherwise infer CURRENT separately or use unknown. Do not '
-    'return label or effect; the program derives the relative effect. '
-    'For a directional outcome difference provide at least one card '
-    'evidence ID and one changed rule ID.')
-
-
 #: The probe edit is generic on purpose: it must apply to any initial Skill of
 #: either benchmark, and whether it helps is not what the probe checks.
 PROBE_EDIT = {'op': 'add', 'section': 'completion_checks', 'target_id': None,
@@ -745,14 +706,12 @@ def sampled_acceptance_probe(root, benchmark, run, cfg, manifest):
 
 
 def independent_checks(root):
-    """Resume, reviewer-format and frozen-plan checks required before a full launch.
+    """Resume and frozen-plan checks (plus the sampled acceptance probe) required
+    before a full launch.
 
-    Runs inside the frozen launcher, so the reviewer probe uses this campaign's code.
+    Runs inside the frozen launcher, so the probes use this campaign's code.
     """
     from omegaconf import OmegaConf
-    from skillexpand import schema as S
-    from skillexpand.runtime import agent_factory as F
-    from skillexpand.l2 import card_review as CR
 
     manifest = verify(root)
     os.environ.update(environment(root))
@@ -768,39 +727,6 @@ def independent_checks(root):
             raise AuditFailure(f'{benchmark}: replay changed evidence or issued requests')
 
         cfg = OmegaConf.load(run / 'config.json')
-        base = S.from_dict(S.Skill, read(run / 'initial_skills.json')[0])
-        exp = S.from_dict(S.TaskExperience, read(run / 'evolution/round-2/cards/0.json'))
-        candidates = [
-            {'id': 'C1', 'body': base.body + '\nCheck the observation before acting.'},
-            {'id': 'C2', 'body': base.body + '\nKeep the final response concise.'},
-            {'id': 'C3', 'body': base.body + '\nUse the observed feedback to check progress.'},
-        ]
-        card = CR.card_payload([exp])[0]
-        host = F.build_reasoning_host(
-            cfg, root / 'preflight/reviewer-probe' / f'{benchmark}.usage.json', role='l2_reviewer')
-        reviewer = CR.CardReviewer(host)
-        probe = root / 'preflight/reviewer-probe' / f'{benchmark}-response-v2.json'
-
-        def probe_request(attempt, previous):
-            path = probe if attempt == 0 else probe.with_name(probe.stem + f'-repair-{attempt}.json')
-            if path.exists():
-                return read(path)['raw'], False
-            if previous is None:
-                raw = reviewer.review(base, candidates, card)
-                save(path, {'raw': raw})
-                return raw, True
-            correction = {'error': str(previous.error), 'instruction': PROBE_CORRECTION}
-            raw = reviewer.review(base, candidates, card, correction=correction)
-            save(path, {'raw': raw, 'correction': correction})
-            return raw, True
-
-        probed = call_with_repair(
-            repair_policy('campaign.reviewer_probe'), probe_request,
-            lambda raw: CR.parse_card_review(raw, base, candidates, card))
-        judgments, corrected = probed.value, probed.attempts > 1
-        if len(judgments) != len(candidates):
-            raise AuditFailure(f'{benchmark}: reviewer omitted a candidate')
-
         output = subprocess.check_output(
             [manifest['python'], '-m', 'skillexpand',
              *stage_args(root, 'full', benchmark, 'cold-start'), '--show-plan'],
@@ -811,11 +737,8 @@ def independent_checks(root):
         if (root / 'full' / benchmark / 'run').exists():
             raise AuditFailure(f'{benchmark}: read-only plan created a run directory')
         checks[benchmark] = {'resume_unchanged': True, 'evidence_files': len(before),
-                             'reviewer_candidates': len(judgments),
-                             'reviewer_format_correction': corrected,
                              'full_plan': plan}
-        # The sampled protocol never calls the card reviewer probed above, and
-        # the preflight split cannot reach its acceptance path; drive it here.
+        # The preflight split cannot reach the sampled acceptance path; drive it here.
         if manifest['acceptance_mode'] == 'sampled':
             checks[benchmark]['sampled_acceptance'] = sampled_acceptance_probe(
                 root, benchmark, run, cfg, manifest)
@@ -945,17 +868,12 @@ def main():
     parser.add_argument('--skill-edit-mode', choices=('rewrite', 'structured'), default='structured',
                         help='Skill editing mode frozen when preparing a campaign')
     parser.add_argument('--acceptance-mode',
-                        choices=('predicted', 'empirical', 'jev', 'sampled'),
+                        choices=('predicted', 'empirical', 'sampled'),
                         default='predicted',
                         help='Skill acceptance mode frozen when preparing a campaign')
     SM.add_arguments(parser)
-    parser.add_argument('--predicted-review-scope', choices=('val', 'train_cards'), default='val',
-                        help='Evidence scope for predicted acceptance')
     parser.add_argument('--candidate-count', type=int, default=1)
     parser.add_argument('--single-candidate', action='store_true')
-    parser.add_argument('--reviewer-update-mode', choices=('none', 'summary', 'rules'),
-                        help='Default: rules, or none under sampled acceptance')
-    parser.add_argument('--reviewer-feedback-size', type=int, default=0)
     parser.add_argument('--autonomous-attempts', type=int, default=4)
     parser.add_argument('--supervised-attempts', type=int, default=1)
     parser.add_argument('--l1-model')
@@ -975,11 +893,8 @@ def main():
         result = prepare(root, args.inputs.resolve(), args.skill_edit_mode, args.acceptance_mode,
                          models=models, autonomous_attempts=args.autonomous_attempts,
                          supervised_attempts=args.supervised_attempts,
-                         predicted_review_scope=args.predicted_review_scope,
                          candidate_count=args.candidate_count,
                          single_candidate=args.single_candidate,
-                         reviewer_update_mode=args.reviewer_update_mode,
-                         reviewer_feedback_size=args.reviewer_feedback_size,
                          **SM.options_from(args))
         print(json.dumps({'root': str(root), 'benchmarks': result['benchmarks'], 'models': result['models']}))
     elif args.action == 'check':

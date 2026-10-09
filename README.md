@@ -14,15 +14,11 @@ flowchart LR
   D --> E[每轮：train 上 Skill-aware L1]
   E --> F[L2 Planner 生成候选]
   F --> G{acceptance_mode}
-  G -->|predicted + val| H[val 上独立预测旧 Skill/候选 Skill]
-  G -->|predicted + train_cards| I[train 经验卡逐卡 Reviewer]
+  G -->|predicted| H[val 上独立预测旧 Skill/候选 Skill]
   G -->|empirical| J[val 实测 paired execution]
-  G -->|jev| K[val 上 JEV 预测]
   G -->|sampled| N[val 上配对 Δ 预测 + 随机抽检 PPI 修正 + 判定者]
   H --> L[严格 paired 选择并提交 Skill]
-  I --> L
   J --> L
-  K --> L
   N --> L
   L --> E
   L --> M[test：显式独立评测]
@@ -36,20 +32,17 @@ flowchart LR
 
 ## Predicted reviewer
 
-`predicted` 有两条可切换路径，默认是 `val`：
+`predicted`（默认）使用配置的 `l2_reviewer` 模型，逐 task 预测一次自主尝试成功概率。模型只看到 task 和 Skill，不读取经验卡、轨迹或答案。旧 Skill 和每个候选 Skill 使用同一冻结 val route，只有候选平均预测成功率严格更高才接受。
 
-- `val`：使用配置的 `l2_reviewer` 模型，逐 task 预测一次自主尝试成功概率。模型只看到 task 和 Skill，不读取经验卡、轨迹或答案。旧 Skill 和每个候选 Skill 使用同一冻结 val route，只有候选平均预测成功率严格更高才接受。
-- `train_cards`：兼容原有流程。Reviewer 每次读取一张 train 经验卡、当前 Skill 和匿名候选，输出 paired 的 old/new outcome；程序推导 improve/regress/unchanged/unknown。
-
-运行时可通过以下参数切换：
+运行时通过 `--acceptance-mode` 切换：
 
 ```bash
---acceptance-mode predicted --predicted-review-scope val
---acceptance-mode predicted --predicted-review-scope train_cards
+--acceptance-mode predicted
+--acceptance-mode empirical
 --acceptance-mode sampled
 ```
 
-`empirical` 和 `jev` 也都使用冻结的 val route，但分别执行真实环境测量或调用 JEV 服务。所有 acceptance 结果、panel、task IDs、请求数和 protocol hash 都写入批次工件；`val` predicted 路径的 benchmark `executions` 固定为 0。
+`empirical` 也使用冻结的 val route，但执行真实环境测量，只有候选的实测成功率严格高于当前 head 才接受。所有 acceptance 结果、panel、task IDs、请求数和 protocol hash 都写入批次工件；`predicted` 路径的 benchmark `executions` 固定为 0。
 
 ## Planner–Reviewer 协同进化（`sampled`）
 
@@ -61,21 +54,8 @@ flowchart LR
 - 修正后的单侧置信下界（`--acceptance-confidence`，默认 0.9）大于 0 才接受。判定带 `1e-9` 舍入保护；
 - 独立**判定者**读取每道抽检题的两条执行轨迹，判断两者行为是否不同、首个不同在哪一步、差异是否由该规则引起并符合声明（`--claim-verification off` 可关闭，用于消融）；
 - 双方各有一份记忆：Planner 拿到改动层聚合（不含任何 val 题目），Reviewer 拿到检索式判断案例（高估、低估、正确）。分别由 `--planner-memory-mode`、`--reviewer-memory-mode` 控制；
-- 旧的 train-panel Reviewer 校准在该协议下不启用：`--reviewer-update-mode` 默认且只能为 `none`，显式给其它值会报错。
 
 设计与预注册指标见 [实验计划](docs/EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)。
-
-## Reviewer 协同演化（旧协议，单候选）
-
-`--acceptance-mode predicted --reviewer-update-mode rules` 是旧协议：每轮结束后在固定 train family panel 上执行旧 head 与候选各一次，把预测与实测写入 `reviewer_feedback.jsonl`，再由 Reviewer 压缩成有限校准规则放入下一轮 prompt。
-
-| 模式 | 行为 |
-|---|---|
-| `none` | 不收集反馈，Reviewer 始终使用初始 prompt；sampled 下默认且只能为此值 |
-| `summary` | 收集反馈并生成 update，但 update 只用于审计 |
-| `rules` | 把程序统计 + Reviewer 压缩出的校准规则放入下一轮 predicted-val Reviewer 的 prompt；predicted/empirical/jev 的默认值 |
-
-`--reviewer-feedback-size N` 把每个 family 的反馈 panel 固定为前 N 个 train task（0 表示全部）。该协议已由 sampled 取代，仅作为历史参照保留，见[旧实验计划](docs/EXPERIMENT_PLAN_REVIEWER_COEVOLVE.md)（deprecated）。注意：非 sampled 协议下 `--reviewer-update-mode` 的默认值仍是 `rules`，不显式传 `none` 就会启用该校准（包括每轮在 train panel 上的额外真实执行）。
 
 ## 模型角色
 
@@ -99,13 +79,13 @@ flowchart LR
   --cold-start-workers 8 --family-discovery-workers 8
 ```
 
-两轮 Evolve，默认使用 val predicted reviewer：
+两轮 Evolve，默认使用 predicted reviewer：
 
 ```bash
 .venv/bin/python -m skillexpand \
   --benchmark searchqa --run-dir runs/searchqa-example \
   --phase evolve --evolve-rounds 2 --resume \
-  --acceptance-mode predicted --predicted-review-scope val
+  --acceptance-mode predicted
 ```
 
 独立 test 评测：
@@ -125,7 +105,7 @@ flowchart LR
 
 ## 工件与审计
 
-运行目录保存 `discovery/`、`evolution/round-N/`、`l2_proposals/`、`l2_batches/`、`skills.jsonl`、`routes/val/`、`routes/test/`、`val/`（predicted/sampled 的逐题预测、抽检与判定缓存）和 `test/<library-hash>/`。`l2_manifest.json` 冻结 split、配置、代码和模型身份；每轮 audit 会校验 train 覆盖、卡片 hash、候选重放、Skill 版本链及 acceptance scope。
+运行目录保存 `discovery/`、`evolution/round-N/`、`l2_proposals/`、`l2_batches/`、`skills.jsonl`、`routes/val/`、`routes/test/`、`val/`（predicted/empirical/sampled 的逐题预测、实测、抽检与判定缓存）和 `test/<library-hash>/`。`l2_manifest.json` 冻结 split、配置、代码和模型身份；每轮 audit 会校验 train 覆盖、卡片 hash、候选重放、Skill 版本链及 acceptance 记录。
 
 改变 prompt、模型、split、配置或验收协议必须使用新的运行目录。只改源码时，`--resume` 默认拒绝继续；确认改动不影响协议后可加 `--allow-code-change`，漂移会追加到冻结 manifest 旁的 `code_changes.jsonl`，原 manifest 不改写。恢复只复用当前协议已落盘的逐单元结果。
 
@@ -133,7 +113,7 @@ flowchart LR
 
 `src/skillexpand/` 按层组织，只允许向下依赖（`tests/test_layering.py` 强制检查）：`schema`/`structured_skill` → `persistence`（`io.py` 提供原子写、冻结、JSONL 和锁）与 `reliability`（异常分类、重试/修复策略、单元失败记录，见 [异常处理](docs/ERROR_HANDLING.md)）→ `benchmarks` → `runtime`（执行器、LLM、任务池）→ `l1` → `evaluation` → `l2` → `campaign`/`cli`。
 
-`scripts/` 只放可复用入口：`run_campaign.py`（冻结 campaign，逻辑在 `skillexpand.campaign`）、`check_fresh_campaign.py`、`evaluate_snapshot.py`、`model_role_matrix.py`、`summarize_model_role_matrix.py`、`evaluate_jev.py`、`prepare_data.py`、`probe_campaign_capacity.py`、`detach.py` 和环境脚本。代码不兼容旧版本产生的运行目录；旧 run 只能用产生它的代码续跑或审计。
+`scripts/` 只放可复用入口：`run_campaign.py`（冻结 campaign，逻辑在 `skillexpand.campaign`）、`check_fresh_campaign.py`、`evaluate_snapshot.py`、`model_role_matrix.py`、`summarize_model_role_matrix.py`、`prepare_data.py`、`probe_campaign_capacity.py`、`detach.py` 和环境脚本。代码不兼容旧版本产生的运行目录；旧 run 只能用产生它的代码续跑或审计。
 
 安装和 benchmark 环境配置见 [运行指南](docs/RUNNING.md) 与 [Benchmark/L1 接口](docs/BENCHMARKS.md)；系统设计见 [架构](docs/ARCHITECTURE.md)，L2 审计见 [L2 审计](docs/L2_CARD_REVIEW_AUDIT.md)。
 

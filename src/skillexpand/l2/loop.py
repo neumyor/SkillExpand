@@ -1,18 +1,14 @@
-"""Serial train-batch editing with selectable predictive, empirical, or JEV acceptance."""
+"""Serial train-batch editing with selectable predicted, empirical, or sampled acceptance."""
 
 import json
-from typing import Optional
 from dataclasses import dataclass, replace
 from pathlib import Path
 from skillexpand.runtime import agent_factory as F
 from skillexpand import schema as S
-from skillexpand.persistence import io as IO
 from skillexpand.persistence import store as ST
 from skillexpand.l2 import editor as ED
 from skillexpand.l2 import update as UP
 from skillexpand.l1 import patterns as BP
-from skillexpand.l2.card_review import CardReviewer
-from skillexpand.l2.card_review import PROTOCOL
 from skillexpand.l1.artifacts import load_cold_start
 from skillexpand.persistence.io import code_signature
 from skillexpand.runtime.models.llm import provider_signature
@@ -25,8 +21,6 @@ from skillexpand.runtime import parallel as PL
 from skillexpand.l1 import workers as LW
 from skillexpand.evaluation.routing import FrozenRoutes
 from skillexpand.evaluation import validation as VA
-from skillexpand.evaluation.jev import JevSkillScorer
-from skillexpand.l2 import reviewer_coevolution as RC
 from skillexpand.l2 import sampled as SM
 from skillexpand.evaluation.claim_check import TrajectoryVerifier
 from skillexpand.evaluation.delta_review import PairedDeltaReviewer
@@ -44,12 +38,7 @@ class EvolutionConfig:
     evolve_rounds: int = 1
     skill_edit_mode: str = "structured"
     acceptance_mode: str = "predicted"
-    predicted_review_scope: str = "val"
     single_candidate: bool = False
-    #: ``None`` resolves to the protocol's default: the older calibration for the
-    #: older protocols, none for sampled (which has its own Reviewer memory).
-    reviewer_update_mode: Optional[str] = None
-    reviewer_feedback_size: int = 0
     acceptance_sample_size: int = SM.DEFAULTS["acceptance_sample_size"]
     acceptance_confidence: float = SM.DEFAULTS["acceptance_confidence"]
     claim_verification: str = SM.DEFAULTS["claim_verification"]
@@ -64,18 +53,10 @@ class EvolutionConfig:
             raise InvalidInput("supervised_attempts must be nonnegative")
         if self.skill_edit_mode not in ("rewrite", "structured"):
             raise InvalidInput("Unknown Skill edit mode")
-        if self.acceptance_mode not in ("predicted", "empirical", "jev", "sampled"):
+        if self.acceptance_mode not in ("predicted", "empirical", "sampled"):
             raise InvalidInput("Unknown acceptance mode")
-        if self.predicted_review_scope not in ("val", "train_cards"):
-            raise InvalidInput("Unknown predicted review scope")
         if self.single_candidate and self.candidate_count != 1:
             raise InvalidInput("single_candidate protocol requires candidate_count=1")
-        if self.reviewer_update_mode is None:
-            self.reviewer_update_mode = SM.default_reviewer_update_mode(self.acceptance_mode)
-        if self.reviewer_update_mode not in ("none", "summary", "rules"):
-            raise InvalidInput("Unknown reviewer update mode")
-        if self.reviewer_feedback_size < 0:
-            raise InvalidInput("reviewer_feedback_size must be nonnegative")
         SM.validate_options(self.to_dict())
 
     def to_dict(self):
@@ -142,7 +123,6 @@ class SerialEvolutionLoop:
         # candidate and L1 execution settings remain frozen.
         protocol_config.pop('evolve_rounds', None)
         identity = {
-            "protocol": PROTOCOL,
             "execution_protocol": "skill-aware-rounds-v2",
             "l1": {"attempts": self.l1_attempts, "supervised": self.l1_supervised},
             "config": protocol_config,
@@ -171,33 +151,10 @@ class SerialEvolutionLoop:
         self._recover_transactions()
         self.val_routes = None
         self.val_scorer = None
-        self.jev_routes = None
-        self.jev_scorer = None
         self.predicted_routes = None
         self.predicted_scorer = None
         self.sampled_validator = None
         self.sampled_validator_round = None
-        self.reviewer_update = self._load_reviewer_update()
-
-    def _load_reviewer_update(self):
-        path = self.paths.root / "reviewer_updates.jsonl"
-        rows = IO.read_jsonl(path, repair_tail=False)
-        if not rows:
-            return None
-        update = S.from_dict(RC.ReviewerUpdate, rows[-1])
-        if update.protocol != RC.PROTOCOL:
-            raise JournalConflict("Reviewer update protocol mismatch")
-        return update
-
-    def _calibration_block(self):
-        update = self.reviewer_update
-        # C2 is the fixed-prompt feedback control.  It still writes feedback and
-        # updates for audit, but no feedback-derived text may reach its Reviewer.
-        if (update is None or self.config.reviewer_update_mode in ("none", "summary")):
-            return "", 0
-        rules = update.rules if self.config.reviewer_update_mode == "rules" else ()
-        return RC.render_calibration_block(update.summary, rules), update.reviewer_prompt_version
-
 
     def _ensure_sampled_validator(self, round_index, reviewer_memory):
         """Paired delta predictions corrected by a random val sample.
@@ -270,25 +227,8 @@ class SerialEvolutionLoop:
         )
         return self.val_scorer
 
-    def _ensure_jev_scorer(self):
-        if self.config.acceptance_mode != "jev":
-            return None
-        if self.jev_scorer is not None:
-            return self.jev_scorer
-        self.jev_routes = FrozenRoutes(
-            self.cfg, self.plan, self.initial, self.paths.root / "routes",
-            S.SPLIT_VAL, self.config.l2_review_workers
-        ).run()
-        self.jev_scorer = JevSkillScorer(
-            self.cfg, self.jev_routes,
-            VA.ScoreCache(self.paths.root / "val" / "jev_scores.jsonl"),
-            self.config.l2_review_workers,
-        )
-        return self.jev_scorer
-
     def _ensure_predicted_scorer(self):
-        if (self.config.acceptance_mode != "predicted" or
-                self.config.predicted_review_scope != "val"):
+        if self.config.acceptance_mode != "predicted":
             return None
         if self.predicted_scorer is not None:
             return self.predicted_scorer
@@ -298,8 +238,8 @@ class SerialEvolutionLoop:
         ).run()
 
         def judge_factory(task_id, skill, usage_path):
-            # The predicted reviewer is an ordinary configured L2 reviewer model;
-            # it is independent from the JEV endpoint and receives no trajectory.
+            # The predicted reviewer is an ordinary configured L2 reviewer model
+            # and receives no trajectory.
             return self._reasoning_host("l2_reviewer", usage_path)
 
         self.predicted_scorer = VA.PredictedSkillScorer(
@@ -308,8 +248,6 @@ class SerialEvolutionLoop:
             VA.ScoreCache(self.paths.root / "val" / "predicted_scores.jsonl"),
             self.config.l2_review_workers,
             judge_factory=judge_factory,
-            calibration_block=self._calibration_block()[0],
-            reviewer_prompt_version=self._calibration_block()[1],
         )
         return self.predicted_scorer
 
@@ -373,22 +311,6 @@ class SerialEvolutionLoop:
         if self.config.skill_edit_mode != 'structured':
             editor_host = self._reasoning_host(
                 'l2_editor', self.paths.root / "usage" / f"editor-{skill.skill_id}.json")
-        reviewer_factory = None
-        # Only the card-review protocols read per-card judgments.  The predicted
-        # and sampled val protocols never call this factory, and building it
-        # anyway would spend a reviewer call on every train card for nothing.
-        uses_card_review = (
-            self.config.acceptance_mode in ("empirical", "jev")
-            or (self.config.acceptance_mode == "predicted"
-                and self.config.predicted_review_scope == "train_cards"))
-        if uses_card_review:
-            def reviewer_factory(card):
-                card_key = S.content_hash(card)
-                host = self._reasoning_host(
-                    'l2_reviewer',
-                    self.paths.root / "usage" / f"reviewer-{skill.skill_id}-{card_key}.json")
-                return CardReviewer(host)
-
         planner_memory, reviewer_memory = "", None
         if self.config.acceptance_mode == SM.MODE:
             planner_memory, reviewer_memory = SM.round_memories(
@@ -397,13 +319,9 @@ class SerialEvolutionLoop:
         runner = UP.SkillPatchRunner(
             ED.SkillEditor(planner_host, self.config.skill_edit_mode,
                            editor_host=editor_host),
-            None,
             self.paths.root / "l2_proposals",
-            reviewer_factory=reviewer_factory,
             acceptance_mode=self.config.acceptance_mode,
-            predicted_review_scope=self.config.predicted_review_scope,
             val_scorer=self._ensure_val_scorer(),
-            jev_scorer=self._ensure_jev_scorer(),
             predicted_scorer=self._ensure_predicted_scorer(),
             sampled_validator=self._ensure_sampled_validator(batch["round"],
                                                              reviewer_memory),
@@ -419,8 +337,7 @@ class SerialEvolutionLoop:
                 'raw': None, 'patterns': [], 'status': 'insufficient_cards'}
             save(pattern_path, patterns)
         result = runner.run(skill, evidence, self.config.candidate_count,
-                            batch_patterns=patterns['patterns'],
-                            l2_review_workers=self.config.l2_review_workers)
+                            batch_patterns=patterns['patterns'])
         value = dict(
             batch,
             **result.record,
@@ -579,128 +496,6 @@ class SerialEvolutionLoop:
             cards[task_id] = exp
         return cards
 
-    def _collect_reviewer_feedback(self, round_index):
-        """Measure old/candidate pairs on a fixed train panel and update memory.
-
-        This is deliberately after all L2 journals are complete and before the
-        round is marked complete.  A partial feedback panel therefore cannot be
-        mistaken for a usable Reviewer update on resume.
-        """
-        if self.config.reviewer_update_mode == "none":
-            return self.reviewer_update
-        if (self.reviewer_update is not None and
-                self.reviewer_update.generation_round >= round_index):
-            return self.reviewer_update
-
-        route = RC.FixedTrainRoutes.from_plan(self.plan)
-        feedback_root = self.paths.root / "reviewer_feedback"
-        feedback_root.mkdir(parents=True, exist_ok=True)
-        feedback_path = self.paths.root / "reviewer_feedback.jsonl"
-        existing_rows = IO.read_jsonl(feedback_path, repair_tail=False)
-        existing_ids = {row.get("feedback_id") for row in existing_rows}
-        cache = VA.ScoreCache(feedback_root / "scores.jsonl")
-        scorer = VA.FixedSkillScorer(
-            self.cfg, cache, route, self.config.l2_review_workers
-        )
-
-        def judge_factory(task_id, skill, usage_path):
-            return self._reasoning_host("l2_reviewer", usage_path)
-
-        predictor = VA.PredictedSkillScorer(
-            self.cfg,
-            route,
-            VA.ScoreCache(feedback_root / "predicted_scores.jsonl"),
-            self.config.l2_review_workers,
-            judge_factory=judge_factory,
-            calibration_block=self._calibration_block()[0],
-            reviewer_prompt_version=self._calibration_block()[1],
-        )
-        new_records = []
-        round_batches = sorted(
-            (json.loads(path.read_text()) for path in
-             (self.paths.root / "l2_batches").glob("*.json")
-             if json.loads(path.read_text()).get("round") == round_index),
-            key=lambda value: (value["family_id"], value["task_ids"][0]),
-        )
-        seen_candidates = set()
-        for batch in round_batches:
-            base = self.skills.get(batch["base_skill_key"])
-            task_ids = tuple(route.groups.get(base.skill_id, ()))
-            if self.config.reviewer_feedback_size:
-                task_ids = task_ids[: self.config.reviewer_feedback_size]
-            if not task_ids:
-                raise InvalidInput(f"Reviewer feedback panel is empty for {base.skill_id}")
-            candidates = []
-            for proposal in batch.get("proposals", ()):
-                raw = proposal.get("edit", {}).get("candidate")
-                if not raw:
-                    continue
-                candidate = S.from_dict(S.CandidateSkill, raw)
-                if candidate.candidate_id in seen_candidates:
-                    continue
-                seen_candidates.add(candidate.candidate_id)
-                candidates.append(candidate)
-            for candidate in candidates:
-                panel_key = f"train-feedback:{route.fingerprint}:{base.skill_id}"
-                prediction = predictor.validate(
-                    base.skill_id, base, candidate.skill, task_ids, panel_key
-                )
-                old = scorer.score(base, task_ids, panel_key, role=S.ROLE_EVAL)
-                new = scorer.score(candidate.skill, task_ids, panel_key, role=S.ROLE_EVAL)
-                prompt_version = self._calibration_block()[1]
-                rows = RC.make_feedback_records(
-                    round_index=round_index,
-                    batch_id=batch["batch_id"],
-                    family_id=batch["family_id"],
-                    base_skill_key=base.key,
-                    candidate_skill_key=candidate.skill.key,
-                    base_outcomes=old.outcomes,
-                    candidate_outcomes=new.outcomes,
-                    prediction_rows=prediction.prediction_rows,
-                    route_fingerprint=route.fingerprint,
-                    panel_key=panel_key,
-                    executor_protocol=scorer.protocol_hash,
-                    reviewer_prompt_version=prompt_version,
-                    reviewer_protocol_hash=(
-                        str(prediction.prediction_rows[0].get('reviewer_protocol_hash', ''))
-                        if prediction.prediction_rows else ''
-                    ),
-                )
-                for row in rows:
-                    if row.feedback_id not in existing_ids:
-                        IO.append_jsonl(feedback_path, row)
-                        existing_ids.add(row.feedback_id)
-                    new_records.append(row)
-        # A round with no materialized candidate has no factual calibration
-        # evidence.  Keep the previous prompt version and let the next round use
-        # the initial prompt (or the last valid update) rather than fabricating a
-        # zero-sample update.
-        if not new_records:
-            return self.reviewer_update
-        parent_version = (self.reviewer_update.reviewer_prompt_version
-                          if self.reviewer_update else None)
-        if self.config.reviewer_update_mode == "rules":
-            update = RC.generate_reviewer_update(
-                new_records, generation_round=round_index,
-                parent_version=parent_version,
-                host_factory=lambda: self._reasoning_host(
-                    "l2_reviewer",
-                    self.paths.root / "usage" / f"reviewer-update-{round_index}.json",
-                ),
-            )
-        else:
-            update = RC.build_reviewer_update(
-                new_records,
-                generation_round=round_index,
-                parent_version=parent_version,
-            )
-        IO.append_jsonl(self.paths.root / "reviewer_updates.jsonl", update)
-        self.reviewer_update = update
-        # A new update must be picked up by the next round's scorer, while a
-        # resumed current round must never silently use a stale prompt object.
-        self.predicted_scorer = None
-        return update
-
     def run_evolutions(self, rounds=None):
         """Execute the explicit closed loop: Skill-aware L1, then serial L2."""
         rounds = self.config.evolve_rounds if rounds is None else int(rounds)
@@ -724,7 +519,6 @@ class SerialEvolutionLoop:
                     self.cards = self._read_evolution_cards(round_index)
                     from skillexpand.l2.audit import audit_round
                     audit_round(self.paths.root, round_index)
-                    self._collect_reviewer_feedback(round_index)
                     last_result = json.loads(round_summary.read_text())
                     continue
                 cards = self._collect_evolution_cards(round_index)
@@ -734,16 +528,7 @@ class SerialEvolutionLoop:
                 freeze(round_summary.parent / 'batches.json', batches)
                 for batch in batches:
                     self._run_batch(batch)
-                self._collect_reviewer_feedback(round_index)
                 last_result = self.summary(batches)
-                last_result.update({
-                    'reviewer_prompt_version': (
-                        self.reviewer_update.reviewer_prompt_version
-                        if self.reviewer_update else 0
-                    ),
-                    'reviewer_feedback_count': len(IO.read_jsonl(
-                        self.paths.root / 'reviewer_feedback.jsonl', repair_tail=False)),
-                })
                 save(self.paths.root / 'evolution' / f'round-{round_index}' / 'summary.json',
                      last_result)
                 from skillexpand.l2.audit import audit_round
@@ -756,7 +541,7 @@ class SerialEvolutionLoop:
         except Exception as exc:
             # Report the round that failed, not a horizon-wide count: batch IDs
             # are round-specific, so only that round's batches can be counted.
-            progress = {'protocol': PROTOCOL, 'benchmark': self.plan.benchmark}
+            progress = {'benchmark': self.plan.benchmark}
             if in_flight is not None:
                 round_index, batches = in_flight
                 progress = dict(self.summary(batches) if batches is not None else progress,
@@ -781,43 +566,27 @@ class SerialEvolutionLoop:
         ]
         return {
             "status": "complete" if len(records) == len(batches) else "partial",
-            "protocol": PROTOCOL,
             "benchmark": self.plan.benchmark,
             "train_cards": len(self.cards),
             "batches": len(batches),
             "completed_batches": len(records),
             "hypotheses": sum(len(r["hypotheses"]) for r in records),
-            "reviewed_candidates": sum(len(r["reviews"]) for r in records),
             "predicted_val_candidates": sum(
                 len(r.get("acceptance", {}).get("candidates", ()))
                 for r in records
-                if r.get("acceptance", {}).get("scope") == "val"
+                if r.get("acceptance", {}).get("mode") in ("predicted", SM.MODE)
             ),
             "review_approved_updates": sum(
                 r["outcome"] == "review_approved" for r in records
             ),
             "skills": {s.skill_id: s.key for s in self.skill_heads()},
             "acceptance_mode": self.config.acceptance_mode,
-            "predicted_review_scope": self.config.predicted_review_scope,
             "single_candidate": self.config.single_candidate,
-            "reviewer_update_mode": self.config.reviewer_update_mode,
-            "reviewer_prompt_version": (
-                self.reviewer_update.reviewer_prompt_version
-                if self.reviewer_update else 0
-            ),
-            "reviewer_feedback_count": len(IO.read_jsonl(
-                self.paths.root / "reviewer_feedback.jsonl", repair_tail=False)),
             "empirically_validated": bool(records) and self.config.acceptance_mode == "empirical" and all(
                 r.get("empirically_validated") is True for r in records
             ),
-            "jev_validated": bool(records) and self.config.acceptance_mode == "jev" and all(
-                r.get("jev_validated") is True for r in records
-            ),
             "val_executions": sum(
                 int(r.get("acceptance", {}).get("executions", 0)) for r in records
-            ),
-            "jev_requests": sum(
-                int(r.get("acceptance", {}).get("jev_requests", 0)) for r in records
             ),
             "predicted_val_requests": sum(
                 int(r.get("acceptance", {}).get("predicted_requests", 0))

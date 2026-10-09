@@ -2,7 +2,7 @@
 delta prediction, and a random val sample that corrects the prediction.
 
 Everything specific to ``acceptance_mode='sampled'`` at the L2 layer lives here
-or in the modules it names, so the older ``predicted`` / ``empirical`` / ``jev``
+or in the modules it names, so the older ``predicted`` / ``empirical``
 paths keep their own code and their own protocols:
 
 * the estimator: :mod:`skillexpand.evaluation.ppi`;
@@ -103,20 +103,13 @@ def options_from(args) -> Dict[str, Any]:
     return {key: getattr(args, key) for key in DEFAULTS}
 
 
-def default_reviewer_update_mode(acceptance_mode: str) -> str:
-    """The older calibration stays the default only for the older protocols."""
-    return 'none' if acceptance_mode == MODE else 'rules'
-
-
 def validate_options(options: Dict[str, Any]) -> None:
     """Reject switch values and combinations the protocol cannot express.
 
     Applies to every protocol, because the switches are frozen into the
-    manifest either way.  For the sampled protocol two combinations are also
-    rejected: a single added or replaced rule is what makes the delta
-    attributable, and the older train-panel Reviewer calibration is replaced by
-    the Reviewer's own case memory -- running both would feed the same Reviewer
-    two incompatible learning signals.
+    manifest either way.  The sampled protocol additionally requires the
+    structured edit mode: a single added or replaced rule is what makes the
+    delta attributable.
     """
     if int(options['acceptance_sample_size']) < MIN_SAMPLE_SIZE:
         raise InvalidInput(f'acceptance_sample_size must be at least {MIN_SAMPLE_SIZE}')
@@ -131,10 +124,6 @@ def validate_options(options: Dict[str, Any]) -> None:
         raise InvalidInput(
             'sampled acceptance requires skill_edit_mode=structured: the paired '
             'delta and its claim are defined over one added or replaced rule')
-    if options['reviewer_update_mode'] != 'none':
-        raise InvalidInput(
-            'sampled acceptance requires reviewer_update_mode=none: the Reviewer '
-            'learns from its own case memory, not from train-panel calibration')
 
 
 def parse_claim(raw: Any) -> Dict[str, str]:
@@ -199,7 +188,6 @@ def accept(validator, base_skill: S.Skill, ordered: Sequence[S.CandidateSkill],
             'candidates': results,
             'executions': sum(row['executions'] for row in results),
             'predicted_requests': sum(row['reviewer_requests'] for row in results),
-            'jev_requests': 0,
         }
     results = acceptance['candidates']
     approved = [row for row in results if row['result']['decision']['accepted']]
@@ -217,15 +205,11 @@ def accept(validator, base_skill: S.Skill, ordered: Sequence[S.CandidateSkill],
         reason = 'hold: ' + results[0]['result']['decision']['reason']
     return {
         'selection_method': 'sampled_paired_delta',
-        'reviews': [],
-        'review_errors': [],
-        'reviewed_card_count': 0,
         'acceptance': acceptance,
         'reason': reason,
         'selected_candidate_id': aliases[selected].candidate_id if selected else None,
         'outcome': 'review_approved' if selected else 'hold',
         'empirically_validated': False,
-        'jev_validated': False,
     }, selected
 
 
