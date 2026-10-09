@@ -227,8 +227,9 @@ $PYTHON scripts/tb_eval_stage.py prepare --stage E3 \
 
 ### 步骤 4：M0 —— 模型生成的初始 Skill 库
 
-**必须在 launch 之前完成。** 导入脚本只放了一个手写的 bootstrap Skill；`launch` 不检查
-M0 是否已生成，缺了 M0 照样启动，但那不是要做的实验（见第 7 节）。
+**必须在 launch 之前完成。** 导入脚本只放了一个手写的 bootstrap Skill，演化它不是要做的实验。
+`launch` 在 `library_manifest.json` 不存在、或 `initial_skills.json` 不是它列出的那组 Skill 时拒绝启动
+（退出码 2，`status.json` 写 `blocked_before_rollout` 与原因）。
 
 ```bash
 $PYTHON scripts/propose_terminalbench_library.py --run-dir ../work/run \
@@ -367,7 +368,8 @@ EOF
 |---|---|---|
 | 首次 launch 立刻抛 `FrozenProtocolChanged: Frozen inputs changed: <run>/config.json` | 旧导入脚本冻结的 config 缺 `l2_verifier` 角色，launch 重新解析角色映射后与冻结内容不同 | 已在 `4d20bfa` 修复；更新 `repo/`，在**新 run 目录**重新 prepare（旧目录不能原地改） |
 | 启动时 `JournalConflict: Cold-start task data changed` | 任务表未排序，旧导入脚本按名排序编号而运行时按文件顺序 | 已修复（按文件顺序编号）；旧 run 目录作废并重新导入 |
-| 没做 M0 就 launch，run 里只有一个 bootstrap Skill | `launch` 不检查 `library_manifest.json` | 立刻 `kill -- -"$(cat stage.pid)"`（`launch` 用独立 session，进程组号等于该 pid，只会杀到自己的这一组），run 目录归档作废，做完 M0 后在新目录重来；`stage.log` 里随后的 `BrokenPipeError`/leaked semaphore 是杀进程后的噪音 |
+| `launch` 退出码 2，原因 `M0 library is missing` | 没做 M0 就 launch（smoke 时 `launch` 还不检查，曾因此启动了只有 bootstrap Skill 的 run） | 在同一目录跑完步骤 4 再 launch；没有启动任何进程，目录不用作废 |
+| 需要中止一个已启动的 stage | — | `kill -- -"$(cat stage.pid)"`（`launch` 用独立 session，进程组号等于该 pid，只会杀到自己的这一组），run 目录归档作废；`stage.log` 里随后的 `BrokenPipeError`/leaked semaphore 是杀进程后的噪音 |
 | `harbor`/python 报 Permission denied，路径在 `/home/liyishan` | 默认 Harbor venv 是不可执行的符号链接 | env.sh 里显式设 `HARBOR_BIN`、`PYTHON_BIN` 指向自己的 Harbor venv |
 | runner 去读另一份 `.env` 或往 `/data2` 写 | 默认 `TBENCH_TENCENT_ENV_FILE`、`RETRY_ARCHIVE_ROOT`、`JOBS_DIR` | env.sh 里覆盖（见 2.4）；`JOBS_DIR` 在命令里显式给 |
 | M0 提议请求超时 | 默认 `--request-timeout 180` 对长 prompt 偏短 | 用 `--request-timeout 300` |

@@ -163,13 +163,31 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def missing_library(root: Path) -> str | None:
+    """Why the run has no model-generated M0 library, or None when it has one.
+
+    The importer only writes a hand-written bootstrap Skill; evolving that is
+    not the experiment, so M0 (propose + materialize) must have replaced it.
+    """
+    path = root / "library_manifest.json"
+    if not path.is_file():
+        return "M0 library is missing: run propose/materialize before launch"
+    listed = [row["skill_id"] for row in json.loads(path.read_text())["skills"]]
+    initial = [row["skill_id"] for row in json.loads((root / "initial_skills.json").read_text())]
+    if listed != initial:
+        return "initial_skills.json is not the materialized M0 library"
+    return None
+
+
 def launch(args: argparse.Namespace) -> int:
     root = args.run_dir.resolve()
     report = json.loads((root / "input_coverage.json").read_text())
-    if not report.get("complete_valid_coverage"):
-        reason = "raw rollout gate not met"
+    reason = (missing_library(root) if report.get("complete_valid_coverage")
+              else "raw rollout gate not met")
+    if reason:
         write_status(root, args.stage, "blocked_before_rollout", report, reason=reason)
         write_audit(root, args.stage, report, "blocked", reason)
+        print(json.dumps({"status": "blocked_before_rollout", "reason": reason}))
         return 2
     pidfile = root / "stage.pid"
     # Liveness comes from the recorded child PID, never from pgrep on a script name.

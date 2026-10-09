@@ -353,9 +353,17 @@ def test_launch_command_equals_the_registered_spec(tmp_path):
         cmd.index('--evolve-l1-workers') + 1] == '1'
 
 
+def write_m0(root, ids=('terminalbench.family-p001',), initial=None):
+    (root / 'library_manifest.json').write_text(json.dumps(
+        {'skills': [{'skill_id': i} for i in ids]}))
+    (root / 'initial_skills.json').write_text(json.dumps(
+        [{'skill_id': i} for i in (ids if initial is None else initial)]))
+
+
 def test_launch_spawns_detached_and_writes_the_pidfile(tmp_path, monkeypatch):
     stage = load_script('tb_eval_stage')
     (tmp_path / 'input_coverage.json').write_text(json.dumps({'complete_valid_coverage': True}))
+    write_m0(tmp_path)
     seen = {}
 
     class Proc:
@@ -382,3 +390,22 @@ def test_launch_is_blocked_without_complete_coverage(tmp_path):
         run_dir=tmp_path, stage='E4', python='py', executor_model='e', method_model='m')
     assert stage.launch(args) == 2
     assert not (tmp_path / 'stage.pid').exists()
+
+
+@pytest.mark.parametrize('initial,match', [
+    (None, 'M0 library is missing'),
+    (('terminalbench.general',), 'not the materialized M0 library'),
+])
+def test_launch_is_blocked_without_the_m0_library(tmp_path, monkeypatch, initial, match):
+    stage = load_script('tb_eval_stage')
+    (tmp_path / 'input_coverage.json').write_text(json.dumps({'complete_valid_coverage': True}))
+    if initial is None:  # only the importer's bootstrap Skill
+        (tmp_path / 'initial_skills.json').write_text(json.dumps([{'skill_id': 'terminalbench.general'}]))
+    else:  # M0 was materialized, then initial_skills.json was replaced
+        write_m0(tmp_path, initial=initial)
+    monkeypatch.setattr(stage.subprocess, 'Popen', lambda *a, **k: pytest.fail('launched'))
+    args = stage.argparse.Namespace(
+        run_dir=tmp_path, stage='E3', python='py', executor_model='e', method_model='m')
+    assert stage.launch(args) == 2
+    assert not (tmp_path / 'stage.pid').exists()
+    assert match in json.loads((tmp_path / 'status.json').read_text())['reason']

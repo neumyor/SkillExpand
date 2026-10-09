@@ -123,5 +123,5 @@ campaign launcher；多于 1 轮的演化（`--evolve-rounds 1`，代码路径�
   rollout 的 token；
 - 过程中暴露并修掉两个导入问题：冻结 config 缺 `l2_verifier` 角色（`4d20bfa`）、任务表未排序导致
   `Cold-start task data changed`（导入脚本改为按任务文件顺序编号）；另有一次在 M0 之前 launch 的失败 run
-  （`launch` 不检查 M0 是否存在）。两个失败 run 目录均按“冻结目录不可原地修复”的规则归档，没有复用；
+  （当时 `launch` 不检查 M0；现已改为缺 M0 时拒绝启动）。两个失败 run 目录均按“冻结目录不可原地修复”的规则归档，没有复用；
 - 全量 89 × 3 的耗时没有实测，墙钟由最慢任务的 3 次串行尝试与沙箱配额决定。
