@@ -24,6 +24,15 @@ def test_model_retries_transient_errors_until_success_with_capped_backoff():
         assert sleep.call_args_list == [((1,),), ((2,),), ((4,),)]
         assert factory.call_args.kwargs['max_retries'] == 0
         assert factory.call_args.kwargs['request_timeout'] == 1
+        assert not factory.call_args.kwargs.get('streaming')
+
+
+def test_model_requests_streaming_when_relay_required():
+    client = Mock(return_value=SimpleNamespace(content='ok'))
+    with patch('skillexpand.runtime.models.llm.ChatOpenAI', return_value=client) as factory, \
+            patch.dict('os.environ', EXPE_LLM_RELAY_REQUIRED='1'):
+        wrapper = GPTWrapper('test', 'EMPTY', base_url='http://relay.invalid/v1')
+        assert wrapper([]) == 'ok'
         assert factory.call_args.kwargs['streaming'] is True
 
 

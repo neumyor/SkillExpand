@@ -105,10 +105,14 @@ EXTRA_ENV_VAR = 'EXPE_LLM_EXTRA_JSON'
 _WARNED = set()
 
 
+def relay_required() -> bool:
+    return _truthy('EXPE_LLM_RELAY_REQUIRED')
+
+
 def get_llm_base_url() -> str:
     """OpenAI-compatible base URL, or None for upstream (real OpenAI) behaviour."""
     value = os.environ.get(BASE_URL_ENV_VAR) or os.environ.get('OPENAI_API_BASE') or None
-    if os.environ.get('EXPE_LLM_RELAY_REQUIRED', '').lower() in ('1', 'true', 'yes', 'on') and not value:
+    if relay_required() and not value:
         raise RuntimeError('Tencent E2B LLM relay is required but no relay base URL is configured')
     return value
 
@@ -214,10 +218,11 @@ class GPTWrapper:
             openai_api_key=openai_api_key,
             max_retries=0,
             request_timeout=self.request_policy['timeout'],
+        )
+        if relay_required():
             # The Tencent E2B relay only serves the streaming wire format, and
             # ChatOpenAI still returns one assembled message to callers.
-            streaming=True,
-        )
+            kwargs['streaming'] = True
         max_tokens = output_token_limit()
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
