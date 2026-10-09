@@ -28,11 +28,11 @@ def no_sleep(monkeypatch):
     (E.EnvironmentTimeout('x'), 'infrastructure', True, 'after_stage'),
     (E.WorkerLost('x'), 'infrastructure', True, 'after_stage'),
     (E.RepairExhausted('x'), 'response', True, 'after_stage'),
-    (E.ProviderRejected('x'), 'provider_rejected', False, 'stage'),
-    (E.AuditFailure('x'), 'integrity', False, 'stage'),
-    (E.FrozenCodeChanged('x'), 'integrity', False, 'stage'),
-    (E.InvalidInput('x'), 'configuration', False, 'stage'),
-    (E.RunLocked('x'), 'configuration', False, 'stage'),
+    (E.ProviderRejected('x'), 'permanent', False, 'stage'),
+    (E.AuditFailure('x'), 'permanent', False, 'stage'),
+    (E.FrozenCodeChanged('x'), 'permanent', False, 'stage'),
+    (E.InvalidInput('x'), 'permanent', False, 'stage'),
+    (E.RunLocked('x'), 'permanent', False, 'stage'),
     (KeyError('x'), 'bug', False, 'all'),
     (ValueError('x'), 'bug', False, 'all'),
 ])
@@ -296,7 +296,7 @@ def test_api_error_is_classified_by_http_status():
     assert E.classify(api_error(429)) is E.Category.INFRASTRUCTURE
     assert E.classify(api_error(None)) is E.Category.INFRASTRUCTURE
     for status in (400, 401, 413):
-        assert E.classify(api_error(status)) is E.Category.PROVIDER_REJECTED
+        assert E.classify(api_error(status)) is E.Category.PERMANENT
 
 
 def test_l1_audit_accepts_every_retried_provider_error_name():
@@ -307,7 +307,7 @@ def test_l1_audit_accepts_every_retried_provider_error_name():
 
 def test_artifact_validation_is_integrity_but_model_output_validation_is_retryable():
     from skillexpand.l1 import family_discovery as D
-    assert E.classify(D.DiscoveryError('family plan benchmark mismatch')) is E.Category.INTEGRITY
+    assert E.classify(D.DiscoveryError('family plan benchmark mismatch')) is E.Category.PERMANENT
     with pytest.raises(E.RepairExhausted):
         R.call_with_repair(RepairPolicy('t', 2), R.fresh(lambda: '{}'),
                            lambda raw: (_ for _ in ()).throw(D.DiscoveryError('bad assignment')))

@@ -27,9 +27,7 @@ def _config(benchmark: str):
 
 def effective_workers(requested: int, n_units: int) -> int:
     """Clamp a worker count to something sane for the batch."""
-    if requested <= 0:
-        return 1
-    return max(1, min(int(requested), MAX_WORKERS, max(1, n_units)))
+    return max(1, min(int(requested), MAX_WORKERS, n_units))
 
 
 def run_generic(specs: Sequence[Any],

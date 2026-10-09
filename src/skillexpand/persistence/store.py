@@ -11,7 +11,7 @@ Layout under the run directory::
 
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, List
 
 from skillexpand import schema as S
 from skillexpand.persistence.io import append_jsonl, read_jsonl
@@ -39,20 +39,10 @@ class _JsonlStore:
         with self._lock:
             append_jsonl(self.path, record)
 
-    def read_lines(self) -> Iterator[str]:
-        if not self.path.exists():
-            return
-        with self.path.open() as fh:
-            for lineno, line in enumerate(fh, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                yield line
-
-    def records(self, cls: Any, tolerate_truncated_tail: bool = True) -> List[Any]:
+    def records(self, cls: Any) -> List[Any]:
         with self._lock:
             return [S.from_dict(cls, record) for record in
-                    read_jsonl(self.path, repair_tail=tolerate_truncated_tail)]
+                    read_jsonl(self.path)]
 
 
 class SkillLibrary:
