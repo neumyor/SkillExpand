@@ -88,7 +88,7 @@ def test_full_start_requires_matching_preflight(campaign):
         C.start(campaign, 'full')
 
 
-def test_detached_launch_and_duplicate_pid_refusal(campaign, monkeypatch):
+def test_detached_launch_and_duplicate_supervisor_refusal(campaign, monkeypatch):
     invocations = []
     def popen(cmd, **kwargs):
         invocations.append(kwargs)
@@ -97,9 +97,10 @@ def test_detached_launch_and_duplicate_pid_refusal(campaign, monkeypatch):
     assert C.start(campaign, 'preflight')['pid'] == 12345
     assert invocations[0]['start_new_session'] is True
     assert invocations[0]['stdin'] == C.subprocess.DEVNULL
-    monkeypatch.setattr(C.os, 'kill', lambda *args: None)
-    with pytest.raises(ValueError, match='duplicate launch'):
-        C.start(campaign, 'preflight')
+    # A live supervisor holds supervisor.lock for its whole life.
+    with C.IO.exclusive_lock(campaign / 'preflight' / 'supervisor.lock'):
+        with pytest.raises(ValueError, match='held by another process'):
+            C.start(campaign, 'preflight')
     assert len(invocations) == 1
 
 

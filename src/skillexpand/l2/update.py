@@ -93,8 +93,6 @@ class SkillPatchRunner:
                  sampled_validator=None, planner_memory=""):
         self.editor, self.audit_dir = editor, Path(audit_dir)
         self.read_only = read_only
-        if acceptance_mode not in ("predicted", "empirical", "sampled"):
-            raise InvalidInput("Unknown acceptance mode")
         if acceptance_mode == "empirical" and val_scorer is None and not read_only:
             raise InvalidInput("Empirical acceptance requires a val scorer")
         if acceptance_mode == "predicted" and predicted_scorer is None and not read_only:
@@ -179,15 +177,11 @@ class SkillPatchRunner:
             "proposal_id": identity,
             "base_skill_key": base_skill.key,
             "requested_candidates": candidate_count,
-            "single_candidate": self.single_candidate,
-            "skill_edit_mode": self.editor.skill_edit_mode,
-            "acceptance_mode": self.acceptance_mode,
             "hypotheses": [],
             "proposals": [],
             "selected_candidate_id": None,
             "outcome": "hold",
             "reason": "",
-            "empirically_validated": False,
             "acceptance": {
                 "mode": self.acceptance_mode,
                 "protocol_hash": acceptance_protocol,
@@ -339,6 +333,5 @@ class SkillPatchRunner:
             reason=reason,
             selected_candidate_id=aliases[selected].candidate_id if selected else None,
             outcome="review_approved" if selected else "hold",
-            empirically_validated=(not predicted and bool(validations)),
         )
         return UpdateResult(record, aliases[selected] if selected else None)

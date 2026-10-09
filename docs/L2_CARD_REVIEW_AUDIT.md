@@ -44,7 +44,7 @@ Reviewer 的最终输出由 JSON Schema 约束为三个字段：`probability_tru
 - `predicted_requests`、`executions`、选择理由和最终 candidate
 - sampled 批次另记录每个候选的 `claim_id`、`executions`、`reviewer_requests`，以及 `sample_size`、`confidence`、`planner_memory`、`reviewer_memory_version`
 
-`summary.json` 的 `predicted_val_candidates` 统计 predicted 与 sampled 的候选，`empirically_validated` 标明实测验收；不能把 predicted approval 报成实测提升。sampled 的实测数字见 `val_executions` 与 `reviewer_metrics`。
+`summary.json` 的 `predicted_val_candidates` 统计 predicted 与 sampled 的候选，实测验收由 `acceptance.mode`（journal 内唯一的模式标签）与 `val_executions` 体现；不能把 predicted approval 报成实测提升。sampled 的实测数字见 `val_executions` 与 `reviewer_metrics`。
 
 ## 离线审计
 

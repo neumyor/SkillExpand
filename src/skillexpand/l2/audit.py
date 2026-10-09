@@ -103,8 +103,6 @@ def audit_batch(root, batch, base, cards):
             require(replayed == candidate.skill.body,
                     'structured candidate body does not match its recorded operation')
     if protocol['config']['single_candidate']:
-        require(batch.get('single_candidate') is True,
-                'single-candidate protocol missing from batch journal')
         require(batch.get('requested_candidates') == 1,
                 'single-candidate batch requested a different K')
         proposed = [row for row in batch.get('proposals', ())
@@ -222,18 +220,12 @@ def audit_round(root, round_index):
             require(library.get(candidate.skill.key) == candidate.skill, 'journal/Skill store mismatch')
             heads[batch['family_id']] = candidate.skill
         expected_mode = expected_acceptance_mode
-        require(batch.get('acceptance_mode') == expected_mode,
-                'batch acceptance mode differs from frozen protocol')
         require(batch.get('acceptance', {}).get('mode') == expected_mode,
-                'batch acceptance record mode differs from frozen protocol')
+                'batch acceptance mode differs from frozen protocol')
         if expected_mode == 'predicted':
-            require(batch.get('empirically_validated') is False,
-                    'prediction was mislabeled as empirical validation')
             require(batch.get('acceptance', {}).get('executions', 0) == 0,
                     'predicted acceptance executed val tasks')
         elif expected_mode == 'empirical':
-            require(batch.get('empirically_validated') is bool(batch.get('acceptance', {}).get('candidates')),
-                    'empirical validation flag mismatch')
             acceptance = batch.get('acceptance', {})
             if acceptance.get('candidates'):
                 candidate_ids = {row.get('candidate_id') for row in acceptance['candidates']}
@@ -244,10 +236,6 @@ def audit_round(root, round_index):
                 }
                 require(candidate_ids == proposed_ids,
                         'empirical acceptance does not cover every proposed candidate')
-        elif expected_mode == 'sampled':
-            # Coverage, replay and memories were checked by sampled_audit above.
-            require(batch.get('empirically_validated') is False,
-                    'sampled acceptance was mislabeled as empirical validation')
     require(tuple(sorted(seen)) == expected_tasks,
             'round batches do not cover each train task exactly once')
     for skill in heads.values():
@@ -259,13 +247,11 @@ def audit_round(root, round_index):
         require(summary.get('train_cards') == len(expected_tasks),
                 'round summary card count mismatch')
         expected_mode = expected_acceptance_mode
-        require(summary.get('acceptance_mode') == expected_mode,
-                'summary acceptance mode mismatch')
         if expected_mode == 'predicted':
             require(summary.get('val_executions') == 0,
                     'val execution leaked into predicted evolution')
         elif expected_mode == 'sampled':
-            sampled_audit.audit_summary(summary, journals, protocol['config'])
+            sampled_audit.audit_summary(summary, journals)
         require(summary['skills'] == {s.skill_id: s.key for s in heads.values()}, 'summary Skill mismatch')
         require(summary['completed_batches'] == summary['batches'] == len(journals), 'batch count mismatch')
         require(summary['review_approved_updates'] == sum(b['outcome'] == 'review_approved' for b in journals),
@@ -276,8 +262,7 @@ def audit_round(root, round_index):
             ), 'predicted val candidate count mismatch')
     return {'round': round_index, 'tasks': len(cards), 'batches': len(journals),
             'review_approved': sum(x.get('outcome') == 'review_approved' for x in journals),
-            'acceptance_mode': expected_acceptance_mode,
-            'empirical_validation': expected_acceptance_mode == 'empirical'}
+            'acceptance_mode': expected_acceptance_mode}
 
 
 def main():

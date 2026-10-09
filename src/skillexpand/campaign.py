@@ -23,7 +23,7 @@ from skillexpand.l2 import sampled as SM
 from skillexpand.persistence import io as IO
 from skillexpand.persistence.usage import replay_ledger
 from skillexpand.reliability.errors import (
-    DISPOSITIONS, AuditFailure, Category, FrozenProtocolChanged, Halt, InvalidInput, RunLocked, classify,
+    DISPOSITIONS, AuditFailure, Category, FrozenProtocolChanged, Halt, InvalidInput, classify,
 )
 from skillexpand.reliability.policies import STAGE_ATTEMPTS_BY_CATEGORY, repair_policy, stage_policy
 from skillexpand.reliability.units import exit_now
@@ -132,10 +132,6 @@ def source_commit(repo):
         return None
 
 
-def locked(path):
-    return IO.exclusive_lock(path)
-
-
 def source_checkout():
     """The checkout whose ``src`` is frozen by ``prepare``; never a frozen copy."""
     repo = Path(__file__).resolve().parents[2]
@@ -157,10 +153,6 @@ def validate_inputs(tasks, split):
 def prepare(root, inputs, skill_edit_mode='structured', acceptance_mode='predicted', models=None,
             autonomous_attempts=4, supervised_attempts=1,
             candidate_count=1, single_candidate=False, **sampled_options):
-    if skill_edit_mode not in ('rewrite', 'structured'):
-        raise InvalidInput('Unknown Skill edit mode')
-    if acceptance_mode not in ('predicted', 'empirical', 'sampled'):
-        raise InvalidInput('Unknown acceptance mode')
     unknown = set(sampled_options) - set(SM.DEFAULTS)
     if unknown:
         raise InvalidInput(f'Unknown campaign option(s): {sorted(unknown)}')
@@ -235,13 +227,7 @@ def verify(root):
         raise FrozenProtocolChanged('Unexpected candidate protocol')
     if set(models) != set(ROLES) or not all(models.values()):
         raise InvalidInput('Every model role must be configured')
-    if (manifest['concurrency'] != CONCURRENCY or
-            manifest['evolve_rounds'] != 2 or
-            manifest['skill_edit_mode'] not in ('rewrite', 'structured') or
-            manifest['acceptance_mode'] not in ('predicted', 'empirical', 'sampled') or
-            int(manifest['autonomous_attempts']) < 1 or
-            int(manifest['supervised_attempts']) < 0 or
-            manifest['request_interval_seconds'] != REQUEST_INTERVAL_SECONDS):
+    if int(manifest['autonomous_attempts']) < 1 or int(manifest['supervised_attempts']) < 0:
         raise FrozenProtocolChanged('Unexpected campaign protocol')
     try:
         SM.validate_options({key: manifest[key] for key in (
@@ -460,78 +446,77 @@ def command(root, action, mode, benchmark=None, stage=None, attempt=None):
 def run_job(root, mode, benchmark):
     verify(root)
     directory = root / mode / benchmark
-    with locked(directory / 'job.lock'):
-        policy = stage_policy()
-        max_attempts = policy.attempts or 0
-        state_path = directory / 'status.json'
-        state = read(state_path) if state_path.exists() else {'stages': {}, 'started': time.time()}
-        state.pop('halt', None)
-        state.update(pid=os.getpid(), status='running',
-                     recovery={'stage_max_attempts': max_attempts,
-                               'reviewer_attempts': repair_policy('reviewer.predicted_val').attempts})
-        for stage in STAGES:
-            previous = state['stages'].get(stage, {})
-            if previous.get('status') == 'complete':
-                continue
-            first = previous.get('attempt', 0) + 1
-            offset = 0
-            # Consecutive same-category failures survive job restarts.
-            streak = previous.get('category_streak', 0)
-            last_category = previous.get('last_category')
-            while True:
-                attempt = first + offset
-                state.update(stage=stage, updated=time.time())
-                state.pop('next_retry_at', None)
-                state['stages'][stage] = {'attempt': attempt, 'status': 'running'}
-                log_path = directory / 'logs' / f'{stage}-{attempt}.log'
-                log_path.parent.mkdir(exist_ok=True)
-                with log_path.open('ab') as log:
-                    child = subprocess.Popen(command(root, '_stage', mode, benchmark, stage, attempt),
-                        env=environment(root), cwd=read(root / 'manifest.json')['repo'],
-                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
-                    state['stages'][stage]['pid'] = child.pid
-                    save(state_path, state)
-                    rc = child.wait()
-                attempt_path = directory / 'attempts' / f'{stage}-{attempt}.json'
-                # A stage killed by a signal (OOM, operator) is an infrastructure
-                # interruption; any other exit without its record is a defect.
-                result = read(attempt_path) if attempt_path.exists() else (
-                    {'status': 'failed', 'error': f'Child killed by signal {-rc}',
-                     'category': Category.INFRASTRUCTURE.value, 'retryable': True,
-                     'halt': Halt.AFTER_STAGE.value} if rc < 0 else
-                    {'status': 'failed', 'error': f'Child exited {rc} without result',
-                     'category': Category.BUG.value, 'retryable': False, 'halt': Halt.ALL.value})
-                complete = rc == 0 and result['status'] == 'complete'
-                state['stages'][stage].update(status='complete' if complete else 'failed',
-                                               returncode=rc, result=result)
+    policy = stage_policy()
+    max_attempts = policy.attempts or 0
+    state_path = directory / 'status.json'
+    state = read(state_path) if state_path.exists() else {'stages': {}, 'started': time.time()}
+    state.pop('halt', None)
+    state.update(pid=os.getpid(), status='running',
+                 recovery={'stage_max_attempts': max_attempts,
+                           'reviewer_attempts': repair_policy('reviewer.predicted_val').attempts})
+    for stage in STAGES:
+        previous = state['stages'].get(stage, {})
+        if previous.get('status') == 'complete':
+            continue
+        first = previous.get('attempt', 0) + 1
+        offset = 0
+        # Consecutive same-category failures survive job restarts.
+        streak = previous.get('category_streak', 0)
+        last_category = previous.get('last_category')
+        while True:
+            attempt = first + offset
+            state.update(stage=stage, updated=time.time())
+            state.pop('next_retry_at', None)
+            state['stages'][stage] = {'attempt': attempt, 'status': 'running'}
+            log_path = directory / 'logs' / f'{stage}-{attempt}.log'
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open('ab') as log:
+                child = subprocess.Popen(command(root, '_stage', mode, benchmark, stage, attempt),
+                    env=environment(root), cwd=read(root / 'manifest.json')['repo'],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+                state['stages'][stage]['pid'] = child.pid
                 save(state_path, state)
-                if complete:
-                    break
-                category = result.get('category')
-                streak = streak + 1 if category == last_category else 1
-                last_category = category
-                state['stages'][stage].update(category_streak=streak, last_category=category)
-                limit = STAGE_ATTEMPTS_BY_CATEGORY.get(category)
-                if limit is not None and streak >= limit:
-                    result = dict(result, retryable=False,
-                                  error=f"{result.get('error')} ({category} failures in "
-                                        f"{streak} consecutive attempts)")
-                if not result.get('retryable') or (max_attempts and offset + 1 >= max_attempts):
-                    state.update(status='needs_attention', updated=time.time(),
-                                 failure_category=result.get('category'),
-                                 halt=result.get('halt', Halt.STAGE.value))
-                    save(state_path, state)
-                    return 1
-                delay = policy.delay(offset)
-                state.update(status='retry_wait', updated=time.time(),
-                             next_retry_at=time.time() + delay)
+                rc = child.wait()
+            attempt_path = directory / 'attempts' / f'{stage}-{attempt}.json'
+            # A stage killed by a signal (OOM, operator) is an infrastructure
+            # interruption; any other exit without its record is a defect.
+            result = read(attempt_path) if attempt_path.exists() else (
+                {'status': 'failed', 'error': f'Child killed by signal {-rc}',
+                 'category': Category.INFRASTRUCTURE.value, 'retryable': True,
+                 'halt': Halt.AFTER_STAGE.value} if rc < 0 else
+                {'status': 'failed', 'error': f'Child exited {rc} without result',
+                 'category': Category.BUG.value, 'retryable': False, 'halt': Halt.ALL.value})
+            complete = rc == 0 and result['status'] == 'complete'
+            state['stages'][stage].update(status='complete' if complete else 'failed',
+                                           returncode=rc, result=result)
+            save(state_path, state)
+            if complete:
+                break
+            category = result.get('category')
+            streak = streak + 1 if category == last_category else 1
+            last_category = category
+            state['stages'][stage].update(category_streak=streak, last_category=category)
+            limit = STAGE_ATTEMPTS_BY_CATEGORY.get(category)
+            if limit is not None and streak >= limit:
+                result = dict(result, retryable=False,
+                              error=f"{result.get('error')} ({category} failures in "
+                                    f"{streak} consecutive attempts)")
+            if not result.get('retryable') or (max_attempts and offset + 1 >= max_attempts):
+                state.update(status='needs_attention', updated=time.time(),
+                             failure_category=result.get('category'),
+                             halt=result.get('halt', Halt.STAGE.value))
                 save(state_path, state)
-                time.sleep(delay)
-                offset += 1
-                state['status'] = 'running'
-        state.update(status='complete', updated=time.time())
-        save(state_path, state)
-        return 0
+                return 1
+            delay = policy.delay(offset)
+            state.update(status='retry_wait', updated=time.time(),
+                         next_retry_at=time.time() + delay)
+            save(state_path, state)
+            time.sleep(delay)
+            offset += 1
+            state['status'] = 'running'
+    state.update(status='complete', updated=time.time())
+    save(state_path, state)
+    return 0
 
 
 def require_preflight(root):
@@ -645,7 +630,6 @@ def sampled_acceptance_probe(root, benchmark, run, cfg, manifest):
               'decision': decision,
               'verifier_categories': sorted(row['verification']['category']
                                             for row in recorded['rows'] if row['verification'])}
-    save(directory / 'report.json', report)
     return report
 
 
@@ -718,7 +702,7 @@ def supervise(root, mode):
     if mode == 'full':
         require_preflight(root)
     directory = root / mode
-    with locked(directory / 'supervisor.lock'):
+    with IO.exclusive_lock(directory / 'supervisor.lock'):
         children, logs = {}, []
         def stop(signum, frame):
             for child in children.values():
@@ -781,21 +765,14 @@ def start(root, mode):
         require_preflight(root)
     health(root)
     directory = root / mode
-    with locked(directory / 'launch.lock'):
-        pidfile = directory / 'supervisor.pid'
-        if pidfile.exists():
-            pid = int(pidfile.read_text())
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                pass
-            else:
-                raise RunLocked(f'Supervisor PID {pid} still exists; refusing duplicate launch')
-        with (directory / 'supervisor.log').open('ab') as log:
-            child = subprocess.Popen(command(root, '_supervise', mode),
-                cwd=read(root / 'manifest.json')['repo'], env=environment(root),
-                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        pidfile.write_text(str(child.pid) + '\n')
+    # The supervisor holds supervisor.lock for its whole life; this probe only fails
+    # early, and the supervisor's own acquisition stays authoritative.
+    with IO.exclusive_lock(directory / 'supervisor.lock'):
+        pass
+    with (directory / 'supervisor.log').open('ab') as log:
+        child = subprocess.Popen(command(root, '_supervise', mode),
+            cwd=read(root / 'manifest.json')['repo'], env=environment(root),
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     return {'pid': child.pid, 'mode': mode, 'status_path': str(directory / 'status.json')}
 
 
@@ -809,10 +786,10 @@ def main():
     parser.add_argument('--benchmark', choices=BENCHMARKS)
     parser.add_argument('--stage', choices=STAGES)
     parser.add_argument('--attempt', type=int)
-    parser.add_argument('--skill-edit-mode', choices=('rewrite', 'structured'), default='structured',
+    parser.add_argument('--skill-edit-mode', choices=SM.CHOICES['skill_edit_mode'], default='structured',
                         help='Skill editing mode frozen when preparing a campaign')
     parser.add_argument('--acceptance-mode',
-                        choices=('predicted', 'empirical', 'sampled'),
+                        choices=SM.CHOICES['acceptance_mode'],
                         default='predicted',
                         help='Skill acceptance mode frozen when preparing a campaign')
     SM.add_arguments(parser)

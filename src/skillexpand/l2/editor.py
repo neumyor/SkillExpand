@@ -265,8 +265,6 @@ class EditOutcome:
 
 class SkillEditor:
     def __init__(self, host_agent, skill_edit_mode="rewrite", editor_host=None):
-        if skill_edit_mode not in ("rewrite", "structured"):
-            raise ValueError("Unknown Skill edit mode")
         self.host = host_agent
         self.editor_host = editor_host or host_agent
         self.skill_edit_mode = skill_edit_mode

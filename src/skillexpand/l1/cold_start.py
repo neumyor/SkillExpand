@@ -92,8 +92,6 @@ class ColdStart:
         self.supervised_attempts=supervised_attempts
         self.family_discovery_workers=family_discovery_workers
         self.card_batch_size=card_batch_size
-        if skill_edit_mode not in ('rewrite', 'structured'):
-            raise InvalidInput('Unknown Skill edit mode')
         self.skill_edit_mode=skill_edit_mode
         if min(cold_start_workers,family_discovery_workers,k,card_batch_size)<1 or supervised_attempts < 0:
             raise InvalidInput('cold-start budgets must be positive')
@@ -123,20 +121,11 @@ class ColdStart:
                  'evidence_policy':EVIDENCE_POLICY}
         prompt=('BENCHMARK RUNTIME CONTEXT (use its actual tools and completion semantics):\n'
                 +json.dumps(context,ensure_ascii=False)+'\n\n'+prompt)
-        request_id=uuid.uuid4().hex
-        path=self.directory/'requests'/f'{request_id}.json'
-        save(path,{'input':prompt,'status':'started'})
-        try:
-            if self._ask is None:
-                host=F.build_reasoning_host(self.cfg,self.directory/'usage'/f'{request_id}.json', role=role)
-                raw=host.llm([HumanMessage(content=prompt)],stop=[],replace_newline=False)
-            else:
-                raw=self._ask(prompt)
-        except Exception as exc:
-            save(path,{'input':prompt,'status':'error','error':type(exc).__name__})
-            raise
-        save(path,{'input':prompt,'output':raw,'status':'completed'})
-        return raw
+        if self._ask is not None:
+            return self._ask(prompt)
+        # The request and its response are recorded in the usage ledger beside it.
+        host=F.build_reasoning_host(self.cfg,self.directory/'usage'/f'{uuid.uuid4().hex}.json', role=role)
+        return host.llm([HumanMessage(content=prompt)],stop=[],replace_newline=False)
 
     def collect(self):
         source=self.plan.tasks_in(S.SPLIT_TRAIN)

@@ -150,11 +150,8 @@ def audit_batch(root, batch, config):
             == (executions, requests), 'sampled acceptance cost differs from its candidates')
 
 
-def audit_summary(summary, journals, config):
-    """The round summary reports the frozen switches and recomputable metrics."""
-    for key in ('acceptance_sample_size', 'acceptance_confidence', 'claim_verification',
-                'planner_memory_mode', 'reviewer_memory_mode'):
-        require(summary.get(key) == config[key], f'summary {key} differs from protocol')
+def audit_summary(summary, journals):
+    """The round summary's cost and Reviewer metrics are recomputable from the journals."""
     require(summary.get('val_executions') == sum(
         int(b.get('acceptance', {}).get('executions', 0)) for b in journals),
         'sampled summary execution count mismatch')

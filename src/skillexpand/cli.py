@@ -65,10 +65,10 @@ def build_parser():
     )
     p.add_argument("--evolve-rounds", type=int, default=1,
         help="Number of Skill-aware L1 -> L2 evolution rounds")
-    p.add_argument("--skill-edit-mode", choices=("rewrite", "structured"),
+    p.add_argument("--skill-edit-mode", choices=SM.CHOICES["skill_edit_mode"],
         default="structured", help="Rewrite complete Skill bodies or apply one structured rule edit")
     p.add_argument("--acceptance-mode",
-        choices=("predicted", "empirical", "sampled"),
+        choices=SM.CHOICES["acceptance_mode"],
         default="predicted",
         help="Accept by a predicted val-panel forecast, paired val execution, or a "
              "paired delta corrected by a random val sample")

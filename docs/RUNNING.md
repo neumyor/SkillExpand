@@ -149,4 +149,4 @@ python <campaign>/code/run_campaign.py test --root <campaign> --benchmark search
 
 单候选以及 sampled 的五个抽样与记忆开关都在 prepare 时冻结并校验。`stage_args()` 把冻结参数传给每个 cold-start/evolve 阶段（sampled 开关只在 sampled 下传），避免恢复时意外切换验收口径。sampled campaign 的 `independent-check` 还会在 4 道 preflight 题上真实跑一次 sampled 验收（配对 Δ 预测、两臂执行、判定者、PPI 下界），并用离线审计重放，弥补 preflight 只有 1 道 val 题、跑不到接受路径的缺口。`check` 以 `code/` 与 `inputs/` 的摘要为准，源码仓库的 Git 漂移只在输出的 `source_drift` 中报告。
 
-长任务应通过独立 session 启动，并使用 pidfile、job lock 和产物文件判断进度；不要用模糊进程名判断存活。启动前先做 1–2 个 task 的全链路 smoke、真实 LLM 健康请求和离线审计。
+长任务应通过独立 session 启动，并使用 supervisor flock 和产物文件判断进度；不要用模糊进程名判断存活。启动前先做 1–2 个 task 的全链路 smoke、真实 LLM 健康请求和离线审计。

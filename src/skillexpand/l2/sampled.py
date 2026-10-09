@@ -74,6 +74,8 @@ DEFAULTS = {
     'reviewer_memory_mode': 'cases',
 }
 CHOICES = {
+    'skill_edit_mode': ('rewrite', 'structured'),
+    'acceptance_mode': ('predicted', 'empirical', 'sampled'),
     'claim_verification': ('on', 'off'),
     'planner_memory_mode': ('aggregate', 'off'),
     'reviewer_memory_mode': ('cases', 'off'),
@@ -108,8 +110,9 @@ def options_from(args) -> Dict[str, Any]:
 def validate_options(options: Dict[str, Any]) -> None:
     """Reject switch values and combinations the protocol cannot express.
 
-    Applies to every protocol, because the switches are frozen into the
-    manifest either way.  The sampled protocol additionally requires the
+    The one validator of the mode strings and switches, shared by the CLI,
+    ``EvolutionConfig`` and the campaign manifest.  Applies to every protocol,
+    because the switches are frozen into the manifest either way.  The sampled protocol additionally requires the
     structured edit mode: a single added or replaced rule is what makes the
     delta attributable.
     """
@@ -211,7 +214,6 @@ def accept(validator, base_skill: S.Skill, ordered: Sequence[S.CandidateSkill],
         'reason': reason,
         'selected_candidate_id': aliases[selected].candidate_id if selected else None,
         'outcome': 'review_approved' if selected else 'hold',
-        'empirically_validated': False,
     }, selected
 
 
@@ -237,14 +239,7 @@ def journal_fields(planner_memory: str,
             'reviewer_memory_version': reviewer_memory.version if reviewer_memory else 0}
 
 
-def summary_fields(config, records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """Round-summary fields of this protocol, including the Reviewer metrics."""
+def summary_fields(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Round-summary fields of this protocol: the Reviewer metrics."""
     changes = [change for record in records for change in LED.changes_from_journal(record)]
-    return {
-        'acceptance_sample_size': config.acceptance_sample_size,
-        'acceptance_confidence': config.acceptance_confidence,
-        'claim_verification': config.claim_verification,
-        'planner_memory_mode': config.planner_memory_mode,
-        'reviewer_memory_mode': config.reviewer_memory_mode,
-        'reviewer_metrics': LED.reviewer_metrics(changes),
-    }
+    return {'reviewer_metrics': LED.reviewer_metrics(changes)}

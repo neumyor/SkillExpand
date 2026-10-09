@@ -169,7 +169,6 @@ class SerialL2Tests(unittest.TestCase):
         summary = self.run_offline(driver)
         self.assertEqual(summary["completed_batches"], 2)
         self.assertEqual(summary["review_approved_updates"], 1)
-        self.assertFalse(summary["empirically_validated"])
         self.assertEqual(summary["val_executions"], 0)
         self.assertGreater(summary["predicted_val_requests"], 0)
         self.assertEqual(
@@ -227,7 +226,6 @@ class SerialL2Tests(unittest.TestCase):
             side_effect=lambda cfg, path, role=None: editor
         ), patch.object(L.FrozenRoutes, "run", return_value=Routes()):
             summary = driver.run()
-        self.assertTrue(summary["empirically_validated"])
         self.assertEqual(summary["review_approved_updates"], 1)
         self.assertGreater(summary["val_executions"], 0)
         self.assertEqual(driver.skill_heads()[0].version, 1)

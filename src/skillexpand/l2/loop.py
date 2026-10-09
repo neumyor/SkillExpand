@@ -50,10 +50,6 @@ class EvolutionConfig:
             raise InvalidInput("Evolution budgets must be positive")
         if self.supervised_attempts < 0:
             raise InvalidInput("supervised_attempts must be nonnegative")
-        if self.skill_edit_mode not in ("rewrite", "structured"):
-            raise InvalidInput("Unknown Skill edit mode")
-        if self.acceptance_mode not in ("predicted", "empirical", "sampled"):
-            raise InvalidInput("Unknown acceptance mode")
         if self.single_candidate and self.candidate_count != 1:
             raise InvalidInput("single_candidate protocol requires candidate_count=1")
         SM.validate_options(self.to_dict())
@@ -122,7 +118,6 @@ class SerialEvolutionLoop:
         # candidate and L1 execution settings remain frozen.
         protocol_config.pop('evolve_rounds', None)
         identity = {
-            "execution_protocol": "skill-aware-rounds-v2",
             "l1": {"attempts": self.l1_attempts, "supervised": self.l1_supervised},
             "config": protocol_config,
             "cards": {
@@ -533,8 +528,7 @@ class SerialEvolutionLoop:
                 # The one full offline replay of the round, fresh or resumed.
                 save(round_summary.parent / 'audit.json', audit_round(self.paths.root, round_index))
             result = dict(last_result)
-            result.update({'evolve_rounds': rounds, 'latest_evolution_round': rounds,
-                           'l1_cards_are_skill_aware': True})
+            result['latest_evolution_round'] = rounds
             save(self.paths.summary, result)
             return result
         except Exception as exc:
@@ -569,7 +563,6 @@ class SerialEvolutionLoop:
             "train_cards": len(self.cards),
             "batches": len(batches),
             "completed_batches": len(records),
-            "hypotheses": sum(len(r["hypotheses"]) for r in records),
             "predicted_val_candidates": sum(
                 len(r.get("acceptance", {}).get("candidates", ()))
                 for r in records
@@ -579,11 +572,6 @@ class SerialEvolutionLoop:
                 r["outcome"] == "review_approved" for r in records
             ),
             "skills": {s.skill_id: s.key for s in self.skill_heads()},
-            "acceptance_mode": self.config.acceptance_mode,
-            "single_candidate": self.config.single_candidate,
-            "empirically_validated": bool(records) and self.config.acceptance_mode == "empirical" and all(
-                r.get("empirically_validated") is True for r in records
-            ),
             "val_executions": sum(
                 int(r.get("acceptance", {}).get("executions", 0)) for r in records
             ),
@@ -591,8 +579,6 @@ class SerialEvolutionLoop:
                 int(r.get("acceptance", {}).get("predicted_requests", 0))
                 for r in records
             ),
-            "description_frozen": True,
-            "l3_enabled": False,
-            **(SM.summary_fields(self.config, records)
+            **(SM.summary_fields(records)
                if self.config.acceptance_mode == SM.MODE else {}),
         }
