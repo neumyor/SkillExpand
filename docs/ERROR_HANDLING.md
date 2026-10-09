@@ -26,7 +26,7 @@
 | `infrastructure` | `ProviderUnavailable`、`EnvironmentFailure`/`EnvironmentTimeout`、`WorkerLost`、`StageIncomplete`（失败全部来自 `response` 时，类别也取 `response`） | 是 | 当前批次跑完后，阶段以 `StageIncomplete` 结束 |
 | `response` | `JsonExtractionError`、`SchemaViolation`、`ReferenceViolation`、`RepairExhausted` | 是 | 同上 |
 | `provider_rejected` | `ProviderRejected`（认证、权限、模型不存在、请求非法或超长） | 否 | 立即停止当前阶段 |
-| `integrity` | `FrozenProtocolChanged`、`FrozenCodeChanged`、`AuditFailure`、`JournalConflict`、`StoreError`/`LedgerCorrupt`、`IsolationViolation` | 否 | 立即停止当前阶段 |
+| `integrity` | `FrozenProtocolChanged`、`AuditFailure`、`JournalConflict`、`StoreError`/`LedgerCorrupt`、`IsolationViolation` | 否 | 立即停止当前阶段 |
 | `configuration` | `InvalidInput`、`RunLocked` | 否 | 立即停止当前阶段 |
 | `bug` | 其他任何异常 | 否 | **立即停止整个流程** |
 
@@ -39,10 +39,9 @@
 | 边界 | 翻译 |
 |---|---|
 | `runtime/models/llm.py` | openai 的 `Timeout`、`APIConnectionError`、`RateLimitError`、`ServiceUnavailableError`、`TryAgain` → `ProviderUnavailable`；`APIError` 按 HTTP 状态区分：408、409、429、5xx 或无状态 → `ProviderUnavailable`，其余 4xx → `ProviderRejected`；`AuthenticationError`、`PermissionError`、`InvalidRequestError`、`InvalidAPIType`、`SignatureVerificationError` → `ProviderRejected` |
-| `evaluation/jev.py` | HTTP 429 和 5xx、网络错误、超时、`http.client` 协议错误 → `ProviderUnavailable`；其他 4xx → `ProviderRejected`；响应不完整 → `SchemaViolation` |
 | `benchmarks/base.py` | 原生环境调用超时 → `EnvironmentTimeout`；`BrokenPipeError`、`ConnectionResetError`、`EOFError` → `EnvironmentFailure` |
 | `runtime/parallel.py` | 进程池无进展 → `WorkerLost` |
-| `persistence/io.py` | 写锁冲突 → `RunLocked`；冻结身份不一致 → `FrozenProtocolChanged` / `FrozenCodeChanged`；JSONL 中间行损坏 → `LedgerCorrupt`；`require()` 失败 → `AuditFailure` |
+| `persistence/io.py` | 写锁冲突 → `RunLocked`；冻结身份不一致 → `FrozenProtocolChanged`；JSONL 中间行损坏 → `LedgerCorrupt`；`require()` 失败 → `AuditFailure` |
 | 各响应解析器 | 解析时出现的 `ValueError/KeyError/TypeError/AttributeError` 由 `call_with_repair` 统一转为 `SchemaViolation`；请求阶段的异常不做这种转换。同一个校验函数（例如 `DiscoveryError`）用于已落盘产物时属于 `integrity`，用于模型输出时属于 `response` |
 
 ## 4. 重试与修复策略
@@ -55,11 +54,10 @@
 
 | 名称 | 次数 | 用完之后 |
 |---|---:|---|
-| `reviewer.predicted_val`、`reviewer.calibration_rules`、`reviewer.delta_review` | 32（可用 `EXPE_REVIEWER_ATTEMPTS` 覆盖） | 可重试 |
+| `reviewer.predicted_val`、`reviewer.delta_review` | 32（可用 `EXPE_REVIEWER_ATTEMPTS` 覆盖） | 可重试 |
 | `verifier.claim` | 8 | 可重试 |
-| `planner.hypotheses`、`reviewer.card` | 2（第 2 次附带 correction） | 可重试 |
+| `planner.hypotheses` | 2（第 2 次附带 correction） | 可重试 |
 | `discovery.tags`、`discovery.proposals`、`discovery.assignment`、`discovery.initial_skill` | 3（附固定后缀） | 可重试 |
-| `campaign.reviewer_probe` | 3 | 可重试 |
 | `editor.candidate`、`patterns.batch`、`selector.route` | 1 | 降级，记为协议内的结果（无候选、无 pattern、路由失败） |
 
 修复预算决定模型调用次数，属于实验协议；修改后应使用新的运行目录。
@@ -85,7 +83,7 @@ L1、路由和 fixed-Skill 执行的 worker 结果都带 `failure` 字段：成�
 
 记录中的 `stage` 字段由 collector 写入（如 `evolution-1/l1`、`routing-test`、`fixed-execution`）。
 
-接入位置：冷启动和 evolution 的 L1、val/test 路由、fixed-Skill 执行、predicted-val、JEV、sampled 配对 Δ Reviewer（stage `delta-review`）。sampled 判定者不经过 collector，修复用尽的 `RepairExhausted` 直接中止当前 batch（可重试，`--resume` 时从缓存续跑）。L1 checkpoint 的 `errors[]` 和被中断 trial 的 `failure_category` 也会记录类别。
+接入位置：冷启动和 evolution 的 L1、val/test 路由、fixed-Skill 执行、predicted-val、sampled 配对 Δ Reviewer（stage `delta-review`）。sampled 判定者不经过 collector，修复用尽的 `RepairExhausted` 直接中止当前 batch（可重试，`--resume` 时从缓存续跑）。L1 checkpoint 的 `errors[]` 和被中断 trial 的 `failure_category` 也会记录类别。
 
 ## 6. 阶段与 campaign
 
@@ -100,10 +98,10 @@ L1、路由和 fixed-Skill 执行的 worker 结果都带 `failure` 字段：成�
 续跑依次经过以下几层：
 
 1. **互斥**：`RunLock` / `exclusive_lock`，冲突时抛 `RunLocked`。
-2. **协议冻结**：`freeze`；只有代码变化时需加 `--allow-code-change`，漂移写入 `code_changes.jsonl`。
+2. **协议冻结**：`freeze` 只冻结方法输入，写一次、之后必须相等。
 3. **单元缓存**：已完成的单元跳过（冷启动 `results/`、evolution `cards/`、路由 `tasks/`、`ScoreCache`、L2 `l2_proposals/`）；失败的单元不写入缓存。
-4. **修复回放**：L2 的每次修复尝试都按 `hypotheses-<n>`（逐卡 Reviewer 为 `review-<id>-<n>`，`n` 从 0 开始）落盘。续跑时先回放这些尝试且不计入预算，然后继续新的请求。
-5. **事务日志**：先写 L2 batch journal，再写 Skill 版本库；续跑时重放日志。
+4. **修复回放**：L2 的每次修复尝试都按 `hypotheses-<n>`（`n` 从 0 开始）落盘。续跑时先回放这些尝试且不计入预算，然后继续新的请求。
+5. **事务日志**：先写 L2 batch journal，再写 Skill 版本库；续跑时只核对提交一致性（候选已批准/选中、日志与版本库一致）并补写缺失的版本；批次决策的完整重放只在每轮结束的 `audit_round` 做一次。
 6. **账本自愈**：中断的最后一行移到 `.interrupted-tail`，补上缺失的换行；没有结束事件的请求记为 abandoned。abandoned 请求不再导致 L1 checkpoint 审计失败：被中断的 trial 已记为 interrupted 并重跑，checkpoint 不会使用这些响应，而它实际用到的每个响应都与账本逐一核对。它们的 token 成本未知，由 `tokens_complete=false` 和 `abandoned_requests` 计数反映。
 
 ## 8. 扩展指南
@@ -120,6 +118,6 @@ L1、路由和 fixed-Skill 执行的 worker 结果都带 `failure` 字段：成�
 
 ## 9. 不兼容历史 run
 
-当前代码只读取自己产生的工件格式，不对旧 run 做任何兼容：失败记录没有 `error` 字符串，修复尝试的缓存名、predicted reviewer 的协议哈希和 l2_manifest 都已变化，`discovery/card_hashes.json` 与 L1 checkpoint 的 `identity` 为必需项，逐卡 Reviewer 只接受 `old_outcome`/`new_outcome`。旧 run（包括含 `invalid_hypotheses` / `invalid_review` hold 的 batch）只能用产生它的代码续跑或审计。
+当前代码只读取自己产生的工件格式，不对旧 run 做任何兼容：失败记录没有 `error` 字符串，修复尝试的缓存名、predicted reviewer 的协议哈希和 l2_manifest 都已变化，`discovery/card_hashes.json` 与 L1 checkpoint 的 `identity` 为必需项。旧 run（包括含 `invalid_hypotheses` / `invalid_review` hold 的 batch）只能用产生它的代码续跑或审计。
 
 - 尚未实现：把冷启动、evolution、路由、L2 等各自的"存在即跳过"统一抽象成 `UnitStore`，以及在每个阶段开始时写 `resume.json`。目前这几处缓存仍各自实现，但语义一致，失败单元都不会写入缓存。

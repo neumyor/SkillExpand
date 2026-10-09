@@ -1,4 +1,4 @@
-"""Complete L1 cold start, then batch-local L2 card review, with independent test evaluation."""
+"""Complete L1 cold start, then batch-local L2 evolution, with independent test evaluation."""
 
 import argparse
 import json
@@ -57,42 +57,30 @@ def build_parser():
     )
     p.add_argument(
         "--candidate-count", type=int, default=1,
-        help="Maximum candidate bodies independently reviewed on each train-card batch",
+        help="Maximum candidate bodies proposed for each train-card batch",
     )
     p.add_argument(
         "--single-candidate", action="store_true",
-        help="Enforce the reviewer co-evolution single-candidate protocol (requires --candidate-count 1)",
-    )
-    p.add_argument(
-        "--reviewer-update-mode", choices=("none", "summary", "rules"),
-        help="Use no Reviewer calibration, program summary only, or validated calibration "
-             "rules (default: rules, or none under sampled acceptance)",
-    )
-    p.add_argument(
-        "--reviewer-feedback-size", type=int, default=0,
-        help="Fixed train feedback tasks per Skill family; 0 means all train tasks",
+        help="Enforce the single-candidate protocol (requires --candidate-count 1)",
     )
     p.add_argument("--evolve-rounds", type=int, default=1,
         help="Number of Skill-aware L1 -> L2 evolution rounds")
-    p.add_argument("--skill-edit-mode", choices=("rewrite", "structured"),
+    p.add_argument("--skill-edit-mode", choices=SM.CHOICES["skill_edit_mode"],
         default="structured", help="Rewrite complete Skill bodies or apply one structured rule edit")
     p.add_argument("--acceptance-mode",
-        choices=("predicted", "empirical", "jev", "sampled"),
+        choices=SM.CHOICES["acceptance_mode"],
         default="predicted",
-        help="Accept by card review, paired execution, JEV validation, or a "
+        help="Accept by a predicted val-panel forecast, paired val execution, or a "
              "paired delta corrected by a random val sample")
-    p.add_argument("--predicted-review-scope", choices=("val", "train_cards"),
-        default="val", help="Evidence scope for predicted acceptance")
     p.add_argument("--progressive-library", action="store_true",
         help="TB-eval: select Skills from a catalog at run time (progressive library) and "
              "accept against the closed train panel; requires a progressive cold start, "
-             "terminalbench Harbor rollouts, --acceptance-mode predicted, "
-             "--predicted-review-scope val and --reviewer-update-mode none")
+             "terminalbench Harbor rollouts and --acceptance-mode predicted")
     SM.add_arguments(p)
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent train tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,
-        help="Concurrent per-card LLM reviews within each L2 batch")
+        help="Concurrent val-panel predictions or executions within each L2 batch")
     p.add_argument(
         "--test-workers",
         type=int,
@@ -103,15 +91,10 @@ def build_parser():
     p.add_argument('--cold-start-model', help='LLM used by cold-start discovery and Skill synthesis')
     p.add_argument('--l2-planner-model', help='LLM used to propose L2 hypotheses')
     p.add_argument('--l2-editor-model', help='LLM used to materialize rewrite-mode candidates')
-    p.add_argument('--l2-reviewer-model', help='LLM used by per-card L2 reviewers')
+    p.add_argument('--l2-reviewer-model', help='LLM used by the L2 reviewer')
     p.add_argument('--l2-verifier-model', help='LLM used by the claim verifier')
     p.add_argument('--selector-model', help='LLM used to route validation/test tasks')
     p.add_argument("--resume", action="store_true")
-    p.add_argument(
-        "--allow-code-change", action="store_true",
-        help="Resume although the source fingerprint differs from the frozen run; "
-             "the drift is appended to code_changes.jsonl beside each frozen manifest",
-    )
     p.add_argument("--show-plan", action="store_true")
     p.add_argument("--llm-relay", action="store_true",
                    help="Route all LLM calls through a persistent Tencent E2B relay sandbox")
@@ -202,12 +185,12 @@ def load_clustered_plan(root, plan):
     )
 
 
-def test_evaluate(cfg, plan, root, test_workers, allow_code_change=False):
+def test_evaluate(cfg, plan, root, test_workers):
     with IO.RunLock(root / 'run.pid'):
-        return _test_evaluate(cfg, plan, root, test_workers, allow_code_change)
+        return _test_evaluate(cfg, plan, root, test_workers)
 
 
-def _test_evaluate(cfg, plan, root, test_workers, allow_code_change=False):
+def _test_evaluate(cfg, plan, root, test_workers):
     evolved = any((root / 'evolution').glob('round-*/input.json'))
     if evolved:
         from skillexpand.l2.audit import audit_round
@@ -222,14 +205,13 @@ def _test_evaluate(cfg, plan, root, test_workers, allow_code_change=False):
     if evolved and {s.skill_id: s.key for s in skills} != status['skills']:
         raise JournalConflict('Skill library differs from completed evolution output')
     target = root / "test" / VA.library_fingerprint(skills)
-    freeze_protocol(cfg, skills, initial, target, allow_code_change=allow_code_change)
+    freeze_protocol(cfg, skills, initial, target)
     # Test questions/results are first accessed here. The initial descriptions are
     # the immutable routing reference; L2 never executes val or test tasks.
     routes = FrozenRoutes(
         cfg, plan, initial, root / "routes", S.SPLIT_TEST, test_workers
     ).run()
-    return evaluate_library(cfg, plan, root, skills, initial, routes, target, test_workers,
-                            allow_code_change=allow_code_change)
+    return evaluate_library(cfg, plan, root, skills, initial, routes, target, test_workers)
 
 
 def main(argv=None):
@@ -308,36 +290,12 @@ def main(argv=None):
             os.environ['OPENAI_API_BASE'] = base_url
             os.environ['MODEL_API_BASE'] = base_url
             os.environ['EXPE_LLM_RELAY_REQUIRED'] = '1'
-            # Tencent ModelBest accepts bare model ids, not the OpenAI provider
-            # namespace used by Harbor's generic config.
-            for role in cfg.models:
-                cfg.models[role] = str(cfg.models[role]).removeprefix('openai/')
-            cfg.agent.llm = str(cfg.agent.llm).removeprefix('openai/')
-            if OmegaConf.select(cfg, 'benchmark.rollout') is not None:
-                cfg.benchmark.rollout.llm_transport = 'tencent_e2b_relay'
-                cfg.benchmark.rollout.relay_base_url = base_url
-                cfg.benchmark.rollout.provider_base_url = os.environ.get(
-                    'TBENCH_RELAY_PROVIDER_BASE', 'https://llm-center.modelbest.co/v1')
-                cfg.benchmark.rollout.direct_provider_fallback = False
             IO.save(root / 'relay_manifest.json', {
                 'llm_transport': 'tencent_e2b_relay', 'relay_base_url': base_url,
                 'relay_scope': 'experiment', 'direct_provider_fallback': False,
                 'sandbox_id': relay.transport.sandbox_id})
         resolved_config = OmegaConf.to_container(cfg, resolve=True)
-        config_path = root / "config.json"
-        if args.llm_relay and config_path.exists():
-            # The relay binds an ephemeral loopback port and normalizes Tencent
-            # model names after a cold-start import.  A formal relay run
-            # therefore replaces the copied input config once, while preserving
-            # the ordinary frozen-input behaviour for all non-relay runs.
-            if json.loads(config_path.read_text()) != resolved_config:
-                config_path.unlink()
-                manifest_path = root / "manifest.json"
-                if manifest_path.exists():
-                    manifest = json.loads(manifest_path.read_text())
-                    manifest["config"] = resolved_config
-                    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        IO.freeze(config_path, resolved_config)
+        IO.freeze(root / "config.json", resolved_config)
         os.environ["EXPE_CONFIG_FILE"] = str(root / "config.json")
         os.environ["EXPE_TASK_FILE"] = cfg.benchmark.task_file
         if not completed:
@@ -351,7 +309,6 @@ def main(argv=None):
                 supervised=not args.no_supervised_repair,
                 family_discovery_workers=args.family_discovery_workers,
                 skill_edit_mode=args.skill_edit_mode,
-                allow_code_change=args.allow_code_change,
             ).run()
         if args.phase in ("l2", "evolve", "all"):
             config = L.EvolutionConfig(
@@ -364,23 +321,18 @@ def main(argv=None):
                 l2_review_workers=args.l2_review_workers,
                 skill_edit_mode=args.skill_edit_mode,
                 acceptance_mode=args.acceptance_mode,
-                predicted_review_scope=args.predicted_review_scope,
                 single_candidate=args.single_candidate,
-                reviewer_update_mode=args.reviewer_update_mode,
-                reviewer_feedback_size=args.reviewer_feedback_size,
                 progressive_library=args.progressive_library,
                 **SM.options_from(args),
             )
-            loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config,
-                                         allow_code_change=args.allow_code_change)
+            loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config)
             # All evolution entry points execute Skill-aware L1 before L2.
             result = loop.run_evolutions()
             print(json.dumps(result, indent=2))
         elif args.phase == "test":
             print(
                 json.dumps(
-                    test_evaluate(cfg, plan, root, args.test_workers,
-                                  args.allow_code_change), indent=2
+                    test_evaluate(cfg, plan, root, args.test_workers), indent=2
                 )
             )
     finally:

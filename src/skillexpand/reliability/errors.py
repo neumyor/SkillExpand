@@ -1,7 +1,7 @@
 """Failure categories, their dispositions, and translation of library exceptions.
 
 Every exception that can stop a unit belongs to one :class:`Category`.  What a
-category *means* -- whether the unit is retried and what stops -- is decided
+category *means* -- what stops, and so whether the unit is retried -- is decided
 once in :data:`DISPOSITIONS`, never at the raise site.
 
 Extending the taxonomy when a new failure is observed:
@@ -12,7 +12,7 @@ Extending the taxonomy when a new failure is observed:
   meaning depends on the instance (an HTTP status), pass a function returning
   the target class and declare whether it can be ``transient``.
 * A new kind of failure: subclass the closest class below.  Introduce a new
-  :class:`Category` only if it needs a different disposition, and add that
+  :class:`Category` only if it needs different behavior, and add its
   disposition to :data:`DISPOSITIONS`.
 
 Anything that is not a :class:`SkillExpandError` and has no registered
@@ -26,10 +26,12 @@ from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
 class Category(str, enum.Enum):
     INFRASTRUCTURE = 'infrastructure'
+    #: Model output broke its contract.  Retried like infrastructure, but a
+    #: stage's attempts are capped separately (``STAGE_ATTEMPTS_BY_CATEGORY``).
     RESPONSE = 'response'
-    PROVIDER_REJECTED = 'provider_rejected'
-    INTEGRITY = 'integrity'
-    CONFIGURATION = 'configuration'
+    #: Rejected requests, integrity violations and invalid configuration:
+    #: repeating the work cannot help.
+    PERMANENT = 'permanent'
     BUG = 'bug'
 
 
@@ -45,17 +47,18 @@ class Halt(str, enum.Enum):
 
 @dataclass(frozen=True)
 class Disposition:
-    retryable: bool
     halt: Halt
+
+    @property
+    def retryable(self) -> bool:
+        return self.halt is Halt.AFTER_STAGE
 
 
 DISPOSITIONS: Dict[Category, Disposition] = {
-    Category.INFRASTRUCTURE: Disposition(True, Halt.AFTER_STAGE),
-    Category.RESPONSE: Disposition(True, Halt.AFTER_STAGE),
-    Category.PROVIDER_REJECTED: Disposition(False, Halt.STAGE),
-    Category.INTEGRITY: Disposition(False, Halt.STAGE),
-    Category.CONFIGURATION: Disposition(False, Halt.STAGE),
-    Category.BUG: Disposition(False, Halt.ALL),
+    Category.INFRASTRUCTURE: Disposition(Halt.AFTER_STAGE),
+    Category.RESPONSE: Disposition(Halt.AFTER_STAGE),
+    Category.PERMANENT: Disposition(Halt.STAGE),
+    Category.BUG: Disposition(Halt.ALL),
 }
 
 
@@ -115,7 +118,7 @@ class StageIncomplete(SkillExpandError, RuntimeError):
 class ProviderRejected(SkillExpandError):
     """Authentication, permission, unknown model, invalid or oversized request."""
 
-    category = Category.PROVIDER_REJECTED
+    category = Category.PERMANENT
 
 
 # -- model output did not satisfy its contract --------------------------------
@@ -132,10 +135,6 @@ class SchemaViolation(ResponseFormatError):
     """Missing/extra fields, wrong types or out-of-range values."""
 
 
-class ReferenceViolation(SchemaViolation):
-    """References to card, evidence, rule or feedback IDs that were not supplied."""
-
-
 class RepairExhausted(ResponseFormatError):
     """The repair policy's budget ended without a valid response."""
 
@@ -148,15 +147,11 @@ class RepairExhausted(ResponseFormatError):
 # -- stored results disagree with their frozen definition --------------------
 
 class IntegrityError(SkillExpandError, ValueError):
-    category = Category.INTEGRITY
+    category = Category.PERMANENT
 
 
 class FrozenProtocolChanged(IntegrityError):
     """A frozen identity's protocol fields differ on resume."""
-
-
-class FrozenCodeChanged(IntegrityError):
-    """Only the source fingerprint of a frozen identity differs."""
 
 
 class AuditFailure(IntegrityError):
@@ -175,14 +170,10 @@ class LedgerCorrupt(StoreError):
     """A JSONL ledger is corrupt before its final record."""
 
 
-class IsolationViolation(IntegrityError):
-    """Train/val/test isolation or an experience-withholding contract was broken."""
-
-
 # -- the run cannot start as configured ---------------------------------------
 
 class ConfigurationError(SkillExpandError, ValueError):
-    category = Category.CONFIGURATION
+    category = Category.PERMANENT
 
 
 class InvalidInput(ConfigurationError):

@@ -19,6 +19,7 @@ Use exact evidence IDs from the supplied evidence. A procedure needs observation
 one successful trial; a comparison needs observations from two different trials.
 If the evidence cannot support a replacement, return {"claims":[]}.
 Do not claim that an action was necessary merely because it preceded success.'''
+PROMPTS = ('INSTRUCTION', 'REPAIR_INSTRUCTION')
 
 
 def _claim(row, available, solved):

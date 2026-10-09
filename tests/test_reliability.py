@@ -28,11 +28,10 @@ def no_sleep(monkeypatch):
     (E.EnvironmentTimeout('x'), 'infrastructure', True, 'after_stage'),
     (E.WorkerLost('x'), 'infrastructure', True, 'after_stage'),
     (E.RepairExhausted('x'), 'response', True, 'after_stage'),
-    (E.ProviderRejected('x'), 'provider_rejected', False, 'stage'),
-    (E.AuditFailure('x'), 'integrity', False, 'stage'),
-    (E.FrozenCodeChanged('x'), 'integrity', False, 'stage'),
-    (E.InvalidInput('x'), 'configuration', False, 'stage'),
-    (E.RunLocked('x'), 'configuration', False, 'stage'),
+    (E.ProviderRejected('x'), 'permanent', False, 'stage'),
+    (E.AuditFailure('x'), 'permanent', False, 'stage'),
+    (E.InvalidInput('x'), 'permanent', False, 'stage'),
+    (E.RunLocked('x'), 'permanent', False, 'stage'),
     (KeyError('x'), 'bug', False, 'all'),
     (ValueError('x'), 'bug', False, 'all'),
 ])
@@ -112,37 +111,6 @@ def test_provider_congestion_is_retried_until_the_endpoint_answers():
     assert client.call_count == 1
 
 
-def test_jev_maps_http_status_to_categories(monkeypatch):
-    from urllib.error import HTTPError
-    from skillexpand import schema as S
-    from skillexpand.evaluation import jev as J
-
-    skill = S.Skill('searchqa.f', 'f', 0, 'f', 'd', 'b', S.Provenance(rationale='t'))
-    responses = [HTTPError('u', 503, 'busy', {}, None), HTTPError('u', 429, 'slow', {}, None)]
-
-    class Ok:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return json.dumps({'answers': {'success': {'probabilities': {'true': 0.7}}}}).encode()
-
-    def urlopen(request, timeout):
-        if responses:
-            raise responses.pop(0)
-        return Ok()
-
-    monkeypatch.setattr(J, 'urlopen', urlopen)
-    monkeypatch.setattr(J.time, 'sleep', lambda s: None)
-    assert J.JevClient().judge('task', skill)['probability_true'] == 0.7
-    monkeypatch.setattr(J, 'urlopen', Mock(side_effect=HTTPError('u', 401, 'no', {}, None)))
-    with pytest.raises(E.ProviderRejected):
-        J.JevClient().judge('task', skill)
-
-
 # -- repair ------------------------------------------------------------------------
 
 def test_cached_failures_are_replayed_without_spending_the_budget():
@@ -183,11 +151,11 @@ def test_request_errors_are_never_treated_as_output_errors():
 
 
 def test_every_repair_site_is_registered_and_overridable(monkeypatch):
-    assert {'planner.hypotheses', 'reviewer.card', 'reviewer.predicted_val',
+    assert {'planner.hypotheses', 'reviewer.predicted_val',
             'discovery.assignment', 'selector.route'} <= set(REPAIR)
     monkeypatch.setenv('EXPE_REVIEWER_ATTEMPTS', '5')
     assert repair_policy('reviewer.predicted_val').attempts == 5
-    assert repair_policy('reviewer.card').attempts == REPAIR['reviewer.card'].attempts
+    assert repair_policy('planner.hypotheses').attempts == REPAIR['planner.hypotheses'].attempts
 
 
 # -- unit boundary ----------------------------------------------------------------
@@ -327,7 +295,7 @@ def test_api_error_is_classified_by_http_status():
     assert E.classify(api_error(429)) is E.Category.INFRASTRUCTURE
     assert E.classify(api_error(None)) is E.Category.INFRASTRUCTURE
     for status in (400, 401, 413):
-        assert E.classify(api_error(status)) is E.Category.PROVIDER_REJECTED
+        assert E.classify(api_error(status)) is E.Category.PERMANENT
 
 
 def test_l1_audit_accepts_every_retried_provider_error_name():
@@ -338,7 +306,7 @@ def test_l1_audit_accepts_every_retried_provider_error_name():
 
 def test_artifact_validation_is_integrity_but_model_output_validation_is_retryable():
     from skillexpand.l1 import family_discovery as D
-    assert E.classify(D.DiscoveryError('family plan benchmark mismatch')) is E.Category.INTEGRITY
+    assert E.classify(D.DiscoveryError('family plan benchmark mismatch')) is E.Category.PERMANENT
     with pytest.raises(E.RepairExhausted):
         R.call_with_repair(RepairPolicy('t', 2), R.fresh(lambda: '{}'),
                            lambda raw: (_ for _ in ()).throw(D.DiscoveryError('bad assignment')))

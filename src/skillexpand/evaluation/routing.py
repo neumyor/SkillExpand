@@ -11,7 +11,6 @@ from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
 from skillexpand import schema as S
 from skillexpand.persistence.io import freeze
-from skillexpand.runtime.models.llm import provider_signature
 from skillexpand.l1.adapters import resolve
 from skillexpand.persistence.io import save
 from skillexpand.evaluation.selector import SkillSelector
@@ -66,7 +65,6 @@ class FrozenRoutes:
             "protocol": "fixed-description-routes-v1",
             "split": split,
             "config": OmegaConf.to_container(cfg, resolve=True),
-            "provider": provider_signature(),
             "descriptions": list(self.descriptions),
             "tasks": {str(t): F.task_text_of(cfg, t) for t in self.ids},
             "prompt": resolve(cfg).selector_prompt(plan.benchmark),
@@ -79,13 +77,13 @@ class FrozenRoutes:
     def load_existing(cls, cfg, plan, library, root, split):
         """Load a completed frozen route without revalidating its provider hash.
 
-        This is intentionally read-only.  It is used for post-hoc calibration when
+        This is intentionally read-only.  It is used for post-hoc evaluation when
         the selector service version has changed since the route was measured; the
         task-to-Skill assignment is the frozen input we want to reuse, while a new
         selector call would silently change the evaluation panel.
         """
-        if split not in (S.SPLIT_VAL, S.SPLIT_TEST, S.SPLIT_TRAIN):
-            raise ValueError("Only val, test or (progressive closed-set) train tasks are routed")
+        if split not in (S.SPLIT_VAL, S.SPLIT_TEST):
+            raise ValueError("Only val or test tasks are routed")
         route_root = Path(root) / split
         manifest_path = route_root / "manifest.json"
         complete_path = route_root / "complete.json"

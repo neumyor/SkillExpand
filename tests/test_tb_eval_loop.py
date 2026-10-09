@@ -11,16 +11,13 @@ from omegaconf import OmegaConf
 
 from skillexpand import schema as S
 from skillexpand.evaluation import progressive as PG
-from skillexpand.evaluation import routing as R
 from skillexpand.l1 import artifacts as A
 from skillexpand.l1 import cold_start as C
 from skillexpand.l1 import workers as LW
 from skillexpand.l2 import audit as AU
 from skillexpand.l2 import loop as L
 from skillexpand.persistence.io import AuditFailure
-from skillexpand.reliability.errors import (
-    FrozenCodeChanged, FrozenProtocolChanged, InvalidInput, JournalConflict,
-)
+from skillexpand.reliability.errors import FrozenProtocolChanged, InvalidInput
 from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
 from tests import test_experience_first as fixtures
@@ -29,7 +26,7 @@ from tests.test_tb_eval_worker import build_cold_start, load_script
 
 TASKS = 4
 CONFIG = dict(batch_size=50, candidate_count=3, skill_edit_mode='rewrite',
-              reviewer_update_mode='none', autonomous_attempts=1, supervised_attempts=0)
+              autonomous_attempts=1, supervised_attempts=0)
 
 
 def progressive_config(**overrides):
@@ -237,34 +234,6 @@ def test_crash_after_manifest_freeze_leaves_manifest_bytes_unchanged(world):
     assert summary['status'] == 'complete'
 
 
-def test_completed_route_is_reloaded_not_rebuilt_when_the_provider_identity_moves(world):
-    world.run()
-    routes_manifest = world.root / 'routes' / 'train' / 'manifest.json'
-    frozen = json.loads(routes_manifest.read_text())
-    frozen['provider'] = {'moved': 'port'}
-    routes_manifest.write_text(json.dumps(frozen))
-    scorer = None
-    contexts = world.patched()
-    for c in contexts:
-        c.start()
-    try:
-        scorer = world.loop()._ensure_predicted_scorer()
-    finally:
-        for c in reversed(contexts):
-            c.stop()
-    assert scorer.routes.split == S.SPLIT_TRAIN
-    assert scorer.routes.groups == {'terminalbench.family-p001': (0, 2),
-                                    'terminalbench.family-p002': (1, 3)}
-
-
-def test_load_existing_still_checks_descriptions_for_train_routes(world):
-    world.run()
-    library = [replace(s, description='changed') for s in world.loop().initial]
-    with pytest.raises(JournalConflict, match='descriptions'):
-        R.FrozenRoutes.load_existing(world.cfg, world.plan, library, world.root / 'routes',
-                                     S.SPLIT_TRAIN)
-
-
 def test_rejected_candidates_hold_the_head_and_still_audit(world):
     world.hosts['l2_reviewer'] = SimpleNamespace(
         token_counter=len, llm=lambda messages, **kw: json.dumps(
@@ -314,10 +283,8 @@ def test_audit_rejects_a_card_that_claims_a_fixed_selection(world):
 @pytest.mark.parametrize('kwargs', [
     dict(acceptance_mode='sampled', skill_edit_mode='structured'),
     dict(acceptance_mode='empirical'),
-    dict(acceptance_mode='jev'),
-    dict(predicted_review_scope='train_cards'),
 ])
-def test_progressive_needs_predicted_val_acceptance(kwargs):
+def test_progressive_needs_predicted_acceptance(kwargs):
     with pytest.raises(InvalidInput, match='progressive_library requires'):
         progressive_config(**kwargs)
 
@@ -344,11 +311,6 @@ def test_progressive_requires_terminalbench_harbor(world):
         L.SerialEvolutionLoop(other, world.plan, L.LoopPaths(world.root), progressive_config())
 
 
-def test_progressive_requires_no_reviewer_calibration(world):
-    with pytest.raises(InvalidInput, match='reviewer_update_mode=none'):
-        world.loop(progressive_config(reviewer_update_mode='rules'))
-
-
 def test_cli_flag_reaches_the_evolution_config():
     from skillexpand import cli
     parser = cli.build_parser()
@@ -363,8 +325,7 @@ def test_cli_flag_reaches_the_evolution_config():
 MAIN_IDENTITY_KEYS = [
     'acceptance_confidence', 'acceptance_mode', 'acceptance_sample_size', 'autonomous_attempts',
     'batch_size', 'candidate_count', 'claim_verification', 'evolve_l1_workers',
-    'l2_review_workers', 'planner_memory_mode', 'predicted_review_scope',
-    'reviewer_feedback_size', 'reviewer_memory_mode', 'reviewer_update_mode',
+    'l2_review_workers', 'planner_memory_mode', 'reviewer_memory_mode',
     'single_candidate', 'skill_edit_mode', 'supervised_attempts']
 
 
@@ -380,9 +341,7 @@ class MainIdentityTests(unittest.TestCase):
         C.freeze(self.root / 'config.json', OmegaConf.to_container(self.cfg, resolve=True))
         loop = L.SerialEvolutionLoop(
             self.cfg, plan, L.LoopPaths(self.root),
-            L.EvolutionConfig(batch_size=1, predicted_review_scope='train_cards',
-                              candidate_count=3, skill_edit_mode='rewrite',
-                              reviewer_update_mode='none'))
+            L.EvolutionConfig(batch_size=1, candidate_count=3, skill_edit_mode='rewrite'))
         identity = json.loads((self.root / 'l2_manifest.json').read_text())
         self.assertEqual(sorted(identity['config']), MAIN_IDENTITY_KEYS)
         self.assertNotIn('progressive_library', identity['config'])
@@ -396,22 +355,15 @@ class MainIdentityTests(unittest.TestCase):
 RELAY_A, RELAY_B = 'http://127.0.0.1:41001/v1', 'http://127.0.0.1:41002/v1'
 
 
-def use_relay(world, url, required=True):
-    """Do what cli does for a relay launch: new endpoint env + rewritten frozen config."""
+def use_relay(world, url):
+    """Do what a relay launch does: only the environment changes (new loopback endpoint).
+
+    The relay never rewrites config.json, so the frozen config and every identity
+    built from it stay byte-identical across launches.
+    """
     world.monkeypatch.setenv('EXPE_LLM_BASE_URL', url)
     world.monkeypatch.setenv('OPENAI_API_BASE', url)
-    if required:
-        world.monkeypatch.setenv('EXPE_LLM_RELAY_REQUIRED', '1')
-    else:
-        world.monkeypatch.delenv('EXPE_LLM_RELAY_REQUIRED', raising=False)
-    config = json.loads((world.root / 'config.json').read_text())
-    config['benchmark']['rollout'].update(
-        llm_transport='tencent_e2b_relay', relay_base_url=url, direct_provider_fallback=False)
-    (world.root / 'config.json').write_text(json.dumps(config))
-    manifest = json.loads((world.root / 'manifest.json').read_text())
-    manifest['config'] = config
-    (world.root / 'manifest.json').write_text(json.dumps(manifest))
-    world.cfg, world.plan, _, _ = A.load_cold_start(world.root)
+    world.monkeypatch.setenv('EXPE_LLM_RELAY_REQUIRED', '1')
 
 
 def crash_in_judge(world):
@@ -428,11 +380,15 @@ def test_relay_run_resumes_across_a_relay_port_change(world):
     crash_in_judge(world)
     assert (world.root / 'routes' / 'train' / 'complete.json').exists()
     frozen_l2 = (world.root / 'l2_manifest.json').read_bytes()
+    frozen_routes = (world.root / 'routes' / 'train' / 'manifest.json').read_bytes()
+    assert RELAY_A.encode() not in frozen_l2 + frozen_routes   # no transport in any identity
     use_relay(world, RELAY_B)
     world.l1_runs = []
     loop, summary = world.run()
     assert summary['status'] == 'complete' and world.l1_runs == []
-    assert (world.root / 'l2_manifest.json').read_bytes() == frozen_l2   # never rewritten
+    # Plain write-once freeze: nothing was rewritten and nothing needed tolerance.
+    assert (world.root / 'l2_manifest.json').read_bytes() == frozen_l2
+    assert (world.root / 'routes' / 'train' / 'manifest.json').read_bytes() == frozen_routes
     AU.audit_round(world.root, 1)
 
 
@@ -457,44 +413,9 @@ def test_relay_port_change_during_routing_resumes_the_partial_route(world):
     assert summary['status'] == 'complete'
 
 
-def test_relay_port_change_never_waives_source_code_drift(world):
-    use_relay(world, RELAY_A)
-    crash_in_judge(world)
-    use_relay(world, RELAY_B)
-    with patch('skillexpand.l2.loop.code_signature', return_value={'x.py': 'drifted'}):
-        with pytest.raises(FrozenCodeChanged):
-            world.run()
-        with patch.object(L.SerialEvolutionLoop, 'run_evolutions', lambda self, rounds=None: None):
-            L.SerialEvolutionLoop(world.cfg, world.plan, L.LoopPaths(world.root),
-                                  progressive_config(), allow_code_change=True)
-    ledger = (world.root / 'code_changes.jsonl').read_text()
-    assert 'l2_manifest.json' in ledger
-
-
-def test_non_relay_provider_drift_is_still_refused(world):
-    use_relay(world, RELAY_A, required=False)
-    crash_in_judge(world)
-    use_relay(world, RELAY_B, required=False)
-    with pytest.raises(FrozenProtocolChanged):
-        world.run()
-
-
 def test_relay_run_still_refuses_a_real_protocol_change(world):
     use_relay(world, RELAY_A)
     crash_in_judge(world)
     use_relay(world, RELAY_B)
     with pytest.raises(FrozenProtocolChanged):
         world.run(progressive_config(candidate_count=2))
-
-
-def test_legacy_drift_env_switch_no_longer_waives_source_code_drift(world):
-    use_relay(world, RELAY_A)
-    crash_in_judge(world)
-    use_relay(world, RELAY_B)
-    world.monkeypatch.setenv('SKILLEXPAND_ALLOW_RELAY_CODE_DRIFT', '1')
-    before = (world.root / 'l2_manifest.json').read_bytes()
-    with patch('skillexpand.l2.loop.code_signature', return_value={'x.py': 'drifted'}):
-        with pytest.raises(FrozenCodeChanged):
-            world.run()
-    assert (world.root / 'l2_manifest.json').read_bytes() == before
-    assert not (world.root / 'code_changes.jsonl').exists()

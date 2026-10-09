@@ -76,10 +76,11 @@ def harbor_rollout(cfg, task_id, skill, attempts, out_dir, evolution_round=0):
     # Terminus runs inside the Tencent task sandbox.  A jinan40 loopback relay is
     # not visible from that sandbox; its model client already performs the HTTP
     # request inside E2B, so point it at the provider directly there.
-    if rollout.get('llm_transport') == 'tencent_e2b_relay':
-        env['MODEL_API_BASE'] = str(
-            rollout.get('provider_base_url') or
-            os.environ.get('TBENCH_RELAY_PROVIDER_BASE', 'https://llm-center.modelbest.co/v1'))
+    # ``EXPE_LLM_RELAY_REQUIRED`` is read directly: ``runtime`` ranks above
+    # ``benchmarks``, so importing ``relay_required`` would be an upward import.
+    if os.environ.get('EXPE_LLM_RELAY_REQUIRED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        env['MODEL_API_BASE'] = os.environ.get(
+            'TBENCH_RELAY_PROVIDER_BASE', 'https://llm-center.modelbest.co/v1')
     log_path = out_dir / 'tencent_runner.log'
     completed = subprocess.run(['bash', str(runner)], cwd=str(runner.parent.parent),
                                capture_output=True, text=True, env=env)

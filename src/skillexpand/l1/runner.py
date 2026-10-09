@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from langchain.schema import HumanMessage
 from omegaconf import OmegaConf
-from skillexpand.persistence.io import exclusive_lock, save
+from skillexpand.persistence.io import exclusive_lock, prompt_digests, save
 from skillexpand.reliability.errors import FrozenProtocolChanged, InvalidInput, JournalConflict, classify
 from skillexpand.l1.adapters import resolve
 from skillexpand.l1.adapters import PROMPT_FIELDS
@@ -44,6 +44,7 @@ def run(agent, cfg, task_id, family_id, split, skill, selected_skill_id,
                 'env': agent.tasks[task_id]['env_kwargs'],
                 'adapter': type(adapter).__module__ + ':' + type(adapter).__name__,
                 'revision': adapter.revision, 'prompts': {key: getattr(adapter,key) for key in PROMPT_FIELDS},
+                'method_prompts': prompt_digests(P, L),
                 'k': k, 'supervised': supervised, 'supervised_attempts': supervised_attempts,
                 'model': cfg.agent.llm,
                 'skill': {'key': skill.key, 'body': skill.body} if skill else None,

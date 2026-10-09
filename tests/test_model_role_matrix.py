@@ -52,7 +52,6 @@ def test_prepare_commands_use_existing_campaign_flags(tmp_path):
     assert command[command.index("--root") + 1].endswith("/l1_executor-strong")
     assert command[command.index("--l1-model") + 1] == "strong"
     assert command[command.index("--cold-start-model") + 1] == "base"
-    assert command[command.index("--predicted-review-scope") + 1] == "val"
 
 
 def test_test_commands_cover_both_held_out_benchmarks_per_condition(tmp_path):

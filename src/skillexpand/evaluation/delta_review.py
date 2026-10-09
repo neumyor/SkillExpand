@@ -126,6 +126,30 @@ class PairedDeltaReviewer:
         'Your visible final answer MUST be exactly one JSON object with only '
         'trigger_probability, delta_probability and reason. '
     )
+    INSTRUCTIONS = (
+        'You are a strict validation reviewer. A fresh executor will attempt '
+        'this task exactly ONCE, with no retry, no reflection and no access to '
+        'the answer, using the Skill below. Compare it with the same executor '
+        'on this same task using the Skill before this one rule changed, and '
+        'nothing else. '
+        'Report trigger_probability: the probability that the changed rule '
+        'changes what the executor does on THIS task. If the rule never fires '
+        'here, delta_probability must be 0: a rule that does not fire cannot '
+        'affect the outcome. '
+        'Report delta_probability = P(success after the change) - P(success '
+        'before), in [-1, 1]. Judge only what the change causes; the absolute '
+        'difficulty of the task cancels out and must not appear in either '
+        'field. Do not use any execution trace, and do not assume a rejected '
+        'answer can be retried. You may reason internally for as long as '
+        'needed. '
+        f'{OUTPUT_CONTRACT}'
+        'Do not output markdown, analysis, or any other key. reason is one '
+        f'concise string of at most {REASON_MAX_CHARS} characters that '
+        'names the situation the rule fires in, or why it cannot fire.'
+    )
+    #: Method prompt constants frozen in the L2 identity (read at call time).
+    PROMPTS = ('PROTOCOL', 'REASON_MAX_CHARS', 'RESPONSE_SCHEMA', 'OUTPUT_CONTRACT',
+               'INSTRUCTIONS')
 
     @classmethod
     def response_format(cls) -> Dict[str, Any]:
@@ -157,27 +181,7 @@ class PairedDeltaReviewer:
             'skill_after': {'description': candidate_skill.description,
                             'body': SS.render(SS.from_legacy(candidate_skill.body))},
             'claim': claim.payload(),
-            'instructions': (
-                'You are a strict validation reviewer. A fresh executor will attempt '
-                'this task exactly ONCE, with no retry, no reflection and no access to '
-                'the answer, using the Skill below. Compare it with the same executor '
-                'on this same task using the Skill before this one rule changed, and '
-                'nothing else. '
-                'Report trigger_probability: the probability that the changed rule '
-                'changes what the executor does on THIS task. If the rule never fires '
-                'here, delta_probability must be 0: a rule that does not fire cannot '
-                'affect the outcome. '
-                'Report delta_probability = P(success after the change) - P(success '
-                'before), in [-1, 1]. Judge only what the change causes; the absolute '
-                'difficulty of the task cancels out and must not appear in either '
-                'field. Do not use any execution trace, and do not assume a rejected '
-                'answer can be retried. You may reason internally for as long as '
-                'needed. '
-                f'{self.OUTPUT_CONTRACT}'
-                'Do not output markdown, analysis, or any other key. reason is one '
-                f'concise string of at most {self.REASON_MAX_CHARS} characters that '
-                'names the situation the rule fires in, or why it cannot fire.'
-            ),
+            'instructions': self.INSTRUCTIONS,
             'output_schema': {
                 'trigger_probability': 'number in [0,1]',
                 'delta_probability': 'number in [-1,1]',

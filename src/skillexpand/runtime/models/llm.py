@@ -209,6 +209,10 @@ class GPTWrapper:
     """
 
     def __init__(self, llm_name: str, openai_api_key: str, base_url: str = None):
+        if relay_required():
+            # Tencent ModelBest accepts bare model ids, not the ``openai/``
+            # provider namespace used by Harbor's generic config.
+            llm_name = llm_name.removeprefix('openai/')
         self.model_name = llm_name
         self.base_url = base_url
         self.request_policy = request_policy()
@@ -273,18 +277,6 @@ class GPTWrapper:
         if replace_newline:
             output = output.replace('\n', '')
         return output
-
-
-def provider_signature():
-    """Hash runtime provider switches rather than persisting endpoint URLs or extras."""
-    from skillexpand import schema as S
-
-    return S.content_hash(
-        {"endpoint": get_llm_base_url(), "extra": get_extra_model_kwargs(),
-         'request_timeout': request_policy()['timeout'],
-         'environment_timeout': os.environ.get('EXPE_ENV_TIMEOUT_SECONDS', '120'),
-         'worker_timeout': os.environ.get('EXPE_WORKER_TIMEOUT_SECONDS', '3600')}
-    )
 
 
 def LLM_CLS(llm_name: str, openai_api_key: str) -> Callable:

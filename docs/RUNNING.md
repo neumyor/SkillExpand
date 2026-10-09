@@ -33,20 +33,10 @@ SearchQA 需要 `--task-file`；ALFWorld 正式执行必须使用 `.env` 中的 
   --benchmark searchqa \
   --run-dir runs/searchqa-example \
   --phase evolve --evolve-rounds 2 --resume \
-  --acceptance-mode predicted \
-  --predicted-review-scope val
+  --acceptance-mode predicted
 ```
 
-切换回基于 train 经验卡的 predicted Reviewer：
-
-```bash
-.venv/bin/python -m skillexpand \
-  --benchmark searchqa --run-dir runs/searchqa-example \
-  --phase evolve --evolve-rounds 2 --resume \
-  --acceptance-mode predicted --predicted-review-scope train_cards
-```
-
-`--acceptance-mode empirical` 使用 val 真实执行；`--acceptance-mode jev` 使用 val 上的 JEV 预测。`--acceptance-mode sampled` 使用配对增量预测，并用随机 val 抽检修正（见 [协同进化实验计划](EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)）。验收协议冻结在运行目录中，因此 sampled 需新建运行目录并导入已完成的冷启动：
+`--acceptance-mode empirical` 使用 val 真实执行。`--acceptance-mode sampled` 使用配对增量预测，并用随机 val 抽检修正（见 [协同进化实验计划](EXPERIMENT_PLAN_PLANNER_REVIEWER_COEVOLVE.md)）。验收协议冻结在运行目录中，因此 sampled 需新建运行目录并导入已完成的冷启动：
 
 ```bash
 .venv/bin/python -m skillexpand \
@@ -60,23 +50,12 @@ SearchQA 需要 `--task-file`；ALFWorld 正式执行必须使用 `.env` 中的 
   --planner-memory-mode aggregate --reviewer-memory-mode cases
 ```
 
-`--claim-verification off`、`--planner-memory-mode off`、`--reviewer-memory-mode off` 分别关闭判定者、Planner 记忆与 Reviewer 记忆，用于单因素消融。sampled 协议下 `--reviewer-update-mode` 默认且只能为 `none`（即使关闭 Reviewer 记忆也一样）；其它协议默认仍为 `rules`。`--acceptance-sample-size` 是按 family 自适应的上限，小于 2 时启动即被拒绝：panel 更小的 family 全量执行；panel 只有 1 题时无法给出置信区间，候选一律拒绝并记为 `insufficient_sample`；panel 为空时整批 hold。
+`--claim-verification off`、`--planner-memory-mode off`、`--reviewer-memory-mode off` 分别关闭判定者、Planner 记忆与 Reviewer 记忆，用于单因素消融。`--acceptance-sample-size` 是按 family 自适应的上限，小于 2 时启动即被拒绝：panel 更小的 family 全量执行；panel 只有 1 题时无法给出置信区间，候选一律拒绝并记为 `insufficient_sample`；panel 为空时整批 hold。
 
 structured Skill 编辑可在冷启动和 Evolve 中保持一致地启用：
 
 ```bash
 --skill-edit-mode structured
-```
-
-旧协议的 Reviewer 校准（deprecated；协同进化的当前实现见上面的 `sampled`）。同样需新建运行目录并导入冷启动：
-
-```bash
-.venv/bin/python -m skillexpand \
-  --benchmark searchqa --cold-start-dir runs/searchqa-example \
-  --run-dir runs/searchqa-c3 \
-  --phase evolve --evolve-rounds 2 --resume \
-  --single-candidate --candidate-count 1 \
-  --reviewer-update-mode rules --reviewer-feedback-size 20
 ```
 
 各角色模型可单独指定，例如 `--l2-reviewer-model <model>`；其余角色见 README。
@@ -119,9 +98,9 @@ CLI 的 `test` 阶段使用 `test` split：
 
 每个 task、模型响应、经验卡、候选、acceptance 和 batch 事务都逐单元落盘；恢复只补缺失单元。更改 prompt、模型、split、配置或协议必须新建运行目录。
 
-只改源码时 `--resume` 默认报 `FrozenCodeChanged` 并列出变化的文件。确认改动不影响协议（例如只修复崩溃或日志）后，加 `--allow-code-change` 续跑；漂移记录追加到 `manifest.json` / `l2_manifest.json` / `test/<hash>/protocol.json` 旁的 `code_changes.jsonl`，原 manifest 保持不变，审计时可以据此区分前后两段代码。
+冻结身份（`manifest.json`、`l2_manifest.json`、`test/<hash>/protocol.json`）只包含方法输入，不含源码版本、端点 URL 或超时；因此换端点或改用 `--llm-relay` 续跑都可以直接 `--resume`。协议输入（模型名、候选数等）变化会报 `FrozenProtocolChanged`。
 
-**注意**：L2 的 Planner/Editor/Reviewer prompt、family discovery 与初始 Skill 合成 prompt、验收逻辑都只体现在源码指纹里，不在 manifest 的协议字段中。改动这些内容属于协议变更，必须新建运行目录；`--allow-code-change` 只用于不改变模型输入与判定的修复（崩溃、日志、性能）。由于 2026-10-08 的重构移动了几乎所有模块，此前的 run 若用新代码续跑，漂移会覆盖全部文件，审计上无法逐文件区分，应尽量用原代码完成。
+**注意**：L2 的 Planner/Editor/Reviewer prompt 与初始 Skill 合成 prompt 不在 manifest 中，改动它们属于协议变更，必须新建运行目录。
 
 每轮 Evolve 完成后运行：
 
@@ -145,9 +124,9 @@ worker 只消费它保存的 trajectory 与 verifier 结果。任务表来自 `-
 - `configs/benchmark/terminalbench.yaml` 中 `rollout.runner_script` 指向 TB2.1 的 Tencent 启动脚本；
 - 远程机器若不能直连 provider，加 `--llm-relay`：全部 LLM 调用经一个常驻 Tencent E2B 中继沙箱转发
   （`runtime/llm_relay.py`；需安装 `.[tencent-relay]` extra 并设置 `E2B_API_KEY` 与
-  `TBENCH_E2B_RELAY_TEMPLATE`）。中继绑定临时回环端口并归一化模型名，因此 relay run 在 resume 时只忽略
-  冻结身份中的 transport 字段（端点、`relay_base_url`、`llm_transport`、`direct_provider_fallback`、provider 签名），
-  冻结文件不被改写；源码漂移仍需 `--allow-code-change`，其余输入仍冻结；
+  `TBENCH_E2B_RELAY_TEMPLATE`）。中继不改写冻结 config，只设置环境变量并写信息性的
+  `relay_manifest.json`；中继下 `GPTWrapper` 去掉模型名的 `openai/` 前缀，TB 沙箱的 `MODEL_API_BASE`
+  由 `EXPE_LLM_RELAY_REQUIRED` 与 `TBENCH_RELAY_PROVIDER_BASE` 决定；
 - TB 单元最长可运行 2 小时，worker 进度超时默认已放宽到 7500s。
 
 成本提示：sampled 验收的每道抽检题都是一次真实沙箱执行（两臂 × 抽样题数，默认上限 16 题），在 TB 上
@@ -158,7 +137,7 @@ Tencent provider 会偶发拒绝严格的 wire `response_format`（HTTP 400 / 40
 
 ### TB-eval（progressive library，E3/E4）
 
-`--progressive-library` 让 TerminalBench 的 L1 在运行时从 Skill 目录里选一个 Skill 再加载其 body，并把 predicted 验收的面板换成全部 train 题（闭集）。它要求冻结 config 的 `benchmark.progressive_library`（由 `scripts/import_terminalbench_batch.py` 写入）、`--acceptance-mode predicted --predicted-review-scope val --reviewer-update-mode none`，且只用于 `terminalbench` + Harbor；与冻结 config 不一致会在启动时直接报错。每个阶段用 `scripts/tb_eval_stage.py prepare|launch --stage E3|E4` 在独立 run 目录中原地运行（launch 写死完整开关集）。selector 溯源写入 `evolution/round-N/selection/`，`audit_round` 会与 manifest 的 `routes` 交叉核对。闭集验收不能与 main 的 val 面板结果比较，详见 `docs/EXPERIMENT_PLAN_TB_EVAL.md`。
+`--progressive-library` 让 TerminalBench 的 L1 在运行时从 Skill 目录里选一个 Skill 再加载其 body，并把 predicted 验收的面板换成全部 train 题（闭集）。它要求冻结 config 的 `benchmark.progressive_library`（由 `scripts/import_terminalbench_batch.py` 写入）、`--acceptance-mode predicted`，且只用于 `terminalbench` + Harbor；与冻结 config 不一致会在启动时直接报错。每个阶段用 `scripts/tb_eval_stage.py prepare|launch --stage E3|E4` 在独立 run 目录中原地运行（launch 写死完整开关集）。selector 溯源写入 `evolution/round-N/selection/`，`audit_round` 会与 manifest 的 `routes` 交叉核对。relay 端口在 resume 时变化无需任何容忍代码（relay 不改写冻结 config，身份里没有端点）。闭集验收不能与 main 的 val 面板结果比较，详见 `docs/EXPERIMENT_PLAN_TB_EVAL.md`。
 
 ## campaign launcher
 
@@ -172,6 +151,6 @@ python <campaign>/code/run_campaign.py start --root <campaign> --mode full
 python <campaign>/code/run_campaign.py test --root <campaign> --benchmark searchqa
 ```
 
-默认 `predicted_review_scope` 为 `val`，也可以在 prepare 时显式传 `train_cards`。单候选、Reviewer 更新模式（未指定时 sampled 为 `none`、其它为 `rules`）以及 sampled 的五个抽样与记忆开关都在 prepare 时冻结并校验。`stage_args()` 把冻结参数传给每个 cold-start/evolve 阶段（`--predicted-review-scope` 只在 predicted 下传，sampled 开关只在 sampled 下传），避免恢复时意外切换验收口径。sampled campaign 的 `independent-check` 还会在 4 道 preflight 题上真实跑一次 sampled 验收（配对 Δ 预测、两臂执行、判定者、PPI 下界），并用离线审计重放，弥补 preflight 只有 1 道 val 题、跑不到接受路径的缺口。`check` 以 `code/` 与 `inputs/` 的摘要为准，源码仓库的 Git 漂移只在输出的 `source_drift` 中报告。
+单候选以及 sampled 的五个抽样与记忆开关都在 prepare 时冻结并校验。`stage_args()` 把冻结参数传给每个 cold-start/evolve 阶段（sampled 开关只在 sampled 下传），避免恢复时意外切换验收口径。sampled campaign 的 `independent-check` 还会在 4 道 preflight 题上真实跑一次 sampled 验收（配对 Δ 预测、两臂执行、判定者、PPI 下界），并用离线审计重放，弥补 preflight 只有 1 道 val 题、跑不到接受路径的缺口。`check` 以 `code/` 与 `inputs/` 的摘要为准，源码仓库的 Git 漂移只在输出的 `source_drift` 中报告。
 
-长任务应通过独立 session 启动，并使用 pidfile、job lock 和产物文件判断进度；不要用模糊进程名判断存活。启动前先做 1–2 个 task 的全链路 smoke、真实 LLM 健康请求和离线审计。
+长任务应通过独立 session 启动，并使用 supervisor flock 和产物文件判断进度；不要用模糊进程名判断存活。启动前先做 1–2 个 task 的全链路 smoke、真实 LLM 健康请求和离线审计。

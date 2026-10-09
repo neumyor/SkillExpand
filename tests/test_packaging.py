@@ -4,15 +4,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from skillexpand.persistence.io import code_signature
 from skillexpand.runtime import parallel
 
 
 def _spawn_probe(value):
     from skillexpand.runtime.agent_factory import load_config
-    from skillexpand.persistence.io import code_signature
-    return {'value': value, 'benchmark': load_config('alfworld').benchmark.name,
-            'environment_tracked': 'benchmarks/alfworld.py' in code_signature()}
+    return {'value': value, 'benchmark': load_config('alfworld').benchmark.name}
 
 
 def test_cli_and_packaged_configs_work_outside_checkout(tmp_path):
@@ -29,18 +26,10 @@ def test_cli_and_packaged_configs_work_outside_checkout(tmp_path):
     assert 'skillexpand.l1.adapters:SearchQAAdapter' in result.stdout
 
 
-def test_fingerprint_covers_environment_prompts_and_all_stages():
-    signature = code_signature()
-    assert {'benchmarks/alfworld.py', 'benchmarks/searchqa.py', 'l1/runner.py',
-            'l2/card_review.py', 'runtime/prompts/alfworld.py',
-            'runtime/models/llm.py', 'evaluation/validation.py'} <= signature.keys()
-    assert signature == code_signature()
-
-
 def test_spawned_workers_resolve_installed_module_paths():
     results = parallel.run_generic([1, 2], _spawn_probe, workers=2)
     assert sorted(r['value'] for r in results) == [1, 2]
-    assert all(r['benchmark'] == 'alfworld' and r['environment_tracked'] for r in results)
+    assert all(r['benchmark'] == 'alfworld' for r in results)
 
 
 def test_data_preparation_is_repeatable_and_rejects_conflicts(tmp_path):

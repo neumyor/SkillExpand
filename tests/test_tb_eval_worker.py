@@ -301,8 +301,7 @@ def test_launch_command_equals_the_registered_spec(tmp_path):
     assert cmd == [
         'py', '-m', 'skillexpand', '--benchmark', 'terminalbench', '--run-dir', str(tmp_path),
         '--phase', 'evolve', '--resume', '--progressive-library',
-        '--acceptance-mode', 'predicted', '--predicted-review-scope', 'val',
-        '--skill-edit-mode', 'rewrite', '--reviewer-update-mode', 'none',
+        '--acceptance-mode', 'predicted', '--skill-edit-mode', 'rewrite',
         '--evolve-rounds', '1', '--candidate-count', '3', '--batch-size', '50',
         '--autonomous-attempts', '3', '--supervised-attempts', '0',
         '--evolve-l1-workers', '100', '--l2-review-workers', '100', '--test-workers', '100',

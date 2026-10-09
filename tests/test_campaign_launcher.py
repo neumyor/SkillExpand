@@ -17,8 +17,7 @@ def campaign(tmp_path, monkeypatch):
     manifest = {'repo': str(tmp_path), 'python': 'python', 'concurrency': C.CONCURRENCY,
                 'autonomous_attempts': 4, 'supervised_attempts': 1, 'batch_size': 50,
                 'candidate_count': 3, 'single_candidate': False, 'skill_edit_mode': 'rewrite',
-                'acceptance_mode': 'predicted', 'predicted_review_scope': 'val',
-                'reviewer_update_mode': 'none', 'reviewer_feedback_size': 0,
+                'acceptance_mode': 'predicted',
                 'models': {role: 'm' for role in C.ROLES}}
     C.save(tmp_path / 'manifest.json', manifest)
     monkeypatch.setattr(C, 'verify', lambda root: manifest)
@@ -79,7 +78,6 @@ def test_explicit_stage_arguments_and_concurrency(campaign):
             if stage.startswith('evolve-'):
                 assert args[args.index('--evolve-rounds') + 1] == stage[-1]
             assert args[args.index('--task-file') + 1].endswith(f'{benchmark}-tasks.json')
-            assert args[args.index('--predicted-review-scope') + 1] == 'val'
 
 
 def test_full_start_requires_matching_preflight(campaign):
@@ -90,7 +88,7 @@ def test_full_start_requires_matching_preflight(campaign):
         C.start(campaign, 'full')
 
 
-def test_detached_launch_and_duplicate_pid_refusal(campaign, monkeypatch):
+def test_detached_launch_and_duplicate_supervisor_refusal(campaign, monkeypatch):
     invocations = []
     def popen(cmd, **kwargs):
         invocations.append(kwargs)
@@ -99,9 +97,10 @@ def test_detached_launch_and_duplicate_pid_refusal(campaign, monkeypatch):
     assert C.start(campaign, 'preflight')['pid'] == 12345
     assert invocations[0]['start_new_session'] is True
     assert invocations[0]['stdin'] == C.subprocess.DEVNULL
-    monkeypatch.setattr(C.os, 'kill', lambda *args: None)
-    with pytest.raises(ValueError, match='duplicate launch'):
-        C.start(campaign, 'preflight')
+    # A live supervisor holds supervisor.lock for its whole life.
+    with C.IO.exclusive_lock(campaign / 'preflight' / 'supervisor.lock'):
+        with pytest.raises(ValueError, match='held by another process'):
+            C.start(campaign, 'preflight')
     assert len(invocations) == 1
 
 
@@ -209,6 +208,11 @@ def test_usage_ledger_audit_requires_terminal_tokenized_requests(tmp_path):
     assert result['total_tokens'] == 5
     log.write_text(json.dumps({'event': 'start', 'run_id': 'r2'}) + '\n')
     assert C.audit_usage_ledgers(tmp_path)['tokens_complete'] is False
+    # An end without provider token usage is corrupt, in every ledger reader.
+    log.write_text(json.dumps({'event': 'start', 'run_id': 'r3'}) + '\n' +
+                   json.dumps({'event': 'end', 'run_id': 'r3', 'provider': None}) + '\n')
+    with pytest.raises(ValueError, match='token usage missing'):
+        C.audit_usage_ledgers(tmp_path)
 
 
 def test_campaign_requires_local_configuration(monkeypatch):
@@ -284,7 +288,7 @@ def test_prepare_freezes_code_and_a_launcher_that_runs_only_the_frozen_copy(tmp_
     manifest = C.prepare(root, inputs)
     assert (root / 'code/src/skillexpand/campaign.py').is_file()
     assert (root / 'code/run_campaign.py').read_text() == C.FROZEN_LAUNCHER
-    assert 'code/run_campaign.py' in manifest['files']
+    assert manifest['files'] and all(f.startswith('inputs/') for f in manifest['files'])
     # A broken package earlier on PYTHONPATH must not shadow the frozen copy.
     shadow = tmp_path / 'shadow' / 'skillexpand'
     shadow.mkdir(parents=True)
@@ -296,17 +300,20 @@ def test_prepare_freezes_code_and_a_launcher_that_runs_only_the_frozen_copy(tmp_
     assert json.loads(output.strip().splitlines()[-1])['verified'] is True
 
 
-def test_source_git_drift_is_reported_not_fatal(tmp_path, monkeypatch):
+def test_only_inputs_are_verified_not_code(tmp_path, monkeypatch):
     inputs = _runtime(tmp_path, monkeypatch)
     root = tmp_path / 'campaign'
     C.prepare(root, inputs)
-    monkeypatch.setattr(C, 'git_identity', lambda repo: {'commit': 'other', 'dirty': True,
-                                                         'status_hash': 'x'})
-    manifest = C.verify(root)
-    assert C.source_drift(manifest)['changed'] is True
     (root / 'code/src/skillexpand/schema.py').write_text('# edited\n')
+    assert C.verify(root)['source_commit'] == C.source_commit(C.source_checkout())
+    victim = next(iter(read_files(root)))
+    (root / victim).write_text('[]')
     with pytest.raises(ValueError, match='Frozen campaign file changed'):
         C.verify(root)
+
+
+def read_files(root):
+    return json.loads((root / 'manifest.json').read_text())['files']
 
 
 def test_prepare_refuses_to_run_from_a_frozen_copy(tmp_path, monkeypatch):

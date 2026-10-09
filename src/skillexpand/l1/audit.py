@@ -3,9 +3,9 @@ import argparse
 import json
 from pathlib import Path
 
-from skillexpand import schema as S
 from skillexpand.l1 import learning as L, protocol as P
-from skillexpand.persistence.io import require
+from skillexpand.persistence.io import read_jsonl, require
+from skillexpand.persistence.usage import replay_ledger
 from skillexpand.reliability.errors import transient_type_names
 from skillexpand.runtime.models import llm as _provider  # noqa: F401 - registers translations
 
@@ -41,10 +41,6 @@ def audit_checkpoint(data, adapter):
                     'Trial outcome differs from environment result')
     exp = data['experience']
     identity = data['identity']
-    require(S.content_hash(identity) == data['signature'], 'Checkpoint identity hash mismatch')
-    require(exp['evolution_round'] == identity['evolution_round'], 'Round identity mismatch')
-    require(exp['initial_skill_key'] == (identity['skill']['key'] if identity['skill'] else None),
-            'Injected Skill identity mismatch')
     require(sum(t['phase'] == 'autonomous' for t in completed) <= identity['k'], 'Autonomous budget exceeded')
     require(sum(t['phase'] == 'supervised' for t in completed) <= int(identity['supervised']),
             'Supervised budget exceeded')
@@ -107,36 +103,16 @@ def audit_checkpoint(data, adapter):
 def audit_usage(checkpoint, data=None):
     path = Path(checkpoint).with_suffix('.usage.json')
     usage = json.loads(path.read_text())
-    rows = [json.loads(line) for line in path.with_suffix('.requests.jsonl').read_text().splitlines()]
-    pending, finished = set(), set()
-    starts = ends = errors = transient_errors = nonretryable_errors = abandoned = 0
-    tokens = dict(prompt_tokens=0, completion_tokens=0, total_tokens=0)
-    for row in rows:
-        rid = row['run_id']
-        if row['event'] == 'start':
-            require(rid and rid not in pending | finished, 'Duplicate request start')
-            pending.add(rid)
-            starts += 1
-        else:
-            require(row['event'] in ('end', 'error', 'abandoned') and rid in pending, 'Unmatched request end')
-            pending.remove(rid)
-            finished.add(rid)
-            if row['event'] in ('error', 'abandoned'):
-                errors += 1
-                if row['event'] == 'abandoned':
-                    abandoned += 1
-                elif row.get('error_type') in TRANSIENT_PROVIDER_ERRORS:
-                    transient_errors += 1
-                else:
-                    nonretryable_errors += 1
-            else:
-                ends += 1
-                reported = (row.get('provider') or {}).get('token_usage')
-                require(reported is not None, 'Provider token usage missing; cannot verify totals')
-                for key in tokens:
-                    tokens[key] += reported[key]
-    require(not pending, 'In-flight requests remain; audit incomplete')
-    for key, value in dict(started_requests=starts, successful_requests=ends,
+    rows = read_jsonl(path.with_suffix('.requests.jsonl'), repair_tail=False)
+    ledger = replay_ledger(rows)
+    require(not ledger['pending'], 'In-flight requests remain; audit incomplete')
+    transient_errors = sum(t in TRANSIENT_PROVIDER_ERRORS for t in ledger['error_types'])
+    nonretryable_errors = len(ledger['error_types']) - transient_errors
+    abandoned = ledger['abandoned']
+    errors = ledger['failed']
+    tokens = ledger['tokens']
+    for key, value in dict(started_requests=ledger['started'],
+                           successful_requests=ledger['successful'],
                            failed_requests=errors, **tokens).items():
         require(usage[key] == value, f'Usage mismatch: {key}')
     if data is not None:
@@ -159,7 +135,7 @@ def audit_usage(checkpoint, data=None):
             verify_response(synthesis['repair']['input'], synthesis['repair']['raw'],
                             'extraction repair')
     return dict(
-        requests=starts,
+        requests=ledger['started'],
         failed_requests=errors,
         transient_errors=transient_errors,
         nonretryable_errors=nonretryable_errors,
@@ -172,7 +148,7 @@ def audit_usage(checkpoint, data=None):
         # abandoned response (its trial was recorded as interrupted and rerun),
         # and every response it does use is matched against the ledger above.
         # Their token cost is unknown, which ``tokens_complete`` reports.
-        audit_complete=(not pending and nonretryable_errors == 0),
+        audit_complete=nonretryable_errors == 0,
         **tokens,
     )
 

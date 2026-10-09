@@ -11,7 +11,6 @@ from skillexpand.runtime import agent_factory as F
 from skillexpand.runtime import parallel as PL
 from skillexpand import schema as S
 from skillexpand.evaluation import workers as EW
-from skillexpand.runtime.models.llm import provider_signature
 from skillexpand.reliability.errors import InvalidInput, JournalConflict, StageIncomplete
 from skillexpand.reliability.policies import repair_policy
 from skillexpand.reliability.retry import call_with_repair, fresh
@@ -215,7 +214,6 @@ class FixedSkillScorer:
         self.protocol_hash = S.content_hash(
             {
                 "protocol": "fixed-skill-single-attempt-v1",
-                "provider": provider_signature(),
                 "config": OmegaConf.to_container(cfg, resolve=True),
                 "tasks": F.task_table(cfg),
                 "prompts": {k: getattr(adapter, k) for k in PROMPT_FIELDS},
@@ -434,9 +432,8 @@ class PredictedPanelScore:
 class PredictedSkillScorer:
     """Predict Skill success independently on a frozen validation panel.
 
-    This is separate from JEV: it uses the configured L2 reviewer model through
-    the normal chat host, while JEV uses its dedicated judge endpoint. Both share
-    the same route groups and paired comparison for direct calibration.
+    It uses the configured L2 reviewer model through the normal chat host and
+    shares the route groups and paired comparison of the empirical scorer.
     """
 
     PROTOCOL = "predicted-val-skill-success-v2-json-schema"
@@ -447,6 +444,21 @@ class PredictedSkillScorer:
     # The reason is audit metadata; keep it bounded without rejecting otherwise
     # valid reviewer decisions from providers that do not enforce maxLength.
     REASON_MAX_CHARS = 8192
+    INSTRUCTIONS = (
+        "You are a strict validation reviewer. Predict whether a fresh "
+        "executor will complete this task successfully with one autonomous "
+        "attempt using this Skill. Do not assume rejected answers can be "
+        "retried and do not use any execution trace. You may reason internally "
+        "for as long as needed. "
+        f"{REVIEW_OUTPUT_CONTRACT}"
+        "Do not output markdown, analysis, a task/skill echo, or any other key. "
+        "probability_true is a number in [0,1]; predicted_success is true "
+        "exactly when probability_true >= {threshold}; reason is a "
+        f"concise string of at most {REASON_MAX_CHARS} characters."
+    )
+    #: Method prompt constants frozen in the L2 identity (read at call time).
+    PROMPTS = ("PROTOCOL", "REVIEW_OUTPUT_CONTRACT", "REASON_MAX_CHARS", "RESPONSE_SCHEMA",
+               "INSTRUCTIONS")
     RESPONSE_SCHEMA = {
         "type": "object",
         "additionalProperties": False,
@@ -471,7 +483,7 @@ class PredictedSkillScorer:
         }
 
     def __init__(self, cfg, routes, cache, workers=8, judge_factory=None,
-                 threshold=0.5, calibration_block="", reviewer_prompt_version=0):
+                 threshold=0.5):
         self.cfg = cfg
         self.routes = routes
         self.cache = cache
@@ -490,8 +502,6 @@ class PredictedSkillScorer:
             "EXPE_REVIEWER_RESPONSE_FORMAT", "omit" if legacy_omit else "json_schema")
         if self.wire_response_format not in {"json_schema", "omit"}:
             raise ValueError("EXPE_REVIEWER_RESPONSE_FORMAT must be json_schema or omit")
-        self.calibration_block = str(calibration_block or "")
-        self.reviewer_prompt_version = int(reviewer_prompt_version)
         if not 0.0 <= self.threshold <= 1.0:
             raise InvalidInput("prediction threshold must be between 0 and 1")
         self.protocol_hash = S.content_hash({
@@ -500,8 +510,6 @@ class PredictedSkillScorer:
             "benchmark": cfg.benchmark.name,
             "routes": routes.fingerprint,
             "threshold": self.threshold,
-            "reviewer_prompt_version": self.reviewer_prompt_version,
-            "calibration_block": self.calibration_block,
             **({"wire_response_format": "omit"} if self.wire_response_format == "omit" else {}),
         })
 
@@ -509,26 +517,13 @@ class PredictedSkillScorer:
         payload = {
             "task": task,
             "skill": {"description": skill.description, "body": skill.body},
-            "instructions": (
-                "You are a strict validation reviewer. Predict whether a fresh "
-                "executor will complete this task successfully with one autonomous "
-                "attempt using this Skill. Do not assume rejected answers can be "
-                "retried and do not use any execution trace. You may reason internally "
-                "for as long as needed. "
-                f"{self.REVIEW_OUTPUT_CONTRACT}"
-                "Do not output markdown, analysis, a task/skill echo, or any other key. "
-                f"probability_true is a number in [0,1]; predicted_success is true "
-                f"exactly when probability_true >= {self.threshold:.6g}; reason is a "
-                f"concise string of at most {self.REASON_MAX_CHARS} characters."
-            ),
+            "instructions": self.INSTRUCTIONS.format(threshold=f"{self.threshold:.6g}"),
             "output_schema": {
                 "probability_true": "number in [0,1]",
                 "predicted_success": "boolean",
                 "reason": f"string, <= {self.REASON_MAX_CHARS} characters",
             },
         }
-        if self.calibration_block:
-            payload["calibration_block"] = self.calibration_block
         return json.dumps(payload, ensure_ascii=False)
 
     def _parse_response(self, raw):
@@ -674,7 +669,6 @@ class PredictedSkillScorer:
                     "base_reason": str(base_row.get("reason", "")),
                     "candidate_reason": str(candidate_row.get("reason", "")),
                     "reviewer_protocol_hash": str(candidate_row.get("protocol_hash", "")),
-                    "reviewer_prompt_version": self.reviewer_prompt_version,
                 }
                 for task_id, base_row, candidate_row in zip(
                     base.task_ids, base.predictions, candidate.predictions

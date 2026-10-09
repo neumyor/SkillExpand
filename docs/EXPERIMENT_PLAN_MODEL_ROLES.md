@@ -24,7 +24,7 @@
 | `cold_start` | `--cold-start-model` | family discovery、初始 Skill synthesis 及冷启动归纳 |
 | `l2_planner` | `--l2-planner-model` | 读取当前 Skill、经验卡和 pattern，提出修改假设 |
 | `l2_editor` | `--l2-editor-model` | rewrite 模式下生成候选 Skill；structured 模式下由程序应用 Planner 的 edit |
-| `l2_reviewer` | `--l2-reviewer-model` | predicted-val / train_cards 的预测验收、sampled 的配对 Δ 预测、旧协议的校准规则压缩 |
+| `l2_reviewer` | `--l2-reviewer-model` | predicted 的 val 预测验收、sampled 的配对 Δ 预测 |
 | `l2_verifier` | `--l2-verifier-model` | 仅 sampled 协议：读取抽检题两臂轨迹，判断差异是否由该规则引起并符合声明 |
 | `selector` | `--selector-model` | 为 val/test task 固定 Skill family 路由 |
 

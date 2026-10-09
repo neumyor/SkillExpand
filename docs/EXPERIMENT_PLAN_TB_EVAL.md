@@ -1,6 +1,6 @@
 # TB-eval：TerminalBench 2.1 的 progressive library 实验（E3/E4）
 
-本文是分支 `TB-eval` 的实验规格，复刻 `codex/tb21-progressive-relay-recovery` 的 TB2.1 实验，
+本文是分支 `TB-eval` 的实验规格（建立在精简后的 main 之上），复刻 `codex/tb21-progressive-relay-recovery` 的 TB2.1 实验，
 但用**一个开关**实现，且开关关闭时 main 的所有执行路径逐字节不变（旧 run 的卡片哈希、`l2_manifest`
 身份、searchqa/alfworld 行为均不受影响）。
 
@@ -17,8 +17,7 @@
 
 冻结 config 的 `benchmark.progressive_library`（由导入脚本写入，不是 CLI 参数）是冷启动加载与离线审计的识别载体。
 `_initialize` 做单向一致性守卫：冻结为真则开关必须开；开关开启则冻结必须为真，且 benchmark 为
-terminalbench、`rollout.mode=harbor_rollout`、`reviewer_update_mode=none`；`__post_init__` 要求
-`acceptance_mode=predicted` 且 `predicted_review_scope=val`。开关关闭时 `progressive_library` 从 l2 身份中弹出，
+terminalbench、`rollout.mode=harbor_rollout`；`__post_init__` 要求 `acceptance_mode=predicted`。开关关闭时 `progressive_library` 从 l2 身份中弹出，
 旧 run 可照常 resume。
 
 ### 阶段规格（E3 / E4）
@@ -31,11 +30,12 @@ terminalbench、`rollout.mode=harbor_rollout`、`reviewer_update_mode=none`；`_
 | E4 | 单源 rollouts（另一个 source model） | method model B |
 
 固定参数（由 `scripts/tb_eval_stage.py launch` 写死，测试逐项核对）：`--progressive-library --acceptance-mode predicted
---predicted-review-scope val --skill-edit-mode rewrite --reviewer-update-mode none --evolve-rounds 1 --candidate-count 3
+--skill-edit-mode rewrite --evolve-rounds 1 --candidate-count 3
 --batch-size 50 --autonomous-attempts 3 --supervised-attempts 0`，worker 数取 `TB21_WORKERS`（默认 100），
 `--l1-model` 为执行模型，其余角色模型与 `--selector-model` 均为 method model，加 `--llm-relay`；环境
 `TBENCH_PERSIST_SANDBOXES=0`，`Popen(start_new_session=True)` 脱离进程组并写 pidfile。
-`--skill-edit-mode rewrite` 与 `--reviewer-update-mode none` 是 codex 基线的默认值，main 的默认值不同，所以必须显式给出。
+`--skill-edit-mode rewrite` 是 codex 基线的默认值，main 的默认值是 `structured`，所以必须显式给出。
+`--predicted-review-scope` 与 `--reviewer-update-mode` 在精简后的 main 中已不存在，不再传。
 
 ### M0 链路（模型生成的初始库）
 
@@ -53,7 +53,7 @@ terminalbench、`rollout.mode=harbor_rollout`、`reviewer_update_mode=none`；`_
 | 0 冷启动 | `load_cold_start` 识别 progressive 标记：`protocol='progressive-library'`、卡 skill-free 且 schema-5、不要求 clusters/task_skill_map；冷启动卡保留导入时的 `family_id`，不调用 `plan.family_of` |
 | 1 L1 | `evaluation/progressive.execute_progressive_experience`：目录（仅 `skill_id`+`description`，断言无 body）→ 选一个 → 只加载其 body → 共享 harbor 转换执行；卡的 `family_id`/`initial_skill_key` 写选中 Skill 的值 |
 | 2 批分组 | 按 `selected_skill_id` 分组；`_round_input` 跳过 family 覆盖检查 |
-| 3 验收 | 面板为 `SPLIT_TRAIN`；已完成的 route 用 `FrozenRoutes.load_existing` 复用（仅 progressive 下） |
+| 3 验收 | 面板为 `SPLIT_TRAIN`，route 落在 `routes/train/`，与 val 一样用普通 `FrozenRoutes(...).run()`（resume 时重建并核对冻结身份） |
 | 4 审计 | `audit_round` 读冻结 config 标记：`SELECTION_AGENT`、选中 Skill 属于当轮 heads 且 family/key 匹配、批按选中 Skill 分组；侧车与 manifest `routes` 交叉核对 |
 
 溯源持久化：selector 的全部证据（含 raw 输出、完整目录）只写
@@ -71,8 +71,7 @@ terminalbench、`rollout.mode=harbor_rollout`、`reviewer_update_mode=none`；`_
 
 ## 4. 不触发的分支
 
-sampled / empirical / jev 验收；`predicted_review_scope=train_cards`；Reviewer 校准（`rules`/`summary`）及
-`reviewer_feedback`；val/test split 与 `execute_routed`；监督式修复（`supervised-attempts=0`）；`structured` 编辑模式；
+sampled / empirical 验收；val/test split 与 `execute_routed`；监督式修复（`supervised-attempts=0`）；`structured` 编辑模式；
 campaign launcher；多于 1 轮的演化（`--evolve-rounds 1`，代码路径支持但未在该实验中验证）。
 
 ## 5. 有意偏差（相对 codex）
@@ -80,12 +79,13 @@ campaign launcher；多于 1 轮的演化（`--evolve-rounds 1`，代码路径�
 1. progressive worker 放在 `evaluation/`，通过分层测试，不再绕过；fixed 与 progressive 共用一个 harbor 转换函数；
 2. selection 溯源单一来源（侧车）+ manifest 聚合视图 + 审计交叉核对，不存卡字段，不写 `load_stage:'fixed'`；
 3. manifest 不冻结 raw selector 输出；
-4. route 复用收窄到 progressive 开关内，不改变 val 的 resume 语义；
+4. 不再需要 route 复用：精简后的 main 里 relay 不改写冻结 config，route 身份不含 provider/端点，
+   因此 relay 端口变化后 `FrozenRoutes` 的冻结身份逐字节相同，不再有 `load_existing` 的 progressive 分支，
+   也没有 freeze 的 transport 容忍代码；`tests/test_tb_eval_loop.py` 的 relay 续跑测试在普通 write-once `freeze` 下验证；
 5. 守卫环境 `step` 直接 raise，而非返回提示并 `reward=False`；
 6. 不移植 `frozen_selector_result`：半轮崩溃后未出卡任务重新调用 selector，是已接受的 resume 成本；
 7. 启动器/导入脚本参数化（保留 89/3 默认值），一次性恢复脚本、运行日志、uv.lock 不进仓库；
-8. 新增守卫 `--progressive-library` 要求 `reviewer_update_mode=none`：Reviewer 校准按 family 的 train 面板定义，progressive 没有 task→family 映射；
-9. thinking 策略的第二实现（codex 的 `PredictedSkillScorer` 自解析环境变量）延后，不在本分支改。
+8. thinking 策略的第二实现（codex 的 `PredictedSkillScorer` 自解析环境变量）延后，不在本分支改。
 
 ## 6. 范围外
 

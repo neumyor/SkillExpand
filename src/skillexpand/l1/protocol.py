@@ -3,6 +3,7 @@ import copy
 import json
 
 VERSION = 'l1-v7'
+PROMPTS = ('VERSION', 'CONTRACT')
 KINDS = ('missed_constraint_or_evidence', 'knowledge_or_interpretation_gap',
          'execution_problem', 'suspected_reference_or_scoring_issue', 'uncertain')
 CONTRACT = '''Return only a short JSON repair state:
