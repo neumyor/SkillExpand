@@ -10,7 +10,7 @@ from skillexpand import schema as S
 from skillexpand.benchmarks.terminalbench import audit_harbor_experience
 from skillexpand.l1.runner import save
 from skillexpand.l2.loop import EvolutionConfig, LoopPaths, SerialEvolutionLoop
-from skillexpand.persistence.artifacts import FILES, load_cold_start
+from skillexpand.persistence.artifacts import FILES, load_cold_start, code_signature, provider_signature
 from skillexpand.runtime.llm_relay import relay_from_env
 
 
@@ -67,10 +67,23 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--stage', required=True, choices=('E3', 'E5'))
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--resume-e3-empty-answers', action='store_true')
     args = parser.parse_args()
     source, out = args.source.resolve(), args.out.resolve()
     if not out.exists():
-        prepare(source, out, args.stage)
+        if args.resume_e3_empty_answers:
+            assert args.stage == 'E3'
+            assert source.name == 'tb21-e3-20261008-recovery20-noformat'
+            assert json.loads((source / 'status.json').read_text())['status'] == 'needs_attention'
+            assert json.loads((source / 'l2_manifest.json').read_text())['code'] == code_signature()
+            shutil.copytree(source, out, ignore=shutil.ignore_patterns('PID', 'run.pid', 'campaign.lock'))
+            ledger = json.loads((out / 'recovery_ledger.json').read_text())
+            ledger.update(source=str(source), resumed_same_protocol=True,
+                          reused_exact_scores=86, empty_answer_tasks=[20, 71, 81])
+            save(out / 'recovery_ledger.json', ledger)
+            save(out / 'status.json', {'stage': args.stage, 'status': 'prepared'})
+        else:
+            prepare(source, out, args.stage)
     assert json.loads((out / 'status.json').read_text())['status'] == 'prepared'
     ledger = json.loads((out / 'recovery_ledger.json').read_text())
     assert ledger['source'] == str(source) and ledger['stage'] == args.stage
@@ -104,6 +117,11 @@ def main():
             'sandbox_id': relay.transport.sandbox_id, 'direct_provider_fallback': False,
             'persistence': 0, 'reviewer_response_format': 'omit',
             'max_tokens_sent': args.stage == 'E3'})
+        if args.resume_e3_empty_answers:
+            l2_manifest = json.loads((out / 'l2_manifest.json').read_text())
+            assert l2_manifest['code'] == code_signature()
+            l2_manifest.update(runtime=resolved, provider=provider_signature())
+            save(out / 'l2_manifest.json', l2_manifest)
         loop = SerialEvolutionLoop(cfg, plan, LoopPaths(out),
             EvolutionConfig(**ledger['config'], evolve_rounds=1))
         scorer = loop._ensure_predicted_scorer()
@@ -116,6 +134,31 @@ def main():
             original_review = scorer._review
             def bounded_review(host, prompt):
                 payload = json.loads(prompt)
+                if args.resume_e3_empty_answers and payload['skill']['body'] == initial[0].body:
+                    from skillexpand.runtime import agent_factory as F
+                    task = next((t for t in (20, 71, 81)
+                                 if payload['task'] == F.task_text_of(cfg, t)), None)
+                    if task is not None:
+                        usage = list((source / 'train/usage').glob(f'predicted-*-{task}-*.requests.jsonl'))
+                        assert len(usage) == 1
+                        starts = [json.loads(line) for line in usage[0].read_text().splitlines()
+                                  if json.loads(line).get('event') == 'start']
+                        assert len(starts) == 2
+                        assert sum('FORMAT CORRECTION:' in json.dumps(r['prompts']) for r in starts) == 1
+                        budget = out / f'task{task}_base_format_budget.json'
+                        assert not budget.exists(), 'Remaining correction budget already consumed'
+                        corrected = prompt + ('\n\nFORMAT CORRECTION: Previous visible answers '
+                            'were empty. Return only the required single JSON object.')
+                        for correction in (2, 3):
+                            save(budget, {'used_before': 1, 'corrections_this_run': correction - 1,
+                                          'original_max_corrections': 3})
+                            raw = scorer._call(host, corrected)
+                            save(out / f'task{task}_base_correction{correction}.json', {'raw': raw})
+                            try:
+                                return scorer._parse(raw), correction + 1
+                            except (ValueError, RuntimeError):
+                                if correction == 3:
+                                    raise
                 if S.content_hash(payload['skill']['body']) != '7809d5e59cc4':
                     return original_review(host, prompt)
                 from skillexpand.runtime import agent_factory as F

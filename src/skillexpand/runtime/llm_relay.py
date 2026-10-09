@@ -23,6 +23,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 LOG = logging.getLogger(__name__)
+
+
+def default_output_token_limit(model: str) -> int | None:
+    return 65536 if str(model).rsplit('/', 1)[-1].lower().startswith('deepseek') else None
+
+
 _RELAY_SCRIPT = r'''import json, os, sys, urllib.request, urllib.error, socket
 path = sys.argv[1]
 with open(path, "rb") as stream:
@@ -247,6 +253,10 @@ class TencentSandboxTransport:
 
     def stream(self, payload: dict[str, Any]):
         """Yield raw provider SSE bytes through the E2B command stdout stream."""
+        payload = dict(payload)
+        default_limit = default_output_token_limit(payload.get('model', ''))
+        if default_limit is not None and payload.get('max_tokens') is None:
+            payload['max_tokens'] = default_limit
         request_id = uuid.uuid4().hex
         started = time.monotonic()
         path = PurePosixPath("/tmp") / f"skillexpand-relay-{request_id}.json"
@@ -408,16 +418,29 @@ class _Handler(BaseHTTPRequestHandler):
             def chunks():
                 yield first
                 yield from stream
+            content_chars = reasoning_chars = 0
+            finish_reasons = []
             for event in iter_sse_events(chunks()):
                 # Old LangChain requires choices[0] even for usage-only chunks.
                 if not event.get("choices"):
                     continue
                 for choice in event["choices"]:
                     delta = choice.get("delta")
+                    if choice.get("finish_reason") is not None:
+                        finish_reasons.append(choice["finish_reason"])
+                    if isinstance(delta, dict):
+                        content_chars += len(delta.get("content") or "")
+                        reasoning_chars += len(delta.get("reasoning_content") or "")
                     if isinstance(delta, dict) and delta.get("content") is None:
                         delta["content"] = ""
                 self.wfile.write(("data: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode())
                 self.wfile.flush()
+            if not content_chars:
+                kind = ('provider_output_truncated' if 'length' in finish_reasons
+                        else 'provider_empty_content')
+                raise RelayError(
+                    f"Provider returned no visible answer: content_chars={content_chars}, "
+                    f"reasoning_chars={reasoning_chars}, finish_reasons={finish_reasons}", kind, 502)
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except RelayError as exc:

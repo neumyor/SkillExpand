@@ -9,6 +9,7 @@ import threading
 from langchain.chat_models import ChatOpenAI
 from langchain.schema import ChatMessage
 import openai
+from skillexpand.runtime.llm_relay import default_output_token_limit
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -28,10 +29,10 @@ def request_policy():
     return {'timeout': timeout, 'retries': _positive_int_env('EXPE_LLM_RETRIES', 2)}
 
 
-def output_token_limit():
+def output_token_limit(model=''):
     raw = os.environ.get('EXPE_LLM_MAX_TOKENS')
     if not raw:
-        return None
+        return default_output_token_limit(model)
     try:
         value = int(raw)
     except ValueError as exc:
@@ -166,7 +167,7 @@ class GPTWrapper:
             # returns one assembled message to callers after consuming chunks.
             streaming=True,
         )
-        max_tokens = output_token_limit()
+        max_tokens = output_token_limit(llm_name)
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
         if base_url is not None:

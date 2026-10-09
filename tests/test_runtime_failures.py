@@ -10,6 +10,26 @@ from skillexpand.runtime.models.llm import GPTWrapper, request_policy, wait_for_
 from skillexpand.runtime.deadline import environment_call
 
 
+@pytest.mark.parametrize('model,expected', [
+    ('deepseek-v4-flash-0731', 65536),
+    ('openai/deepseek-v4-flash-0731-tencent', 65536),
+    ('DEEPSEEK_up5zdj', 65536),
+    ('qwen3.6-flash-distill', None),
+])
+def test_model_default_output_limit(model, expected):
+    with patch.dict('os.environ', {}, clear=True), \
+            patch('skillexpand.runtime.models.llm.ChatOpenAI') as factory:
+        GPTWrapper(model, 'EMPTY', False)
+        assert factory.call_args.kwargs.get('max_tokens') == expected
+
+
+def test_explicit_output_limit_overrides_deepseek_default():
+    with patch.dict('os.environ', EXPE_LLM_MAX_TOKENS='32768'), \
+            patch('skillexpand.runtime.models.llm.ChatOpenAI') as factory:
+        GPTWrapper('DEEPSEEK_up5zdj', 'EMPTY', False)
+        assert factory.call_args.kwargs['max_tokens'] == 32768
+
+
 def test_model_retry_budget_preserves_original_error():
     client = Mock(side_effect=openai.error.Timeout('offline'))
     with patch('skillexpand.runtime.models.llm.ChatOpenAI', return_value=client) as factory, \
