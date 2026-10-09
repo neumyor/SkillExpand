@@ -555,12 +555,21 @@ class SerialEvolutionLoop:
                 raise JournalConflict(f"Missing evolution card for task {task_id}")
             exp = S.from_dict(S.TaskExperience, json.loads(path.read_text()))
             self._check_card(exp, task_id, round_index, skills)
-            from skillexpand.l1.audit import audit_checkpoint
-            from skillexpand.l1.adapters import resolve
-            checkpoint = json.loads((directory / 'trials' / f'{task_id}.json').read_text())
-            if checkpoint['experience'] != S.to_dict(exp):
-                raise JournalConflict(f'Evolution card/checkpoint mismatch: {task_id}')
-            audit_checkpoint(checkpoint, resolve(self.cfg))
+            harbor = (self.cfg.benchmark.name == 'terminalbench'
+                      and self.cfg.benchmark.get('rollout', {}).get('mode') == 'harbor_rollout')
+            if harbor:
+                # TerminalBench units have no in-process L1 checkpoint; the
+                # benchmark audits the Harbor rollout and its verdict is kept
+                # where the checkpoint would be.
+                from skillexpand.benchmarks.terminalbench import audit_harbor_experience
+                save(directory / 'trials' / f'{task_id}.json', audit_harbor_experience(exp))
+            else:
+                from skillexpand.l1.audit import audit_checkpoint
+                from skillexpand.l1.adapters import resolve
+                checkpoint = json.loads((directory / 'trials' / f'{task_id}.json').read_text())
+                if checkpoint['experience'] != S.to_dict(exp):
+                    raise JournalConflict(f'Evolution card/checkpoint mismatch: {task_id}')
+                audit_checkpoint(checkpoint, resolve(self.cfg))
             if manifest is not None:
                 expected_skill = manifest.get('skill_keys', {}).get(exp.family_id)
                 if expected_skill and exp.initial_skill_key != expected_skill:

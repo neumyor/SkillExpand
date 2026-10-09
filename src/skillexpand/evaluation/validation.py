@@ -478,6 +478,18 @@ class PredictedSkillScorer:
         self.workers = max(1, int(workers))
         self.judge_factory = judge_factory
         self.threshold = float(threshold)
+        # Some Tencent endpoints intermittently reject the strict wire
+        # ``response_format`` (HTTP 400, code 400006) even for prompts they
+        # answered identically moments earlier.  The prompt and the parser are
+        # unchanged; only the wire field is omitted, and the protocol hash
+        # records that so the two modes never share a cache.
+        legacy_omit = os.environ.get("EXPE_LLM_REVIEWER_NO_RESPONSE_FORMAT", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        self.wire_response_format = os.environ.get(
+            "EXPE_REVIEWER_RESPONSE_FORMAT", "omit" if legacy_omit else "json_schema")
+        if self.wire_response_format not in {"json_schema", "omit"}:
+            raise ValueError("EXPE_REVIEWER_RESPONSE_FORMAT must be json_schema or omit")
         self.calibration_block = str(calibration_block or "")
         self.reviewer_prompt_version = int(reviewer_prompt_version)
         if not 0.0 <= self.threshold <= 1.0:
@@ -490,6 +502,7 @@ class PredictedSkillScorer:
             "threshold": self.threshold,
             "reviewer_prompt_version": self.reviewer_prompt_version,
             "calibration_block": self.calibration_block,
+            **({"wire_response_format": "omit"} if self.wire_response_format == "omit" else {}),
         })
 
     def prompt(self, task: str, skill: S.Skill) -> str:
@@ -551,12 +564,15 @@ class PredictedSkillScorer:
         """Call the reviewer with its strict response schema and thinking enabled."""
         from langchain.schema import HumanMessage
         messages = [HumanMessage(content=prompt)]
+        # A reasoning-only provider response cannot pass the strict JSON
+        # schema, so respect the explicit global switch: recovery runs may
+        # need a visible structured answer more than internal reasoning.
         request_kwargs = {
-            "response_format": self.response_format(),
-            # Campaigns may disable thinking for executors.  The reviewer is a
-            # separate role and should retain its long internal reasoning budget.
-            "enable_thinking": True,
+            "enable_thinking": os.environ.get("EXPE_LLM_DISABLE_THINKING", "").strip().lower()
+            not in {"1", "true", "yes", "on"},
         }
+        if self.wire_response_format == "json_schema":
+            request_kwargs["response_format"] = self.response_format()
         return host.llm(messages, stop=[], replace_newline=False, request_kwargs=request_kwargs)
 
     def _review(self, host, prompt):
@@ -595,7 +611,7 @@ class PredictedSkillScorer:
                     "cache_key": keys[task_id], "panel_key": panel_key,
                     "protocol_hash": self.protocol_hash,
                     "format_attempts": format_attempts,
-                    "response_format": "json_schema", **result}
+                    "response_format": self.wire_response_format, **result}
 
         def store(task_id, record):
             self.cache.put(keys[task_id], record)

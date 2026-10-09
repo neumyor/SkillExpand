@@ -1,6 +1,10 @@
 """Process-pool entry point for single-attempt val/test execution of a fixed Skill."""
+import json
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from skillexpand.reliability.units import failure_record
@@ -25,6 +29,50 @@ class FixedSpec:
     usage_path: Optional[str] = None
 
 
+def _harbor_fixed(spec: FixedSpec, cfg, started: float) -> Dict[str, Any]:
+    """One TerminalBench val/test execution through the external Harbor runner.
+
+    Same contract as the in-process path: one attempt, no reflection, and the
+    environment's verifier result decides success.  The rollout artifacts are
+    kept next to the score cache so the sampled verifier can read the cached
+    trajectories back instead of rerunning anything.
+    """
+    from skillexpand.benchmarks.terminalbench import harbor_rollout
+
+    out_dir = (Path(spec.usage_path).parent.parent / 'harbor' if spec.usage_path
+               else Path(tempfile.mkdtemp(prefix='skillexpand-harbor-')))
+    payload, raw = harbor_rollout(
+        cfg, spec.task_id, SimpleNamespace(body=spec.skill_body or ''), 1, out_dir)
+    trials = payload.get('trials') or []
+    if not trials:
+        raise RuntimeError('TerminalBench rollout returned no trial')
+    trial = trials[0]
+    events = []
+    trajectory_file = Path(trial['trajectory_path']) if trial.get('trajectory_path') else None
+    if trajectory_file and trajectory_file.is_file():
+        try:
+            trace = json.loads(trajectory_file.read_text(encoding='utf-8'))
+            for index, step in enumerate(trace.get('steps', []), 1):
+                message = str(step.get('message') or '')
+                observation = str(step.get('observation') or '')
+                if message or observation:
+                    events.append({'ref': f'e{index}', 'model_text': message,
+                                   'action': 'TerminalBatch', 'observation': observation})
+        except (OSError, ValueError, TypeError):
+            events = []
+    success = trial.get('reward') == 1
+    return {
+        'task_id': spec.task_id, 'skill_key': spec.skill_key, 'success': success,
+        'steps': len(events), 'truncated': False,
+        'failure_mode': None if success else (
+            trial.get('exception_type') or 'verifier_rejected'),
+        'trajectory': trial.get('trajectory_path') or chr(10).join(
+            event['observation'] for event in events),
+        'events': events, 'harbor_run_id': raw.get('run_id'),
+        'secs': round(time.time() - started, 2),
+    }
+
+
 def execute_fixed(spec: FixedSpec) -> Dict[str, Any]:
     """Execute the preselected Skill once; no routing, reflection or guidance."""
     from skillexpand.l1.agent import RepairAgent
@@ -35,6 +83,9 @@ def execute_fixed(spec: FixedSpec) -> Dict[str, Any]:
     agent = None
     try:
         cfg = PL._config(spec.benchmark)
+        if (spec.benchmark == 'terminalbench'
+                and cfg.benchmark.get('rollout', {}).get('mode') == 'harbor_rollout'):
+            return _harbor_fixed(spec, cfg, started)
         agent = F.build_agent(cfg, task_idx=spec.task_id, rules=spec.skill_body,
                               agent_cls=RepairAgent)
         if spec.usage_path:

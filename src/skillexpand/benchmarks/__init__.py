@@ -5,6 +5,7 @@ import joblib
 from .base import BaseEnv
 from .searchqa import QAEnv
 from .alfworld import AlfworldEnv
+from .terminalbench import TerminalBenchEnv, load_tasks as _terminalbench_tasks
 from .alfworld import get_env_name_from_gamefile
 
 
@@ -19,8 +20,9 @@ def _alfworld_tasks(cfg):
 
 __all__ = ['BaseEnv', 'QAEnv', 'AlfworldEnv', 'ENVS', 'INIT_TASKS_FN']
 
-INIT_TASKS_FN = {'searchqa': lambda cfg: _searchqa_tasks(cfg), 'alfworld': _alfworld_tasks}
-ENVS = {'searchqa': QAEnv, 'alfworld': AlfworldEnv}
+INIT_TASKS_FN = {'searchqa': lambda cfg: _searchqa_tasks(cfg), 'alfworld': _alfworld_tasks,
+                 'terminalbench': _terminalbench_tasks}
+ENVS = {'searchqa': QAEnv, 'alfworld': AlfworldEnv, 'terminalbench': TerminalBenchEnv}
 
 
 def _searchqa_tasks(cfg):

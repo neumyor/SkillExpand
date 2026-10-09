@@ -199,7 +199,29 @@ Use observed admissible actions when available. No expert trajectory is availabl
                               'Unobserved goal predicates are unknown.'}
 
 
-_REGISTRY = {'searchqa': SearchQAAdapter, 'alfworld': AlfworldAdapter}
+class TerminalBenchAdapter(Adapter):
+    """Prompt contract for Harbor-executed TerminalBench tasks.
+
+    TerminalBench rollouts are owned by the external Harbor/Tencent runner; the
+    SkillExpand worker only consumes its saved trajectory and verifier result.
+    """
+    execution_instructions = (
+        'TerminalBench tasks are executed by the Harbor/Tencent rollout adapter. '
+        'The SkillExpand worker consumes its saved trajectory and verifier result; '
+        'do not invent shell observations or verifier outcomes.'
+    )
+    reflection_instructions = REPAIR_INSTRUCTION + (
+        '\nUse only observed command output and verifier feedback. Separate task mistakes, '
+        'timeouts, HTTP errors, and sandbox/runtime failures.'
+    )
+
+    def evidence_event(self, event):
+        return {'text': str(event.get('observation', '')), 'effect': event.get('effect', 'observed'),
+                'method': True}
+
+
+_REGISTRY = {'searchqa': SearchQAAdapter, 'alfworld': AlfworldAdapter,
+             'terminalbench': TerminalBenchAdapter}
 
 def register(benchmark: str, adapter_class):
     _REGISTRY[benchmark] = adapter_class

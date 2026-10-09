@@ -15,7 +15,10 @@ def close_environment(agent):
 
 
 def worker_timeout():
-    seconds = float(os.environ.get('EXPE_WORKER_TIMEOUT_SECONDS', '3600'))
+    # Keep the outer pool deadline above TerminalBench's 7200-second task
+    # allowance so long sandbox builds finish and report their verifier result
+    # instead of being misclassified as worker timeouts.
+    seconds = float(os.environ.get('EXPE_WORKER_TIMEOUT_SECONDS', '7500'))
     if not math.isfinite(seconds) or seconds <= 0:
         raise InvalidInput('EXPE_WORKER_TIMEOUT_SECONDS must be finite and positive')
     return seconds

@@ -40,6 +40,14 @@ models:
 
 对应 CLI 参数是 `--l1-model`、`--cold-start-model`、`--l2-planner-model`、`--l2-editor-model`、`--l2-reviewer-model`、`--l2-verifier-model` 和 `--selector-model`。
 
+## TerminalBench
+
+`--benchmark terminalbench` 的任务来自一个 JSON 任务表（每行 `task_name` + `instruction`）。执行不在
+本进程内：所有 L1/val/test 单元调用外部 Harbor/Tencent runner，真实 rollout 发生在远程任务沙箱中，
+`benchmarks/terminalbench.py` 负责提交任务、回收 trajectory 与 verifier 结果、审计经验卡
+（`audit_harbor_experience`）。进程内的 `TerminalBenchEnv` 只是守卫：任何本进程执行都会显式失败，而不是
+假装有 verifier 语义。运行方式与前置条件见 [RUNNING.md](RUNNING.md) 的 TerminalBench 一节。
+
 ## L1 预算
 
 冷启动和每轮 Evolve 的 autonomous/supervised 次数均可配置：`--autonomous-attempts`、`--supervised-attempts`。Evolve 会把当前 Skill 注入 train L1，再将该轮新卡交给 L2；每一轮卡片独立保存。

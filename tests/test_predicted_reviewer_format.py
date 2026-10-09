@@ -59,6 +59,34 @@ def test_reason_at_new_limit_is_accepted():
     assert scorer()._parse_response(json.dumps(payload))["reason"] == payload["reason"]
 
 
+def test_omit_wire_format_keeps_parser_and_separate_identity(monkeypatch):
+    old = scorer()
+    monkeypatch.setenv('EXPE_REVIEWER_RESPONSE_FORMAT', 'omit')
+    reviewer = scorer()
+    assert reviewer.protocol_hash != old.protocol_hash
+    calls = []
+    def llm(messages, **kwargs):
+        calls.append(kwargs)
+        return '{"probability_true":0.8,"predicted_success":true,"reason":"ok"}'
+    result, attempts = reviewer._review(SimpleNamespace(llm=llm), 'prompt')
+    assert attempts == 1 and result['probability_true'] == 0.8
+    assert 'response_format' not in calls[0]['request_kwargs']
+    with pytest.raises(ValueError, match='disagrees'):
+        reviewer._parse_response('{"probability_true":0.8,"predicted_success":false,"reason":"ok"}')
+
+
+def test_global_thinking_switch_reaches_the_reviewer(monkeypatch):
+    monkeypatch.setenv('EXPE_LLM_DISABLE_THINKING', '1')
+    reviewer = scorer()
+    calls = []
+    def llm(messages, **kwargs):
+        calls.append(kwargs)
+        return '{"probability_true":0.8,"predicted_success":true,"reason":"ok"}'
+    reviewer._review(SimpleNamespace(llm=llm), 'prompt')
+    assert calls[0]['request_kwargs']['enable_thinking'] is False
+    assert calls[0]['request_kwargs']['response_format']['type'] == 'json_schema'
+
+
 def test_format_retry_preserves_thinking_and_json_schema():
     reviewer = scorer()
     calls = []

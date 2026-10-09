@@ -24,6 +24,7 @@ def test_model_retries_transient_errors_until_success_with_capped_backoff():
         assert sleep.call_args_list == [((1,),), ((2,),), ((4,),)]
         assert factory.call_args.kwargs['max_retries'] == 0
         assert factory.call_args.kwargs['request_timeout'] == 1
+        assert factory.call_args.kwargs['streaming'] is True
 
 
 def test_retry_delay_stays_at_one_minute():

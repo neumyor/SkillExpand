@@ -108,6 +108,8 @@ def build_parser():
              "the drift is appended to code_changes.jsonl beside each frozen manifest",
     )
     p.add_argument("--show-plan", action="store_true")
+    p.add_argument("--llm-relay", action="store_true",
+                   help="Route all LLM calls through a persistent Tencent E2B relay sandbox")
     return p
 
 
@@ -282,6 +284,7 @@ def main(argv=None):
     root.mkdir(parents=True, exist_ok=True)
     lock = IO.RunLock(root / "campaign.lock")
     lock.acquire()
+    relay, relay_env = None, {}
     try:
         if args.cold_start_dir:
             cfg, plan = import_cold_start(source, root)
@@ -289,7 +292,47 @@ def main(argv=None):
         # the stage's role map afterwards so Planner/Editor/Reviewer/selector
         # can intentionally differ from the L1 executor in the new run.
         cfg = apply_model_overrides(cfg, args)
-        IO.freeze(root / "config.json", OmegaConf.to_container(cfg, resolve=True))
+        if args.llm_relay:
+            from skillexpand.runtime.llm_relay import relay_from_env
+            relay = relay_from_env()
+            relay_env = {key: os.environ.get(key) for key in
+                         ('EXPE_LLM_BASE_URL', 'OPENAI_API_BASE', 'MODEL_API_BASE',
+                          'EXPE_LLM_RELAY_REQUIRED')}
+            base_url = relay.start()
+            os.environ['EXPE_LLM_BASE_URL'] = base_url
+            os.environ['OPENAI_API_BASE'] = base_url
+            os.environ['MODEL_API_BASE'] = base_url
+            os.environ['EXPE_LLM_RELAY_REQUIRED'] = '1'
+            # Tencent ModelBest accepts bare model ids, not the OpenAI provider
+            # namespace used by Harbor's generic config.
+            for role in cfg.models:
+                cfg.models[role] = str(cfg.models[role]).removeprefix('openai/')
+            cfg.agent.llm = str(cfg.agent.llm).removeprefix('openai/')
+            if OmegaConf.select(cfg, 'benchmark.rollout') is not None:
+                cfg.benchmark.rollout.llm_transport = 'tencent_e2b_relay'
+                cfg.benchmark.rollout.relay_base_url = base_url
+                cfg.benchmark.rollout.provider_base_url = os.environ.get(
+                    'TBENCH_RELAY_PROVIDER_BASE', 'https://llm-center.modelbest.co/v1')
+                cfg.benchmark.rollout.direct_provider_fallback = False
+            IO.save(root / 'relay_manifest.json', {
+                'llm_transport': 'tencent_e2b_relay', 'relay_base_url': base_url,
+                'relay_scope': 'experiment', 'direct_provider_fallback': False,
+                'sandbox_id': relay.transport.sandbox_id})
+        resolved_config = OmegaConf.to_container(cfg, resolve=True)
+        config_path = root / "config.json"
+        if args.llm_relay and config_path.exists():
+            # The relay binds an ephemeral loopback port and normalizes Tencent
+            # model names after a cold-start import.  A formal relay run
+            # therefore replaces the copied input config once, while preserving
+            # the ordinary frozen-input behaviour for all non-relay runs.
+            if json.loads(config_path.read_text()) != resolved_config:
+                config_path.unlink()
+                manifest_path = root / "manifest.json"
+                if manifest_path.exists():
+                    manifest = json.loads(manifest_path.read_text())
+                    manifest["config"] = resolved_config
+                    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        IO.freeze(config_path, resolved_config)
         os.environ["EXPE_CONFIG_FILE"] = str(root / "config.json")
         os.environ["EXPE_TASK_FILE"] = cfg.benchmark.task_file
         if not completed:
@@ -335,6 +378,13 @@ def main(argv=None):
                 )
             )
     finally:
+        if relay is not None:
+            relay.close()
+            for key, value in relay_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         lock.release()
     return 0
 

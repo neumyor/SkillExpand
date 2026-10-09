@@ -142,6 +142,14 @@ class ColdStart:
             raise JournalConflict('Incomplete or mismatched train cards')
         if {p.name for p in results.glob('*.json')} != {f'{t}.json' for t in source}:
             raise JournalConflict('Unexpected cold-start result files')
+        if (self.cfg.benchmark.name == 'terminalbench'
+                and self.cfg.benchmark.get('rollout', {}).get('mode') == 'harbor_rollout'):
+            # TerminalBench units have no in-process L1 checkpoint; their
+            # trials are the Harbor rollout, audited by the benchmark itself.
+            from skillexpand.benchmarks.terminalbench import audit_harbor_experience
+            for exp in experiences:
+                audit_harbor_experience(exp)
+            return experiences
         from skillexpand.l1.audit import audit_checkpoint
         from skillexpand.l1.adapters import resolve
         adapter=resolve(self.cfg)

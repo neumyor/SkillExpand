@@ -162,7 +162,8 @@ def audit_round(root, round_index):
     require(len(library) == len(history), 'duplicate stored Skill version')
     for skill in heads.values():
         require(library.get(skill.key) == skill, 'input differs from stored Skill')
-    adapter = resolve(OmegaConf.load(root / 'config.json'))
+    config = OmegaConf.load(root / 'config.json')
+    adapter = resolve(config)
     require(manifest['skill_keys'] == {f: s.key for f, s in heads.items()}, 'input Skill keys mismatch')
     expected_tasks = tuple(sorted(manifest['task_ids']))
     require({p.name for p in (directory / 'cards').glob('*.json')} ==
@@ -184,13 +185,20 @@ def audit_round(root, round_index):
                 f'card hash mismatch: {task_id}')
         require(exp.selection_source == S.SELECTION_FIXED and
                 exp.selected_skill_id == heads[exp.family_id].skill_id, 'card selection mismatch')
-        checkpoint = json.loads((directory / 'trials' / f'{task_id}.json').read_text())
-        require(checkpoint['experience'] == value, f'card/checkpoint mismatch: {task_id}')
-        require(checkpoint['identity']['skill'] ==
-                {'key': expected_skill, 'body': heads[exp.family_id].body}, 'executed Skill body mismatch')
-        require(checkpoint['identity']['k'] == protocol['l1']['attempts'] and
-                checkpoint['identity']['supervised'] == protocol['l1']['supervised'], 'L1 budget changed')
-        audit_checkpoint(checkpoint, adapter)
+        if (split['benchmark'] == 'terminalbench'
+                and config.benchmark.get('rollout', {}).get('mode') == 'harbor_rollout'):
+            # TerminalBench trials are the external Harbor rollout; the saved
+            # file holds the benchmark's audit verdict, not an L1 checkpoint.
+            from skillexpand.benchmarks.terminalbench import audit_harbor_experience
+            audit_harbor_experience(exp)
+        else:
+            checkpoint = json.loads((directory / 'trials' / f'{task_id}.json').read_text())
+            require(checkpoint['experience'] == value, f'card/checkpoint mismatch: {task_id}')
+            require(checkpoint['identity']['skill'] ==
+                    {'key': expected_skill, 'body': heads[exp.family_id].body}, 'executed Skill body mismatch')
+            require(checkpoint['identity']['k'] == protocol['l1']['attempts'] and
+                    checkpoint['identity']['supervised'] == protocol['l1']['supervised'], 'L1 budget changed')
+            audit_checkpoint(checkpoint, adapter)
         cards[task_id] = exp
 
     planned = json.loads((directory / 'batches.json').read_text())

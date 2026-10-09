@@ -133,6 +133,29 @@ CLI 的 `test` 阶段使用 `test` split：
 
 审计检查 train 卡覆盖、checkpoint、卡片 hash、候选重放、acceptance scope、Skill 版本链和提交事务。predicted-val 审计不会重新调用模型；它读取批次中保存的 paired 预测。
 
+## TerminalBench（远程 Harbor 执行）
+
+TerminalBench 任务不在本进程内执行。`--benchmark terminalbench` 时，L1、val/test 单元都调用外部
+Harbor/Tencent runner（`benchmarks/terminalbench.harbor_rollout`）：真实 rollout 发生在远程任务沙箱内，
+worker 只消费它保存的 trajectory 与 verifier 结果。任务表来自 `--task-file`（默认
+`data/terminalbench/tb21.json`，每行含 `task_name` 与 `instruction`）。
+
+前置条件：
+
+- `configs/benchmark/terminalbench.yaml` 中 `rollout.runner_script` 指向 TB2.1 的 Tencent 启动脚本；
+- 远程机器若不能直连 provider，加 `--llm-relay`：全部 LLM 调用经一个常驻 Tencent E2B 中继沙箱转发
+  （`runtime/llm_relay.py`；需安装 `.[tencent-relay]` extra 并设置 `E2B_API_KEY` 与
+  `TBENCH_E2B_RELAY_TEMPLATE`）。中继绑定临时回环端口并归一化模型名，因此 relay run 在 resume 时允许
+  一次性替换冻结 config 中的运行时 transport 字段；`SKILLEXPAND_ALLOW_RELAY_CODE_DRIFT=1` 仅供
+  中继代码修复续跑使用，其余输入仍冻结；
+- TB 单元最长可运行 2 小时，worker 进度超时默认已放宽到 7500s。
+
+成本提示：sampled 验收的每道抽检题都是一次真实沙箱执行（两臂 × 抽样题数，默认上限 16 题），在 TB 上
+应按预算调小 `--acceptance-sample-size`。
+
+Tencent provider 会偶发拒绝严格的 wire `response_format`（HTTP 400 / 400006）。predicted Reviewer 可用
+`EXPE_REVIEWER_RESPONSE_FORMAT=omit` 省去该字段（prompt 与解析不变，协议哈希会区分两种模式）。
+
 ## campaign launcher
 
 `python scripts/run_campaign.py prepare --root <campaign> --inputs <dir>` 冻结两个 benchmark 的输入、模型角色和并发参数，并把当前 `src/` 复制到 `<campaign>/code/src`，同时写入冻结启动器 `<campaign>/code/run_campaign.py`。之后的所有动作都用冻结启动器运行，确保只执行冻结代码（对已 prepare 的 campaign，`scripts/run_campaign.py` 也会把非 prepare 动作转交给冻结启动器）：
