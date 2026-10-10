@@ -1,0 +1,44 @@
+{
+  "status": "passed",
+  "purpose": "dependency_cache_validation_no_agent",
+  "trial_dir": "/data2/liyishan/tbench2-openclaw-min/cache/pipeline/pipeline-uv095-py3139-v6/validation/1791618295309175231",
+  "cache": {
+    "version": "pipeline-uv095-py3139-v6",
+    "status": "ready",
+    "task": "torch-pipeline-parallelism",
+    "reused": false,
+    "transfer_seconds": 739.6365453898907,
+    "unpack_seconds": 20.540142245590687,
+    "bytes": 3147399198,
+    "prepare_seconds": 760.2787191048265
+  },
+  "offline_pytest": "pytest 8.4.1",
+  "offline_seconds": 51.074777979403734,
+  "repeat_prepare": {
+    "version": "pipeline-uv095-py3139-v6",
+    "status": "ready",
+    "task": "torch-pipeline-parallelism",
+    "reused": true,
+    "transfer_seconds": 0,
+    "unpack_seconds": 0,
+    "bytes": 0,
+    "prepare_seconds": 0.08617974072694778
+  },
+  "verifier_seconds": 51.89175716415048,
+  "reward": {
+    "reward": 0.0
+  },
+  "installer_hit": true,
+  "entered_pytest": true,
+  "download_lines": [],
+  "cold_prepare_seconds": 1354.2746588364244,
+  "measured_dependency_improvement": true,
+  "end_to_end_improvement": true,
+  "cold_reference": {
+    "kind": "incomplete_cold_download",
+    "dependency_elapsed_seconds": 1001,
+    "complete": false
+  },
+  "faster_than_cold_lower_bound": true,
+  "within_verifier_budget": true
+}
