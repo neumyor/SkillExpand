@@ -40,12 +40,45 @@ def trial(tmp_path, reward=0, exception=None):
     return path
 
 
-def test_verifier_zero_is_valid_but_timeout_with_zero_is_excluded(tmp_path):
+@pytest.mark.parametrize('reward', [0, 1])
+def test_agent_timeout_with_real_verifier_reward_is_valid(tmp_path, reward):
     path = trial(tmp_path)
     assert summary.validate_trial(path, 'fix-git')[1] == 0
-    trial(tmp_path, exception={'exception_type': 'AgentTimeoutError'})
-    with pytest.raises(ValueError, match='trial_exception:AgentTimeoutError'):
-        summary.validate_trial(path, 'fix-git')
+    trial(tmp_path, reward=reward, exception={'exception_type': 'AgentTimeoutError'})
+    assert summary.validate_trial(path, 'fix-git')[1] == reward
+
+
+def test_timeout_without_score_and_verifier_timeout_remain_invalid(tmp_path):
+    with pytest.raises(ValueError, match='invalid_verifier_reward'):
+        summary.validate_trial(trial(tmp_path, reward=None,
+            exception={'exception_type': 'AgentTimeoutError'}), 'fix-git')
+    with pytest.raises(ValueError, match='trial_exception:VerifierTimeoutError'):
+        summary.validate_trial(trial(tmp_path, exception={'exception_type': 'VerifierTimeoutError'}), 'fix-git')
+
+
+def test_reconciliation_uses_earliest_scored_timeout_not_later_success(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location('timeout_reconcile',
+        Path(__file__).resolve().parents[1] / 'scripts/reconcile_tb21_empirical_timeouts.py')
+    import sys
+    monkeypatch.setitem(sys.modules, 'summarize_tb21_empirical', summary)
+    reconcile = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reconcile)
+    summary.write(tmp_path / 'manifest.json', {'task_names': ['fix-git']})
+    slot = tmp_path / 'slots/00-1'
+    for index, reward in [(1, 0), (2, 1)]:
+        request = slot / f'requests/{index:03d}'
+        path = trial(request / 'jobs/job/trial', reward,
+                     {'exception_type': 'AgentTimeoutError'} if index == 1 else None)
+        summary.write(path.parent / 'agent/skill_activation.json', {
+            'load_stage': 'after_selection', 'source_path': str(request / 'SKILL.md')})
+        summary.write(request / 'selection.json', {'ok': True})
+    monkeypatch.setattr(reconcile, 'summarize', lambda root: {})
+    reconcile.reconcile(tmp_path)
+    row = summary.read(slot / 'record.json')
+    assert row['reward'] == 0
+    assert '/001/' in row['result_path']
+    reconcile.reconcile(tmp_path)
+    assert summary.read(slot / 'record.json') == row
 
 
 @pytest.mark.parametrize('reward', [None, True, -1, 0.4])

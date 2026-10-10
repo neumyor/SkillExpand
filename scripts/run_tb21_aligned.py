@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from collections import Counter
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -19,7 +20,8 @@ from skillexpand.persistence.artifacts import load_cold_start, provider_signatur
 from skillexpand.runtime.llm_relay import relay_from_env
 from skillexpand.runtime.progressive import select_and_load
 from skillexpand.benchmarks.terminalbench import harbor_rollout
-from run_tb21_empirical import CANARIES, SelectorHost, active_worker_reservation, failure_class
+from skillexpand.benchmarks import task_skill as TS
+from run_tb21_empirical import CANARIES, SelectorHost, active_worker_reservation, failure_class, total_worker_limit
 from summarize_tb21_empirical import read, write, validate_trial
 
 METHOD = "DEEPSEEK_up5zdj"
@@ -74,17 +76,19 @@ def raw_trial(row, index):
             "trajectory": row["trajectory_path"], "result_path": row["result_path"], "events": events}
 
 
-def experience(task, instruction, trials, family="terminalbench.general", skill=None, selection=None):
+def experience(task, instruction, trials, family="terminalbench.general", skill=None, selection=None, *, grouped=False):
+    eid = (TS.experience_id(task, skill.key) if grouped else
+           f"{'evolution:1' if skill else 'discovery'}:{task}:experience")
     evidence = P.evidence(instruction, trials)
     card = L.card(task, instruction, trials, {"status": "valid", "claims": []},
                   "external_harbor", "tb21-aligned", len, evidence=evidence,
-                  card_id=f"{'evolution:1' if skill else 'discovery'}:{task}:card",
+                  card_id=eid.removesuffix(':experience') + ':card',
                   benchmark="terminalbench", family_id=family,
                   evolution_round=1 if skill else 0, skill_key=skill.key if skill else None)
     rewards = tuple(t["success"] for t in trials)
     selection = selection or {}
     return S.TaskExperience(
-        f"{'evolution:1' if skill else 'discovery'}:{task}:experience", "terminalbench", task,
+        eid, "terminalbench", task,
         instruction, family, S.SPLIT_TRAIN, any(rewards), len(trials),
         initial_skill_key=skill.key if skill else None,
         failed_trajectories=tuple(t["trajectory"] for t in trials if not t["success"]),
@@ -118,22 +122,43 @@ def source_payloads(task, instruction, rows):
 def prepare(args):
     root = args.run_dir.resolve()
     identity = {"stage": args.stage, "protocol": "tb21-e1-aligned-free-library-v1",
-                "sources": [str(args.deepseek_source.resolve())] +
-                           ([str(args.qwen_source.resolve())] if args.stage == "E5" else []),
+                "sources": ([str(args.deepseek_source.resolve())] if args.stage != "E6" else []) +
+                           ([str(args.qwen_source.resolve())] if args.stage in ("E5", "E6") else []),
                 "task_file": str(args.task_file.resolve()), "workers": args.workers,
                 "executor_model": METHOD if args.stage == "E3" else QWEN,
                 "method_model": METHOD, "scope": "89-task closed-set", "persistence": 0,
                 "old_bootstrap_results_imported": False, "correction_budget_resets": 0}
+    if args.stage == "E6":
+        identity["selector_model"] = QWEN
     if root.exists():
-        if read(root / "alignment.json") != identity:
+        previous = read(root / "alignment.json")
+        if previous != identity and getattr(args, "accept_worker_change", False):
+            unchanged = {**previous, "workers": args.workers}
+            if unchanged != identity:
+                raise ValueError("Only worker allocation may change during authorized resume")
+            status = read(root / "status.json")
+            if status.get("status") == "running" and Path('/proc', str(status.get("pid"))).exists():
+                raise ValueError("Stop the previous driver before changing worker allocation")
+            transition = root / "worker_transitions.json"
+            history = read(transition) if transition.exists() else []
+            history.append({"from_workers": previous["workers"], "to_workers": args.workers,
+                            "total_worker_limit": total_worker_limit(), "budgets_reset": False,
+                            "valid_slots_reused": True})
+            write(transition, history)
+            write(root / "alignment.json", identity)
+            manifest = read(root / "manifest.json")
+            manifest["workers"] = args.workers
+            write(root / "manifest.json", manifest)
+            previous = identity
+        if previous != identity:
             raise ValueError("Existing run identity differs; old runs cannot be imported")
         if (root / "input_audit.json").exists() and read(root / "input_audit.json").get("passed"):
             return root
     tasks = read(args.task_file)
     if len(tasks) != 89 or len({t["task_name"] for t in tasks}) != 89:
         raise ValueError("Expected 89 unique tasks")
-    rows = source_rows(args.deepseek_source, tasks, "deepseek-v4-flash-0731")
-    if args.stage == "E5":
+    rows = source_rows(args.deepseek_source, tasks, "deepseek-v4-flash-0731") if args.stage != "E6" else []
+    if args.stage in ("E5", "E6"):
         gate = read(args.raw_gate)
         if not gate["input_gate_passed"]["E5"]:
             raise ValueError("Qwen accepted input gate is not passed")
@@ -158,6 +183,7 @@ def prepare(args):
                              "direct_provider_fallback": False}},
            "models": {role: METHOD for role in ("cold_start", "selector", "l2_planner", "l2_editor", "l2_reviewer")}}
     cfg["models"]["l1_executor"] = identity["executor_model"]
+    cfg["models"]["selector"] = identity.get("selector_model", METHOD)
     write(root / "config.json", cfg)
     write(root / "split.json", S.to_dict(split))
     table = [{"task": t["instruction"], "env_kwargs": {"instruction": t["instruction"], "task_name": t["task_name"]},
@@ -187,7 +213,7 @@ def prepare(args):
     return root
 
 
-def run_slot(root, cfg, skills, tasks, transport, task, attempt, model):
+def run_slot(root, cfg, skills, tasks, transport, task, attempt, model, selector_model=METHOD):
     path = root / f"slots/{task:02d}-{attempt}/record.json"
     if path.exists() and read(path).get("status") == "valid":
         record = read(path)
@@ -200,7 +226,7 @@ def run_slot(root, cfg, skills, tasks, transport, task, attempt, model):
         directory.mkdir()
         record = {"task_id": task, "attempt_index": attempt, "task_name": tasks[task]["task_name"]}
         try:
-            skill, selection = select_and_load(SelectorHost(transport, directory / "selector.json", METHOD),
+            skill, selection = select_and_load(SelectorHost(transport, directory / "selector.json", selector_model),
                                                tasks[task]["instruction"], skills)
             write(directory / "selection.json", selection)
             name = "install-windows-3-11" if record["task_name"] == "install-windows-3.11" else record["task_name"]
@@ -232,26 +258,78 @@ def run_slot(root, cfg, skills, tasks, transport, task, attempt, model):
     return record
 
 
-def collect_cards(root, tasks, skills, model):
-    rows = [read(root / f"slots/{task:02d}-{a}/record.json") for task in range(89) for a in (1, 2, 3)]
-    if any(r["status"] != "valid" for r in rows):
-        raise ValueError("Incomplete valid slot coverage; L2 remains locked")
+def grouped_cards(root, tasks, skills, model):
+    """Build and audit derived cards offline, including partial coverage previews."""
+    root = Path(root).resolve()
+    cards, entries = {}, {}
     for task, entry in enumerate(tasks):
-        own = [r for r in rows if r["task_id"] == task]
-        ids = {r["selection"]["loaded_skill_key"] for r in own}
-        if len(ids) != 1:
-            raise ValueError(f"Independent selectors disagree for task {task}; cannot assign one family card")
-        skill = next(s for s in skills if s.key in ids)
-        trials = []
-        for row in own:
-            validate_trial(row["result_path"], entry["task_name"], activation=True, model=model)
-            trial = raw_trial({**row, "source_model": model}, row["attempt_index"])
-            trial["selection"] = row["selection"]
-            trials.append(trial)
-        exp = experience(task, entry["instruction"], trials, skill.family_id, skill, own[0]["selection"])
-        freeze(root / f"evolution/round-1/cards/{task}.json", S.to_dict(exp))
-    write(root / "execution_audit.json", {"passed": True, "valid_slots": len(rows),
-          "unique_keys": len({(r["task_id"], r["attempt_index"]) for r in rows}),
+        groups = {}
+        for attempt in (1, 2, 3):
+            slot = f'{task:02d}-{attempt}'
+            row = read(root / 'slots' / slot / 'record.json')
+            if row['status'] != 'valid':
+                continue
+            if row['task_id'] != task or row['attempt_index'] != attempt or row['task_name'] != entry['task_name']:
+                raise ValueError('Slot identity mismatch')
+            groups.setdefault(row['selection']['loaded_skill_key'], []).append(row)
+        for key, own in sorted(groups.items()):
+            skill = next((s for s in skills if s.key == key), None)
+            if skill is None:
+                raise ValueError('Unknown executed Skill version')
+            trials = []
+            for index, row in enumerate(own, 1):
+                result, _, trajectory = validate_trial(row['result_path'], entry['task_name'], activation=True, model=model)
+                if Path(row['trajectory_path']).resolve() != Path(trajectory).resolve():
+                    raise ValueError('Source trajectory mismatch')
+                request = Path(row['result_path']).resolve().parents[3]
+                trial = raw_trial({**row, 'source_model': model,
+                                   'exception_type': (result.get('exception_info') or {}).get('exception_type')}, index)
+                trial.update(selection=row['selection'], source_task_id=task,
+                             source_slot=f"{task:02d}-{row['attempt_index']}", source_request=str(request))
+                TS.validate_source(root, task, trial, skill, skills, model)
+                trials.append(trial)
+            exp = experience(task, entry['instruction'], trials, skill.family_id, skill,
+                             own[0]['selection'], grouped=True)
+            # Selection explanations belong to attempts; the card represents the group.
+            exp = replace(exp, selection_reason='', selection_raw='')
+            cards[exp.experience_id] = exp
+            entries[exp.experience_id] = {'file': f'{task}--{skill.skill_id}--v{skill.version}.json',
+                'task_id': task, 'skill_key': skill.key, 'slots': [t['source_slot'] for t in trials]}
+    manifest = {'format': TS.FORMAT, 'external_harbor': True, 'round': 1,
+                'executor_model': model, 'attempts_per_task': 3, 'task_ids': list(range(len(tasks))),
+                'experience_ids': sorted(cards), 'experiences': entries,
+                'skill_keys': {s.family_id: s.key for s in skills},
+                'cards': {eid: S.content_hash(S.to_dict(exp)) for eid, exp in cards.items()}}
+    audit = TS.validate_cards(root, manifest, cards, skills, list(range(len(tasks))), complete=False)
+    return cards, manifest, audit
+
+
+def collect_cards(root, tasks, skills, model):
+    root = Path(root).resolve()
+    cards, manifest, audit = grouped_cards(root, tasks, skills, model)
+    if not audit['passed']:
+        raise ValueError('Incomplete valid slot coverage; L2 remains locked')
+    directory = root / 'evolution/round-1'
+    prior = directory / 'manifest.json'
+    if prior.exists() and read(prior).get('format') == TS.FORMAT:
+        if read(prior) != manifest:
+            raise ValueError('Existing external experience manifest differs')
+        TS.read_cards(root, 1, skills, list(range(len(tasks))))
+    else:
+        if (directory / 'batches.json').exists() or list(root.glob('l2_batches/*.json')):
+            raise ValueError('Cannot migrate cards after L2 batches/journals exist')
+        staging = directory / 'cards-task-skill-staging'
+        staging.mkdir(parents=True, exist_ok=True)
+        for eid, exp in cards.items():
+            freeze(staging / manifest['experiences'][eid]['file'], S.to_dict(exp))
+        old = directory / 'cards'
+        if old.exists():
+            old.rename(directory / 'cards-before-task-skill-v1')
+        if prior.exists():
+            prior.rename(directory / 'manifest-before-task-skill-v1.json')
+        staging.rename(old)
+        write(prior, manifest)
+    write(root / 'execution_audit.json', {**audit,
           "executor": model, "independent_selection_per_attempt": True,
           "initial_library_execution": True, "not_final_library_empirical": True})
 
@@ -261,9 +339,10 @@ def reserve(root, stage, workers):
     with (root.parent / ".tb21-worker-reservations.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         reserved, active = active_worker_reservation(root.parent, root)
-        if workers + reserved > 100:
+        if workers + reserved > total_worker_limit():
             raise ValueError(f"Worker cap exceeded: {reserved}+{workers}")
-        write(root / "capacity.json", {"workers": workers, "other_reserved": reserved, "active": active})
+        write(root / "capacity.json", {"workers": workers, "other_reserved": reserved,
+              "total_worker_limit": total_worker_limit(), "active": active})
         write(root / "status.json", {"stage": stage, "status": "running", "pid": os.getpid(),
                                     "workers": workers, "phase": "cold_start"})
 
@@ -306,13 +385,18 @@ def execute(args, root):
     if read(root / "status.json").get("status") == "complete":
         return
     with RunLock(root / "driver.pid"):
+        if args.l2_only:
+            if not (root / 'cold_start_complete.json').exists():
+                raise ValueError('L2-only resume requires completed cold start')
+            _, _, initial, _ = load_cold_start(root)
+            collect_cards(root, read(root / 'tasks.json'), initial, identity['executor_model'])
         reserve(root, args.stage, args.workers)
         (root / "PID").write_text(str(os.getpid()) + "\n")
         logging.basicConfig(filename=root / "relay.log", level=logging.INFO)
-        relay = None
+        relay = selector_relay = None
         try:
             if identity["executor_model"] == QWEN and not os.environ.get("TB21_EXECUTOR_API_KEY"):
-                raise ValueError("E5 requires a verified Qwen credential in TB21_EXECUTOR_API_KEY")
+                raise ValueError("Qwen execution requires a verified credential in TB21_EXECUTOR_API_KEY")
             os.environ.update(MODEL_NAME=identity["executor_model"], TBENCH_PERSIST_SANDBOXES="0",
                 TBENCH_TENCENT_ENV_FILE="/dev/null", EXPE_REVIEWER_RESPONSE_FORMAT="omit",
                 EXPE_LLM_MAX_TOKENS="65536", EXPE_LLM_TIMEOUT_SECONDS="1800",
@@ -325,6 +409,14 @@ def execute(args, root):
             os.environ["TB21_METHOD_API_KEY"] = os.environ["OPENAI_API_KEY"]
             if identity["executor_model"] == QWEN and os.environ.get("TB21_EXECUTOR_API_KEY"):
                 os.environ["OPENAI_API_KEY"] = os.environ["TB21_EXECUTOR_API_KEY"]
+            selector_transport = relay.transport
+            if identity.get("selector_model") == QWEN:
+                selector_relay = relay_from_env()
+                selector_relay.start()
+                selector_transport = selector_relay.transport
+                write(root / "selector_relay_manifest.json", {
+                    "transport": "tencent_e2b_relay", "model": QWEN,
+                    "sandbox_id": selector_transport.sandbox_id, "persistence": 0})
             write(root / "credential_roles.json", {"method": "desktop_deepseek_via_relay",
                   "executor": "existing_e1_qwen" if identity["executor_model"] == QWEN
                               and os.environ.get("TB21_EXECUTOR_API_KEY") else "desktop_deepseek",
@@ -349,18 +441,19 @@ def execute(args, root):
                 write(root / "status.json", {"stage": args.stage, "status": "running", "pid": os.getpid(),
                       "workers": args.workers, "phase": phase})
                 with ThreadPoolExecutor(max_workers=args.workers) as pool:
-                    futures = [pool.submit(run_slot, root, cfg, skills, tasks, relay.transport, t, a,
-                                           identity["executor_model"]) for t, a in slots]
+                    futures = [pool.submit(run_slot, root, cfg, skills, tasks, selector_transport, t, a,
+                                           identity["executor_model"], identity.get("selector_model", METHOD)) for t, a in slots]
                     for future in as_completed(futures):
                         future.result()
                         valid = sum(read(p).get("status") == "valid" for p in (root / "slots").glob("*/record.json"))
                         write(root / "status.json", {"stage": args.stage, "status": "running", "pid": os.getpid(),
                               "workers": args.workers, "phase": phase, "coverage": f"{valid}/267"})
-            batch(canaries, "canary")
-            if not all(read(root / f"slots/{t:02d}-{a}/record.json")["status"] == "valid" for t, a in canaries):
-                raise ValueError("Canary failed; full panel locked")
-            write(root / "canary.json", {"passed": True, "slots": canaries, "reused": True})
-            batch([(t, a) for t in range(89) for a in (1, 2, 3) if (t, a) not in canaries], "skill_rollouts")
+            if not args.l2_only:
+                batch(canaries, "canary")
+                if not all(read(root / f"slots/{t:02d}-{a}/record.json")["status"] == "valid" for t, a in canaries):
+                    raise ValueError("Canary failed; full panel locked")
+                write(root / "canary.json", {"passed": True, "slots": canaries, "reused": True})
+                batch([(t, a) for t in range(89) for a in (1, 2, 3) if (t, a) not in canaries], "skill_rollouts")
             collect_cards(root, tasks, skills, identity["executor_model"])
             # Ephemeral relay replacement is operational, not a new scoring protocol.
             if (root / "l2_manifest.json").exists():
@@ -373,7 +466,8 @@ def execute(args, root):
                 batch_size=50, candidate_count=3, evolve_l1_workers=args.workers,
                 l2_review_workers=args.workers, evolve_rounds=1, autonomous_attempts=3,
                 supervised_attempts=0, skill_edit_mode="rewrite", acceptance_mode="predicted",
-                predicted_review_scope="val", progressive_library=True, acceptance_panel="all_train"))
+                predicted_review_scope="val", progressive_library=True, acceptance_panel="all_train",
+                external_experience_format=TS.FORMAT))
             install_review_budget(loop, root, tasks)
             result = loop.run_evolutions(1)
             if result["status"] != "complete" or result["invalid_batches"]:
@@ -398,23 +492,29 @@ def execute(args, root):
                   "error_class": failure_class(exc), "error": message[:2000]})
             print(json.dumps({"status": "needs_attention", "error": message[:2000]}))
         finally:
+            if selector_relay:
+                selector_relay.close()
             if relay:
                 relay.close()
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", required=True, choices=("E3", "E5"))
+    parser.add_argument("--stage", required=True, choices=("E3", "E5", "E6"))
     parser.add_argument("--run-dir", required=True, type=Path)
-    parser.add_argument("--deepseek-source", required=True, type=Path)
+    parser.add_argument("--deepseek-source", type=Path)
     parser.add_argument("--qwen-source", type=Path)
     parser.add_argument("--task-file", required=True, type=Path)
     parser.add_argument("--raw-gate", type=Path, default=Path("runs/tb21-raw-gate-qwen-accepted-20261008/audit.json"))
     parser.add_argument("--workers", type=int, default=42)
+    parser.add_argument("--accept-worker-change", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument('--l2-only', action='store_true', help='Require accepted slots; never execute new L1 requests')
     args = parser.parse_args()
-    if not 1 <= args.workers <= 42 or (args.stage == "E5" and args.qwen_source is None):
-        parser.error("Each stage needs 1..42 workers; E5 needs --qwen-source")
+    if (not 1 <= args.workers <= total_worker_limit() or
+            (args.stage in ("E5", "E6") and args.qwen_source is None) or
+            (args.stage != "E6" and args.deepseek_source is None)):
+        parser.error("Workers must fit the total limit; E3/E5 need DeepSeek input; E5/E6 need Qwen input")
     root = prepare(args)
     if not args.prepare_only:
         execute(args, root)

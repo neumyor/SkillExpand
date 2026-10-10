@@ -14,6 +14,7 @@ from skillexpand.l1.audit import audit_checkpoint
 from skillexpand.l1.adapters import resolve
 from omegaconf import OmegaConf
 from skillexpand.l2 import structured_skill as SS
+from skillexpand.benchmarks import task_skill as TS
 
 
 def require(condition, message):
@@ -162,10 +163,18 @@ def audit_round(root, round_index):
     adapter = resolve(OmegaConf.load(root / 'config.json'))
     require(manifest['skill_keys'] == {f: s.key for f, s in heads.items()}, 'input Skill keys mismatch')
     expected_tasks = tuple(sorted(manifest['task_ids']))
-    require({p.name for p in (directory / 'cards').glob('*.json')} ==
-            {f'{t}.json' for t in train}, 'unexpected/missing card files')
-    cards = {}
-    for task_id in expected_tasks:
+    external = manifest.get('external_harbor') or manifest.get('format') == TS.FORMAT
+    if external:
+        require(progressive and split['benchmark'] == 'terminalbench',
+                'external task-Skill cards require progressive TerminalBench')
+        cards = TS.read_cards(root, round_index, list(heads.values()), train)
+        expected_evidence = tuple(manifest['experience_ids'])
+    else:
+        require({p.name for p in (directory / 'cards').glob('*.json')} ==
+                {f'{t}.json' for t in train}, 'unexpected/missing card files')
+        cards = {}
+        expected_evidence = expected_tasks
+    for task_id in (() if external else expected_tasks):
         path = directory / 'cards' / f'{task_id}.json'
         value = json.loads(path.read_text())
         exp = S.from_dict(S.TaskExperience, value)
@@ -230,9 +239,14 @@ def audit_round(root, round_index):
                 bool(batch['reviews']) or
                 (expected_acceptance_mode == 'predicted' and expected_predicted_scope == 'val'),
                 'approval without reviews')
-        audit_batch(root, batch, base, [cards[t] for t in batch['task_ids']])
+        evidence_ids = batch.get('experience_ids', batch['task_ids'])
+        if external:
+            require('experience_ids' in batch and
+                    batch['task_ids'] == sorted({cards[eid].task_id for eid in evidence_ids}),
+                    'batch original task identities mismatch')
+        audit_batch(root, batch, base, [cards[t] for t in evidence_ids])
         require(batch.get('card_hashes'), 'round batch has no card hashes')
-        for task_id in batch['task_ids']:
+        for task_id in evidence_ids:
             require(task_id in cards, f'batch references task outside round: {task_id}')
             require(batch['card_hashes'].get(str(task_id)) ==
                     S.content_hash(S.to_dict(cards[task_id])),
@@ -293,15 +307,15 @@ def audit_round(root, round_index):
                 }
                 require(candidate_ids == proposed_ids,
                         'JEV acceptance does not cover every proposed candidate')
-    require(tuple(sorted(seen)) == expected_tasks,
-            'round batches do not cover each train task exactly once')
+    require(tuple(sorted(seen)) == expected_evidence,
+            'round batches do not cover each experience exactly once')
     for skill in heads.values():
         require(library.get(skill.key) == skill, 'round output differs from Skill history')
     summary_path = directory / 'summary.json'
     if summary_path.exists():
         summary = json.loads(summary_path.read_text())
         require(summary.get('status') == 'complete', 'round summary is incomplete')
-        require(summary.get('train_cards') == len(expected_tasks),
+        require(summary.get('train_cards') == len(cards),
                 'round summary card count mismatch')
         expected_mode = expected_acceptance_mode
         require(summary.get('acceptance_mode') == expected_mode,
@@ -331,7 +345,7 @@ def audit_round(root, round_index):
             require(summary.get('predicted_val_candidates') == sum(
                 len(b.get('acceptance', {}).get('candidates', ())) for b in journals
             ), 'predicted val candidate count mismatch')
-    return {'round': round_index, 'tasks': len(cards), 'batches': len(journals),
+    return {'round': round_index, 'tasks': len(expected_tasks), 'experience_cards': len(cards), 'batches': len(journals),
             'review_approved': sum(x.get('outcome') == 'review_approved' for x in journals),
             'acceptance_mode': expected_acceptance_mode,
             'empirical_validation': expected_acceptance_mode == 'empirical'}

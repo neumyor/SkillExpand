@@ -55,6 +55,56 @@ def test_model_specific_verifier_validation(tmp_path):
         aligned.validate_trial(path, "task")
 
 
+def test_authorized_total_worker_capacity(tmp_path, monkeypatch):
+    monkeypatch.setenv('TB21_TOTAL_WORKER_LIMIT', '200')
+    monkeypatch.setattr(aligned, 'active_worker_reservation', lambda *_: (108, []))
+    root = tmp_path / 'run'
+    root.mkdir()
+    aligned.reserve(root, 'E3', 92)
+    assert aligned.read(root / 'capacity.json')['total_worker_limit'] == 200
+    with pytest.raises(ValueError, match='Worker cap'):
+        aligned.reserve(root, 'E3', 93)
+
+
+def test_invalid_worker_capacity_rejected(monkeypatch):
+    monkeypatch.setenv('TB21_TOTAL_WORKER_LIMIT', '0')
+    with pytest.raises(ValueError, match='positive'):
+        aligned.total_worker_limit()
+
+
+def test_e6_preparation_has_only_qwen_input_and_qwen_selector(tmp_path):
+    tasks = [{'task_name': f'task{i}', 'instruction': f'instruction{i}'} for i in range(89)]
+    source = tmp_path / 'qwen'
+    for task in tasks:
+        for attempt in range(1, 4):
+            raw(source / task['task_name'], aligned.QWEN, attempt)
+            path = source / task['task_name'] / f'{aligned.QWEN}-{attempt}/result.json'
+            result = aligned.read(path)
+            result['task_name'] = task['task_name']
+            aligned.write(path, result)
+    # The production importer expects each trial directly under the source.
+    import shutil
+    flat = tmp_path / 'flat'
+    for i, path in enumerate(source.glob('*/*')):
+        shutil.copytree(path, flat / str(i))
+    task_file = tmp_path / 'tasks.json'
+    gate = tmp_path / 'gate.json'
+    aligned.write(task_file, tasks)
+    aligned.write(gate, {'input_gate_passed': {'E5': True}})
+    root = tmp_path / 'e6'
+    args = SimpleNamespace(stage='E6', run_dir=root, workers=16,
+        deepseek_source=None, qwen_source=flat, task_file=task_file, raw_gate=gate)
+    aligned.prepare(args)
+    assert aligned.read(root / 'input_audit.json')['records'] == 267
+    assert aligned.read(root / 'alignment.json')['sources'] == [str(flat.resolve())]
+    models = aligned.read(root / 'config.json')['models']
+    assert models['selector'] == models['l1_executor'] == aligned.QWEN
+    assert all(models[role] == aligned.METHOD for role in
+               ('cold_start', 'l2_planner', 'l2_editor', 'l2_reviewer'))
+    assert len(list((root / 'discovery/results').glob('*.json'))) == 89
+    assert not (root / 'initial_skills.json').exists()
+
+
 def test_free_generation_rejects_empty_body_and_task_assignments():
     import propose_terminalbench_library as propose
     row = {"skill_id": "terminalbench.family-p001", "family_id": "family-p001", "name": "generated",

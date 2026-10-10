@@ -25,7 +25,7 @@ def validate_trial(result_path, task_name, *, activation=False, model='qwen3.6-f
     if result.get('task_name') != task_name:
         raise ValueError('task_identity_mismatch')
     exception = result.get('exception_info')
-    if exception:
+    if exception and exception.get('exception_type') != 'AgentTimeoutError':
         raise ValueError('trial_exception:' + str(exception.get('exception_type', 'unknown')))
     reward = (result.get('verifier_result') or {}).get('rewards', {}).get('reward')
     if isinstance(reward, bool) or not isinstance(reward, (int, float)) or reward not in (0, 1):
@@ -118,13 +118,28 @@ def summarize(root):
                   and bool(settings) and all(s == settings[0] for s in settings)
                   and bool(baseline['settings']) and all(s == settings[0] for s in baseline['settings']))
     failures = Counter()
+    historical_errors = Counter()
     for path in (root / 'slots').glob('*/requests/*/error.json'):
-        failures[read(path)['error_class']] += 1
+        category = read(path)['error_class']
+        historical_errors[category] += 1
+        results = list(path.parent.glob('jobs/*/*/result.json'))
+        if len(results) == 1:
+            outcome = read(results[0])
+            error = outcome.get('exception_info') or {}
+            reward = (outcome.get('verifier_result') or {}).get('rewards', {}).get('reward')
+            if (error.get('exception_type') == 'AgentTimeoutError' and
+                    not isinstance(reward, bool) and isinstance(reward, (int, float)) and reward in (0, 1)):
+                continue
+        failures[category] += 1
     report = {'scope': '89-task closed-set empirical execution; no independent test generalization',
               'empirical': empirical, 'baseline': baseline.get('metrics'),
               'baseline_comparable': comparable, 'delta': None,
               'infrastructure_failure_counts': dict(failures), 'rejected_slots': rejected,
               'gate_or_evolution_changed': False}
+    report['historical_request_error_counts'] = dict(historical_errors)
+    report['accepted_agent_timeout_slots'] = sum(
+        (read(row['result_path']).get('exception_info') or {}).get('exception_type') == 'AgentTimeoutError'
+        for row in rows)
     if comparable:
         report['delta'] = {k: empirical[k] - baseline['metrics'][k] for k in ('pass_at_1', 'pass_at_3')}
         for task in empirical['per_task']:
@@ -144,6 +159,8 @@ def summarize(root):
              f"pass@1: {score(empirical['pass_at_1'])}; pass@3: {score(empirical['pass_at_3'])}.",
              f'Baseline comparable: {comparable}.',
              f'Infrastructure failures (excluded from rewards): {dict(failures)}.', '',
+             f"Accepted AgentTimeoutError slots with real verifier rewards: {report['accepted_agent_timeout_slots']}.",
+             'Each slot uses its earliest verifier-valid request; later retries remain historical evidence.', '',
              '| Task | Valid Attempts | Successes | Baseline Successes |',
              '| --- | --- | --- | --- |']
     for task in empirical['per_task']:

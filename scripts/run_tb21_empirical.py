@@ -41,6 +41,13 @@ def failure_class(exc):
     return 'runtime_or_artifact'
 
 
+def total_worker_limit():
+    limit = int(os.environ.get('TB21_TOTAL_WORKER_LIMIT', '100'))
+    if limit < 1:
+        raise ValueError('TB21_TOTAL_WORKER_LIMIT must be positive')
+    return limit
+
+
 def active_worker_reservation(runs, own):
     reservation, active = 0, []
     for status_path in runs.glob('tb21-*/status.json'):
@@ -114,7 +121,7 @@ def prepare(source, root, workers, stage='E1', baseline_source=None):
     assert config['models']['l1_executor'] == 'qwen3.6-flash-distill'
     assert config['benchmark']['rollout']['llm_transport'] == 'tencent_e2b_relay'
     reserved, active = active_worker_reservation(source.parent, root)
-    if not 1 <= workers <= 100 - reserved:
+    if not 1 <= workers <= total_worker_limit() - reserved:
         raise ValueError(f'Worker cap exceeded: {workers} + reserved {reserved}')
     baseline_rows, baseline_errors, settings = [], [], []
     for task, entry in enumerate(tasks):
@@ -241,7 +248,7 @@ def main():
         print(json.dumps(manifest))
         return
     reserved, _ = active_worker_reservation(source.parent, root)
-    assert args.workers + reserved <= 100
+    assert args.workers + reserved <= total_worker_limit()
     with RunLock(root / 'run.pid'):
         relay = None
         try:
