@@ -616,3 +616,12 @@ uses Qwen selector/executor. Each uses 16 workers, internal Tencent mirror and
 pipeline cache v6. E4, E3_FINAL and E5_FINAL entered canary; E6_FINAL is in
 full panel at 24/267. Total final-panel reservation is 64/250. No old E4 run,
 partial library, L2 input or source score was reused or modified.
+## Final panels progress: 2026-10-11 04:57 Asia/Shanghai
+
+All four authorized frozen-library panels are active in full-panel execution.
+Current valid-slot counts are E4 31/267, E3_FINAL 56/267, E5_FINAL 29/267 and
+E6_FINAL 48/267. The drivers remain alive and are making progress. A small
+number of selector/runtime/verifier-timeout errors is preserved as unresolved
+evidence and excluded from valid scores; no fixed zero was restored. Active
+unfinished requests are the current work items and were not duplicated. No
+panel has yet produced a complete result or final execution audit.
