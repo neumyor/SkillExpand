@@ -564,3 +564,19 @@ in that failed launcher. E5 PID 2965026 now reports family_evolution and
 All persisted batch reasons are approvals or holds, with no recorded invalid
 batch reason. None of the three whole-round results is complete; final-library
 panels and E4 remain gated. Keep the hourly follow-up active.
+
+## L2 recovery: 2026-10-11 00:40 Asia/Shanghai
+
+E3 stopped at predicted validation task 71 after the provider returned zero
+visible content despite 9723 reasoning characters. Relay evidence also
+records temporary upstream unavailability and output truncation. This was an
+L2 model-response failure, not a verifier timeout or pipeline-cache miss.
+The E3 driver had exited with 11/20 batches; existing review ledgers and cards
+were retained. E5 continued at 4/11 and E6 advanced to 6/10.
+
+Confirmed no live E3 driver, then resumed the same `--l2-only` run with its
+original source, identity, 92 workers, and in-memory method credential from
+the authorized E6 process. E3 PID 3218629, E5 PID 2965026 and E6 PID 1482469
+now all report family_evolution and 267/267 initial coverage. No L1 execution
+or budget reset was performed. Whole-round results remain incomplete; E4 and
+the three frozen final-library panels remain gated.
