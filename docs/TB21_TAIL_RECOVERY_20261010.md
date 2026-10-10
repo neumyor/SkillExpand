@@ -541,3 +541,26 @@ remain 92/92/50 (234/250 total). Historical capacity snapshots contain older
 PIDs and are not evidence of current occupancy. No restart or budget reset
 was needed. None has a completed whole-round result, so E4 and the three
 final-library evaluations remain gated; no partial library was frozen.
+
+## L2 recovery: 2026-10-10 23:43 Asia/Shanghai
+
+E3 and E6 remain active, with 11/20 and 5/10 recorded batches and 9/5 v1
+heads respectively. E5 stopped at 4/11 batches (three v1 heads): predicted
+validation task 81 received no visible answer from the provider despite
+263403 reasoning characters. This is an L2 model-response failure, not a
+Harbor verifier/download failure. Its task/body ledger retains initial_calls=1,
+corrections_reserved=0 and reset_count=0; no budget was reset.
+
+Confirmed the former E5 PID 1683226 had exited. Resumed the original E5
+--l2-only identity with both original sources, 92 workers and credentials
+inherited only in memory from the authorized live E6 launch environment.
+An initial launcher exited before entering the driver because resolving the
+venv Python symlink selected system Python; corrected to the absolute venv
+path without resolving the symlink. No model request or budget change occurred
+in that failed launcher. E5 PID 2965026 now reports family_evolution and
+267/267. Its capacity lock verified E3 PID 2294751 (92) and E6 PID 1482469
+(50), giving total reservation 234/250. Existing journals/cards remain intact.
+
+All persisted batch reasons are approvals or holds, with no recorded invalid
+batch reason. None of the three whole-round results is complete; final-library
+panels and E4 remain gated. Keep the hourly follow-up active.
