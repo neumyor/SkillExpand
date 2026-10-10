@@ -589,3 +589,16 @@ E3 14/20, E5 6/11 and E6 8/10. No new provider failure, invalid batch reason,
 completed round result or audit artifact was observed. Reservations remain
 92/92/50, 234/250 total. E4 and all final-library panels remain gated until a
 whole-round result, journal and execution audit pass for the source stage.
+## E6 L2 complete and final panel launched: 2026-10-11 02:50 Asia/Shanghai
+
+E6 completed its aligned L2 round: 10/10 batches, 117 experience cards,
+267/267 source slots, result status complete, round-1 audit present, and
+execution audit passed. Nine predicted updates were approved; unchanged v0
+heads remain part of the frozen library. The released 50-worker reservation
+made capacity for the authorized final-library panel.
+
+Started `runs/tb21-e6-final-library-empirical-20261010` with the completed E6
+source, 16 workers, Qwen selector and Qwen executor, pipeline cache v6 and
+the existing internal mirror configuration. The process entered `relay_start`
+with no model or verifier request yet. E3 remains at 17/20 and E5 at 9/11 in
+active family evolution; their L2 inputs and budgets were not changed.
