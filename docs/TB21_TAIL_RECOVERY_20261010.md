@@ -625,3 +625,11 @@ number of selector/runtime/verifier-timeout errors is preserved as unresolved
 evidence and excluded from valid scores; no fixed zero was restored. Active
 unfinished requests are the current work items and were not duplicated. No
 panel has yet produced a complete result or final execution audit.
+## Final panels progress: 2026-10-11 05:57 Asia/Shanghai
+
+The four frozen-library panels remain active in full-panel execution. Valid
+attempt counts are E4 52/267, E3_FINAL 81/267, E5_FINAL 47/267 and E6_FINAL
+66/267. All drivers are alive with recent relay activity. Six, four, six and
+eight request errors respectively remain excluded from valid counts under the
+earliest-valid-result rule; no fixed-zero recovery or duplicate retry was
+performed. No complete result or execution audit is available yet.
