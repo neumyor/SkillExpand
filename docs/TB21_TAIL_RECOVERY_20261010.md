@@ -633,3 +633,15 @@ attempt counts are E4 52/267, E3_FINAL 81/267, E5_FINAL 47/267 and E6_FINAL
 eight request errors respectively remain excluded from valid counts under the
 earliest-valid-result rule; no fixed-zero recovery or duplicate retry was
 performed. No complete result or execution audit is available yet.
+## Final panel storage block: 2026-10-11 06:57 Asia/Shanghai
+
+The four final-panel drivers stopped after partial progress: E4 64 valid
+attempts, E3_FINAL 98, E5_FINAL 63 and E6_FINAL 66. Their status files still
+say running because the host filesystem filled before final status writes.
+`df -h /data2` reports the 3.5 TB filesystem at 100% with zero available
+bytes; inode capacity remains available. A foreground resume reproduced
+`OSError: [Errno 28] No space left on device` while writing status.json.
+E4 and E5 each retain one unfinished request with only temporary selector/error
+files, so they are blocked from retry by the no-duplicate rule. E3 and E6 have
+no unfinished requests but cannot resume until storage is freed. No scoring
+evidence was deleted or changed; all missing attempts remain unresolved.
