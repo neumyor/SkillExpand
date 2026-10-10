@@ -525,3 +525,19 @@ TB21_FINAL_LIBRARY_EVALUATION_20261010.md for directory names and commands.
 Focused empirical/aligned/task-skill/final-panel tests passed (52 checks).
 The helper is deployed for future empirical processes; live L2 modules were
 not reloaded. Wait for completed audited sources before freezing or dispatch.
+
+## L2 progress: 2026-10-10 22:37 Asia/Shanghai
+
+Verified current status, live driver processes, persisted batch records,
+review-budget/usage timestamps and relay activity. E3/E5/E6 remain running
+in family_evolution with 267/267 initial real scores and passing execution
+audits. Recorded batches advanced from 7/3/3 to 10/4/4 against planned totals
+20/11/10. Current heads include 8/3/4 v1 skills respectively; remaining
+heads retain v0. Persisted batch reasons contain approved updates or holds,
+with no invalid_review/invalid_hypotheses failure among recorded batches.
+
+Live drivers are E3 2294751, E5 1683226 and E6 1482469; their reservations
+remain 92/92/50 (234/250 total). Historical capacity snapshots contain older
+PIDs and are not evidence of current occupancy. No restart or budget reset
+was needed. None has a completed whole-round result, so E4 and the three
+final-library evaluations remain gated; no partial library was frozen.
