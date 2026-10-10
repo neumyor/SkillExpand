@@ -78,6 +78,9 @@ def summarize(root):
     root = Path(root)
     manifest = read(root / 'manifest.json')
     library = {s['skill_id']: s for s in read(root / 'library.json')}
+    if manifest.get('source_kind') == 'aligned_evolved_final_library':
+        if {k: f"{k}@v{s['version']}" for k, s in library.items()} != manifest['library_versions']:
+            raise ValueError('Frozen library versions differ from manifest')
     rows, rejected = [], []
     settings = []
     for path in sorted((root / 'slots').glob('*/record.json')):
@@ -100,7 +103,8 @@ def summarize(root):
                     selection['loaded_skill_key'] != f"{skill['skill_id']}@v{skill['version']}" or
                     selection['load_stage'] != 'after_selection'):
                 raise ValueError('skill_identity_mismatch')
-            result, reward, trajectory = validate_trial(row['result_path'], row['task_name'], activation=True)
+            result, reward, trajectory = validate_trial(row['result_path'], row['task_name'], activation=True,
+                model=manifest.get('model', 'qwen3.6-flash-distill'))
             activated = read(Path(row['result_path']).parent / 'agent/skill_activation.json')
             mounted = Path(activated['source_path'])
             if mounted.resolve() != Path(row['skill_file']).resolve() or mounted.read_text() != skill['body']:
@@ -144,6 +148,31 @@ def summarize(root):
         report['delta'] = {k: empirical[k] - baseline['metrics'][k] for k in ('pass_at_1', 'pass_at_3')}
         for task in empirical['per_task']:
             task['baseline_successes'] = baseline['metrics']['per_task'][task['task_id']]['successes']
+    if manifest.get('initial_panel'):
+        source = Path(manifest['initial_panel'])
+        original, original_settings = [], []
+        source_identity = read(source / 'alignment.json')
+        for path in sorted((source / 'slots').glob('*/record.json')):
+            row = read(path)
+            outcome, reward, _ = validate_trial(row['result_path'], row['task_name'], activation=True,
+                                               model=source_identity['executor_model'])
+            original.append({**row, 'reward': reward})
+            original_settings.append(execution_settings(outcome))
+        before = metrics(original, manifest['tasks'])
+        task_match = read(source / 'tasks.json') == read(root / 'tasks.json')
+        roles_match = (manifest['model'] == source_identity['executor_model'] and
+                       manifest['selector_model'] == manifest['initial_panel_selector'])
+        settings_match = bool(settings) and all(s == settings[0] for s in settings + original_settings)
+        report['initial_panel_comparison'] = {
+            'source': str(source), 'tasks_match': task_match, 'roles_match': roles_match,
+            'execution_settings_match': settings_match, 'initial': before,
+            'paired_comparable': task_match and roles_match and settings_match and before['complete'] and empirical['complete'],
+            'infrastructure_change': 'Final evaluation uses internal mirror/DNS and pipeline v6 cache.',
+            'delta': {k: empirical[k] - before[k] for k in ('pass_at_1', 'pass_at_3')}
+                     if task_match and empirical['complete'] and before['complete'] else None,
+            'per_task': [{'task_id': t['task_id'], 'initial_successes': before['per_task'][t['task_id']]['successes'],
+                          'final_successes': t['successes']} for t in empirical['per_task']] if task_match else [],
+        }
     if len({r['result_path'] for r in rows}) != len(rows):
         raise ValueError('result_path_reused_across_slots')
     write(root / 'result.json', report)
@@ -166,6 +195,12 @@ def summarize(root):
     for task in empirical['per_task']:
         lines.append(f"| {manifest['task_names'][task['task_id']]} | {task['attempts']} | "
                      f"{task['successes']} | {task.get('baseline_successes', 'not compared')} |")
+    if 'initial_panel_comparison' in report:
+        comparison = report['initial_panel_comparison']
+        lines.extend(['', '## Initial Library Comparison', '',
+            f"Paired comparable: {comparison['paired_comparable']}; role match: {comparison['roles_match']}.",
+            comparison['infrastructure_change'],
+            f"Descriptive delta: {comparison['delta']}. No independent generalization or significance claim."])
     (root / 'report.md').write_text('\n'.join(lines) + '\n')
     status_path = root / 'status.json'
     if status_path.exists():

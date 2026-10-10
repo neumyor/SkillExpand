@@ -496,3 +496,32 @@ L2 evolution itself is ongoing and must not be described as complete or as
 final-library empirical validation. No goal object exists to mark complete.
 Stop tb2-1 as requested for completion of this recovery objective. This stops
 the hourly recovery checks, not the three live L2 drivers.
+
+## L2/final-panel follow-up: 2026-10-10 21:41 Asia/Shanghai
+
+User re-enabled hourly tb2-1 for E3/E5/E6 L2 completion and authorized four
+new frozen final-library panels: E4 transfer from E3 plus E3_FINAL/E5_FINAL/
+E6_FINAL, each 89x3 attempts and 16 workers. E5_FINAL explicitly uses Qwen
+selector and executor, unlike its initial DeepSeek selector. Keep the original
+panels, journals and correction budgets; final evaluations never add L2 rounds.
+
+E3 stopped after a provider stream ended without [DONE] in predicted task 9.
+Confirmed its former PID 722334 was gone, checked capacity (142 workers), and
+resumed the same --l2-only run as PID 2294751 with its original 92 workers,
+source and process-only credentials. Status confirmed family_evolution. No
+journal or budget was deleted/reset. E5 PID 1683226 and E6 PID 1482469 remain
+running. Latest batch counts are 7/3/3, with recent relay activity. Total
+reservation is 234/250. None has completed L2 yet; no final panel was launched.
+
+Extended the shared empirical runner for completed aligned L2 sources and
+multiple final heads, explicit authorized selector/executor roles, independent
+credential routing, frozen snapshot/source checks, capacity-lock reservation,
+earliest valid scored request reconciliation and unfinished-request exclusion.
+Source status/result, execution audit, actual round journal replay and final
+head identities gate preparation; E1 and historical E4 formats remain compatible.
+Reports include initial/final per-task descriptive comparisons and disclose
+the E5 selector change plus mirror/cache differences. See
+TB21_FINAL_LIBRARY_EVALUATION_20261010.md for directory names and commands.
+Focused empirical/aligned/task-skill/final-panel tests passed (52 checks).
+The helper is deployed for future empirical processes; live L2 modules were
+not reloaded. Wait for completed audited sources before freezing or dispatch.

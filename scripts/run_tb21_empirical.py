@@ -1,5 +1,7 @@
 """Execute a frozen library through independently selected Harbor attempts."""
 import argparse
+import copy
+import fcntl
 import json
 import logging
 import os
@@ -79,7 +81,77 @@ def active_worker_reservation(runs, own):
     return reservation, active
 
 
-def prepare(source, root, workers, stage='E1', baseline_source=None):
+def final_heads(source):
+    from skillexpand.l2.audit import audit_round
+    status, result = read(source / 'status.json'), read(source / 'result.json')
+    if status.get('status') != 'complete' or result.get('status') != 'complete':
+        raise ValueError('Final library requires completed aligned L2')
+    if result.get('invalid_batches') != 0 or not read(source / 'execution_audit.json').get('passed'):
+        raise ValueError('Final library source has invalid batches or execution audit')
+    audited = audit_round(source, 1)
+    if audited != read(source / 'evolution/round-1/audit.json'):
+        raise ValueError('Source round audit differs from journal replay')
+    heads = {}
+    for line in (source / 'skills.jsonl').read_text().splitlines():
+        skill = json.loads(line)
+        if skill['version'] > heads.get(skill['skill_id'], {}).get('version', -1):
+            heads[skill['skill_id']] = skill
+    versions = {k: f"{k}@v{s['version']}" for k, s in heads.items()}
+    if not heads or versions != result['skills']:
+        raise ValueError('Final heads differ from completed L2 result')
+    return sorted(heads.values(), key=lambda s: s['skill_id'])
+
+
+def prepare_final(source, root, workers, stage, executor, selector):
+    identity = read(source / 'alignment.json')
+    expected_source = 'E3' if stage == 'E4' else stage.removesuffix('_FINAL')
+    if identity['stage'] != expected_source:
+        raise ValueError('Final evaluation source stage mismatch')
+    heads = final_heads(source)
+    cfg = copy.deepcopy(read(source / 'config.json'))
+    tasks = read(source / 'tasks.json')
+    if len(tasks) != 89 or len({t['task_name'] for t in tasks}) != 89:
+        raise ValueError('Expected 89 unique tasks')
+    roles = {'E3_FINAL': ('DEEPSEEK_up5zdj', 'DEEPSEEK_up5zdj'),
+             'E4': ('qwen3.6-flash-distill', 'DEEPSEEK_up5zdj'),
+             'E5_FINAL': ('qwen3.6-flash-distill', 'qwen3.6-flash-distill'),
+             'E6_FINAL': ('qwen3.6-flash-distill', 'qwen3.6-flash-distill')}
+    expected_executor, expected_selector = roles[stage]
+    executor, selector = executor or expected_executor, selector or expected_selector
+    if (executor, selector) != roles[stage]:
+        raise ValueError('Final evaluation model roles differ from authorized setting')
+    cfg['agent']['llm'] = executor
+    cfg['models'].update(l1_executor=executor, selector=selector)
+    reserved, active = active_worker_reservation(source.parent, root)
+    if not 1 <= workers <= total_worker_limit() - reserved:
+        raise ValueError('Worker cap exceeded')
+    root.mkdir(exist_ok=False)
+    write(root / 'library.json', heads)
+    write(root / 'config.json', cfg)
+    write(root / 'tasks.json', tasks)
+    write(root / 'manifest.json', {
+        'stage': f'{stage}_empirical', 'protocol': 'tb21-frozen-library-empirical-v1',
+        'source_run': str(source), 'source_kind': 'aligned_evolved_final_library',
+        'source_stage': identity['stage'], 'tasks': 89, 'attempts': 3,
+        'task_names': [t['task_name'] for t in tasks], 'model': executor,
+        'executor_model': executor, 'selector_model': selector,
+        'library_versions': {s['skill_id']: f"{s['skill_id']}@v{s['version']}" for s in heads},
+        'workers': workers, 'reserved_workers': reserved, 'active_runs': active,
+        'scope': '89-task closed-set', 'persistence': 0, 'transport': 'tencent_e2b_relay',
+        'canaries': list(CANARIES), 'infrastructure_requests_per_slot_per_launch': 3,
+        'source_round_audit': read(source / 'evolution/round-1/audit.json'),
+        'initial_panel_selector': identity.get('selector_model', identity['method_model']),
+        'initial_panel': str(source),
+    })
+    write(root / 'status.json', {'stage': f'{stage}_empirical', 'status': 'prepared',
+                               'workers': workers, 'coverage': '0/267'})
+
+
+def prepare(source, root, workers, stage='E1', baseline_source=None, executor=None, selector=None):
+    if (source / 'alignment.json').exists():
+        return prepare_final(source, root, workers, stage, executor, selector)
+    if stage not in ('E1', 'E4') or executor or selector:
+        raise ValueError('Explicit final evaluation roles require an aligned source')
     status = read(source / 'status.json')
     assert status['status'] == 'complete'
     if stage == 'E1':
@@ -174,10 +246,73 @@ class SelectorHost:
         return raw
 
 
+def reconcile_slot(root, task, attempt):
+    slot = root / 'slots' / f'{task:02d}-{attempt}'
+    manifest = read(root / 'manifest.json')
+    library = {s['skill_id']: s for s in read(root / 'library.json')}
+    for request in sorted((slot / 'requests').glob('*')):
+        paths = list(request.glob('jobs/*/*/result.json'))
+        if len(paths) != 1:
+            continue
+        try:
+            path = paths[0]
+            _, reward, trajectory = validate_trial(path, manifest['task_names'][task],
+                activation=True, model=manifest['model'])
+            selection = read(request / 'selection.json')
+            skill = library[selection['loaded_skill_id']]
+            catalog = [{'skill_id': s['skill_id'], 'description': s['description']}
+                       for s in sorted(library.values(), key=lambda s: s['skill_id'])]
+            if (not selection['ok'] or selection['catalog'] != catalog or
+                    selection['skill_id'] != skill['skill_id'] or
+                    selection['loaded_skill_key'] != f"{skill['skill_id']}@v{skill['version']}" or
+                    selection['load_stage'] != 'after_selection'):
+                raise ValueError('Skill selection differs from frozen library')
+            mounted = Path(read(path.parent / 'agent/skill_activation.json')['source_path'])
+            if not mounted.resolve().is_relative_to(request.resolve()) or mounted.read_text() != skill['body']:
+                raise ValueError('Mounted Skill body/path mismatch')
+        except (ValueError, KeyError, OSError, TypeError):
+            continue
+        row = {'task_id': task, 'attempt_index': attempt, 'task_name': manifest['task_names'][task],
+               'status': 'valid', 'reward': reward, 'selection': selection,
+               'skill_file': str(mounted), 'result_path': str(path), 'trajectory_path': trajectory,
+               'selection_policy': 'earliest_request_with_valid_verifier'}
+        existing = slot / 'record.json'
+        if existing.exists() and read(existing) != row:
+            archive = slot / 'record_before_final_reconciliation.json'
+            if not archive.exists():
+                write(archive, read(existing))
+        write(existing, row)
+        return row
+    return None
+
+
+def configure_role_credentials(manifest):
+    method_key = os.environ.get('TB21_METHOD_API_KEY') or os.environ['OPENAI_API_KEY']
+    qwen_key = os.environ.get('TB21_EXECUTOR_API_KEY')
+    def role_key(model):
+        if model == 'qwen3.6-flash-distill':
+            if not qwen_key:
+                raise ValueError('Qwen role requires TB21_EXECUTOR_API_KEY')
+            return qwen_key
+        if model != 'DEEPSEEK_up5zdj':
+            raise ValueError('Unsupported final evaluation model')
+        return method_key
+    executor_key = role_key(manifest['model'])
+    os.environ['OPENAI_API_KEY'] = role_key(manifest['selector_model'])
+    return executor_key
+
+
 def execute_slot(cfg, tasks, skills, root, transport, task, attempt):
     slot = root / 'slots' / f'{task:02d}-{attempt}'
     existing = slot / 'record.json'
-    if existing.exists() and read(existing).get('status') == 'valid':
+    if read(root / 'manifest.json').get('source_kind') == 'aligned_evolved_final_library':
+        accepted = reconcile_slot(root, task, attempt)
+        if accepted:
+            return accepted
+        latest = sorted((slot / 'requests').glob('*'))
+        if latest and not list(latest[-1].glob('jobs/*/*/result.json')) and not (latest[-1] / 'error.json').exists():
+            raise ValueError('Unfinished request blocks final evaluation retry')
+    elif existing.exists() and read(existing).get('status') == 'valid':
         return read(existing)
     requests = slot / 'requests'
     requests.mkdir(parents=True, exist_ok=True)
@@ -203,7 +338,8 @@ def execute_slot(cfg, tasks, skills, root, transport, task, attempt):
             if len(rollout['trials']) != 1:
                 raise ValueError('missing_or_duplicate_harbor_trial')
             trial = rollout['trials'][0]
-            result, reward, trajectory = validate_trial(trial['result_path'], task_name, activation=True)
+            result, reward, trajectory = validate_trial(trial['result_path'], task_name, activation=True,
+                model=read(root / 'manifest.json')['model'])
             activation = read(Path(trial['result_path']).parent / 'agent/skill_activation.json')
             if Path(activation['source_path']).resolve() != skill_file.resolve():
                 raise ValueError('mounted_skill_path_mismatch')
@@ -215,7 +351,7 @@ def execute_slot(cfg, tasks, skills, root, transport, task, attempt):
             return row
         except Exception as exc:
             message = str(exc)
-            for name in ('OPENAI_API_KEY', 'E2B_API_KEY'):
+            for name in ('OPENAI_API_KEY', 'E2B_API_KEY', 'TB21_METHOD_API_KEY', 'TB21_EXECUTOR_API_KEY'):
                 key = os.environ.get(name)
                 if key:
                     message = message.replace(key, '[REDACTED]')
@@ -232,24 +368,39 @@ def main():
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--run-dir', required=True, type=Path)
     parser.add_argument('--workers', type=int, default=16)
-    parser.add_argument('--stage', choices=('E1', 'E4'), default='E1')
+    parser.add_argument('--stage', choices=('E1', 'E4', 'E3_FINAL', 'E5_FINAL', 'E6_FINAL'), default='E1')
+    parser.add_argument('--executor-model')
+    parser.add_argument('--selector-model')
     parser.add_argument('--baseline-source', type=Path)
     parser.add_argument('--prepare-only', action='store_true')
     args = parser.parse_args()
     source, root = args.source.resolve(), args.run_dir.resolve()
     if not root.exists():
         prepare(source, root, args.workers, args.stage,
-                args.baseline_source.resolve() if args.baseline_source else None)
+                args.baseline_source.resolve() if args.baseline_source else None,
+                args.executor_model, args.selector_model)
     manifest = read(root / 'manifest.json')
     assert manifest['source_run'] == str(source) and manifest['workers'] == args.workers
     stage = manifest['stage']
     assert stage == f'{args.stage}_empirical'
+    if args.executor_model and args.executor_model != manifest['model']:
+        raise ValueError('Executor changed during resume')
+    if args.selector_model and args.selector_model != manifest['selector_model']:
+        raise ValueError('Selector changed during resume')
+    if manifest.get('source_kind') == 'aligned_evolved_final_library':
+        if final_heads(source) != read(root / 'library.json'):
+            raise ValueError('Frozen final library differs from source')
     if args.prepare_only:
         print(json.dumps(manifest))
         return
-    reserved, _ = active_worker_reservation(source.parent, root)
-    assert args.workers + reserved <= total_worker_limit()
     with RunLock(root / 'run.pid'):
+        with (root.parent / '.tb21-worker-reservations.lock').open('a') as capacity_lock:
+            fcntl.flock(capacity_lock, fcntl.LOCK_EX)
+            reserved, _ = active_worker_reservation(source.parent, root)
+            if args.workers + reserved > total_worker_limit():
+                raise ValueError('Worker cap exceeded')
+            write(root / 'status.json', {'stage': stage, 'status': 'running',
+                  'workers': args.workers, 'pid': os.getpid(), 'phase': 'relay_start'})
         relay = None
         try:
             logging.basicConfig(filename=root / 'relay.log', level=logging.INFO)
@@ -258,8 +409,12 @@ def main():
             (root / 'PID').write_text(str(os.getpid()) + '\n')
             os.environ.update(MODEL_NAME=manifest['model'], TBENCH_PERSIST_SANDBOXES='0',
                               TBENCH_TENCENT_ENV_FILE='/dev/null')
+            if manifest.get('source_kind') == 'aligned_evolved_final_library':
+                executor_key = configure_role_credentials(manifest)
             relay = relay_from_env()
             relay.start()
+            if manifest.get('source_kind') == 'aligned_evolved_final_library':
+                os.environ['OPENAI_API_KEY'] = executor_key
             write(root / 'relay_manifest.json', {'sandbox_id': relay.transport.sandbox_id,
                 'transport': 'tencent_e2b_relay', 'direct_provider_fallback': False})
             cfg = OmegaConf.create(read(root / 'config.json'))
@@ -292,9 +447,13 @@ def main():
                 'status': 'complete' if audit['complete'] else 'needs_attention',
                 'coverage': f"{report['empirical']['valid_attempts']}/267", 'pid': os.getpid()})
         except Exception as exc:
+            message = str(exc)
+            for key in ('OPENAI_API_KEY', 'E2B_API_KEY', 'TB21_METHOD_API_KEY', 'TB21_EXECUTOR_API_KEY'):
+                if os.environ.get(key):
+                    message = message.replace(os.environ[key], '[REDACTED]')
             write(root / 'status.json', {'stage': stage, 'status': 'needs_attention',
-                'error': str(exc), 'error_class': failure_class(exc)})
-            raise
+                'error': message, 'error_class': failure_class(exc)})
+            raise RuntimeError(message) from None
         finally:
             if relay is not None:
                 relay.close()
