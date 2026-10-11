@@ -19,6 +19,24 @@ from skillexpand.runtime.llm_relay import relay_from_env, coalesce_sse, default_
 
 
 def _cards(root: Path) -> list[dict]:
+    source_cards = root / "source_cards.json"
+    if source_cards.exists():
+        rows = []
+        for value in json.loads(source_cards.read_text()):
+            card = value.get("experience_card") or {}
+            rows.append({
+                "task_id": int(value["task_id"]),
+                "source_card_id": value["source_card_id"],
+                "source_model": value["source_model"],
+                "task": str(card.get("task") or value.get("task_name") or "")[:1200],
+                "reward": bool(card.get("reward", False)),
+                "claims": card.get("claims", []),
+                "evidence": card.get("evidence", [])[:8],
+                "attempts": value.get("attempts", []),
+            })
+        if len(rows) != 178 or {r["source_model"] for r in rows} != {"deepseek-v4-flash-0731", "qwen3.6-flash-distill"}:
+            raise RuntimeError("expected 178 source-qualified imported cards")
+        return rows
     rows = []
     for path in sorted((root / "discovery" / "results").glob("*.json"), key=lambda p: int(p.stem)):
         value = json.loads(path.read_text())
@@ -127,7 +145,7 @@ def main() -> int:
     rows = _cards(root)
     compact = json.dumps(rows, ensure_ascii=False)
     prompt = """You are designing a reusable Skill library for Terminal-Bench 2.1.
-Use the 89 imported experience cards below to propose the smallest defensible set of
+Use the imported experience cards below to propose the smallest defensible set of
 reusable Skills. Group by required operations and completion contracts, never by task
 ID, topic entity, success/failure, or answer. A proposal must be useful as a runtime
 instruction body. Do not return task IDs, assignments, exclusions, or routing rules
@@ -171,7 +189,10 @@ EXPERIENCE CARDS:
         (out / "library_proposals.json").write_text(json.dumps({
             "schema_version": 1, "benchmark": "terminalbench",
             "proposal_mode": "model_generated_library_no_task_assignments",
-            "source_cards": 89, "transport": "tencent_e2b_relay",
+            "source_cards": len(rows), "source_card_counts": {
+                model: sum(r.get("source_model") == model for r in rows)
+                for model in sorted({r.get("source_model") for r in rows if r.get("source_model")})
+            }, "transport": "tencent_e2b_relay",
             "model": args.model, "max_tokens": default_output_token_limit(args.model) or 12000,
             "thinking": True, "stream": True,
             "skills": clean,
@@ -179,7 +200,7 @@ EXPERIENCE CARDS:
         (out / "audit.json").write_text(json.dumps({
             "status": "passed", "catalog_has_body": False,
             "contains_task_assignments": False, "skill_count": len(clean),
-            "source_cards": 89, "transport": "tencent_e2b_relay",
+            "source_cards": len(rows), "transport": "tencent_e2b_relay",
         }, indent=2) + "\n")
         print(json.dumps({"status": "passed", "skill_count": len(clean), "out": str(out)}))
         return 0

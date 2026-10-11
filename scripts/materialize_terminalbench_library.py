@@ -24,7 +24,10 @@ def main() -> int:
     for path in sorted((root / "discovery" / "results").glob("*.json"), key=lambda x: int(x.stem)):
         value = json.loads(path.read_text())
         cards.append(value)
-    ids = tuple(sorted(int(v["task_id"]) for v in cards))
+    source_cards = json.loads((root / "source_cards.json").read_text()) if (root / "source_cards.json").exists() else []
+    provenance_cards = source_cards or cards
+    ids = tuple(int(v["task_id"]) for v in provenance_cards)
+    experience_ids = tuple(v.get("experience_id", f"discovery:{v['task_id']}:experience") for v in provenance_cards)
     skills = []
     for row in rows:
         family_id = str(row["family_id"])
@@ -37,7 +40,7 @@ def main() -> int:
             body=str(row["body"]),
             provenance=S.Provenance(
                 rationale="Model-generated library from 89 imported schema-5 cards; no task assignment",
-                source_experience_ids=tuple(v["experience_id"] for v in cards),
+                source_experience_ids=experience_ids,
                 source_task_ids=ids,
             ),
         ))

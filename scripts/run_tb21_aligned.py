@@ -169,17 +169,24 @@ def prepare(args):
     root.mkdir(parents=True, exist_ok=True)
     write(root / "alignment.json", identity)
     write(root / "tasks.json", tasks)
-    for row in rows:
+    for row in rows if args.stage == "QD" else []:
         row["source_card_id"] = f"{row['source_model']}:{row['task_id']}"
     write(root / "raw_inputs.json", rows)
     source_cards = []
-    for (model, task_id), own in sorted({(r["source_model"], r["task_id"]): [x for x in rows if x["source_model"] == r["source_model"] and x["task_id"] == r["task_id"]] for r in rows}.items()):
+    for (model, task_id), own in sorted({(r["source_model"], r["task_id"]): [x for x in rows if x["source_model"] == r["source_model"] and x["task_id"] == r["task_id"]] for r in rows}.items()) if args.stage == "QD" else []:
+        own_trials = [raw_trial(r, i) for i, r in enumerate(own, 1)]
+        source_exp = experience(task_id, tasks[task_id]["instruction"], own_trials)
+        source_eid = f"{model}:{task_id}:experience"
+        source_exp.experience_card["card_id"] = f"{model}:{task_id}:card"
         source_cards.append({"source_card_id": f"{model}:{task_id}", "source_model": model,
                              "task_id": task_id, "task_name": own[0]["task_name"],
-                             "experience_id": f"{model}:{task_id}:experience",
+                             "experience_id": source_eid,
+                             "original_experience_id": source_exp.experience_id,
+                             "experience_card": source_exp.experience_card,
                              "attempts": [{"attempt_index": r["attempt_index"], "result_path": r["result_path"],
                                            "trajectory_path": r["trajectory_path"], "reward": r["reward"]} for r in own]})
-    write(root / "source_cards.json", source_cards)
+    if args.stage == "QD":
+        write(root / "source_cards.json", source_cards)
     split = S.SplitPlan.make({i: S.SPLIT_TRAIN for i in range(89)}, "terminalbench", 42)
     cfg = {"agent": {"llm": identity["executor_model"]},
            "benchmark": {"name": "terminalbench", "task_prefix": "", "task_file": identity["task_file"],
@@ -217,7 +224,7 @@ def prepare(args):
         freeze(root / f"discovery/results/{task}.json", payload)
         hashes[str(task)] = S.content_hash(P.projection(exp.experience_card))
     freeze(root / "discovery/card_hashes.json", hashes)
-    write(root / "input_audit.json", {"passed": len(source_cards) == 178, "tasks": 89, "records": len(rows),
+    write(root / "input_audit.json", {"passed": len(source_cards) == 178 if args.stage == "QD" else True, "tasks": 89, "records": len(rows),
           "input_cards": len(source_cards), "source_card_counts": Counter(r["source_model"] for r in source_cards),
           "unique_source_task_attempt_keys": len(keys), "source_counts": Counter(r["source_model"] for r in rows),
           "exceptions": dict(Counter(r["exception_type"] for r in rows if r["exception_type"])),
