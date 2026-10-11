@@ -741,3 +741,13 @@ its process remains alive but the last relay activity is stale. E4 advanced to
 122/267, E5_FINAL to 128/267 and E6_FINAL to 140/267. Rejected records remain
 excluded (E4 one, E5 two, E6 one), and no panel has a complete audit or
 pass@1/pass@3 metrics. No accepted slot was retried.
+## E3_FINAL complete: 2026-10-11 19:08 Asia/Shanghai
+
+E3_FINAL completed all 267 unique attempts and passed its final execution
+audit. Closed-set metrics are pass@1 0.801498 and pass@3 0.898876. The report
+contains the per-task comparison to the original E3 panel; this is descriptive
+closed-set evidence only and does not establish independent generalization.
+
+E4 continues against the same audited E3 frozen library at 155/267 valid
+attempts. E5_FINAL and E6_FINAL are also active at 157/267 each. Their audits
+remain incomplete, so no final-panel gate has been cleared yet.
