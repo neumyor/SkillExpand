@@ -645,3 +645,15 @@ E4 and E5 each retain one unfinished request with only temporary selector/error
 files, so they are blocked from retry by the no-duplicate rule. E3 and E6 have
 no unfinished requests but cannot resume until storage is freed. No scoring
 evidence was deleted or changed; all missing attempts remain unresolved.
+## Storage recovered; resume credential/artifact block: 2026-10-11 07:58 Asia/Shanghai
+
+`/data2` recovered 1.2 TB free, so the storage block is cleared. A resume
+attempt for E3_FINAL/E6_FINAL was made without changing their source or score
+history. The available live credential process exposes only the DeepSeek
+method key and E2B key; it does not expose the Qwen executor key, so E6_FINAL
+cannot start. E3_FINAL then reported a JSON parse failure from its existing
+evaluation artifacts after the prior disk-full interruption. E4 and E5 still
+have one `.tmp`-only unfinished request each and remain blocked by the
+no-duplicate retry rule. No evidence was deleted or overwritten; further
+resume requires an authorized process environment with the Qwen executor key
+and repair/reconciliation of the E3 artifact before launching.
