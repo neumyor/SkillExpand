@@ -657,3 +657,21 @@ have one `.tmp`-only unfinished request each and remain blocked by the
 no-duplicate retry rule. No evidence was deleted or overwritten; further
 resume requires an authorized process environment with the Qwen executor key
 and repair/reconciliation of the E3 artifact before launching.
+## Scoring recovery: 2026-10-11 12:56 Asia/Shanghai
+
+Fixed the summarizer's unguarded read of corrupt historical request results.
+Disk exhaustion left two empty error-request result files in E3_FINAL and
+one in E4. These files are preserved and explicitly reported as invalid
+request artifacts, never scored. Malformed slot records are rejected within
+the existing audit boundary. Eleven focused final-library tests passed.
+
+Fresh offline audits correct earlier record-file counts: E4 has 62 valid
+slots (two rejected), E3_FINAL 95 (three rejected), E5_FINAL 61 (two rejected),
+and E6_FINAL 63 (three rejected). Counts of record.json files were not valid
+score counts. Reports/audit/missing lists were refreshed without sandbox calls.
+
+E3_FINAL resumed with its existing source, frozen library and authorized
+live-process method credential as PID 1349924; full_panel status and process
+liveness confirmed. No live user-owned process exposes TB21_EXECUTOR_API_KEY,
+so Qwen panels remain blocked. E4/E5 unfinished requests remain preserved;
+no request budget or source score was reset. Automation stays active.

@@ -4,6 +4,23 @@ from pathlib import Path
 import pytest
 
 import run_tb21_empirical as empirical
+import summarize_tb21_empirical as scoring
+
+
+def test_summary_preserves_corrupt_historical_result_without_scoring_it(tmp_path):
+    empirical.write(tmp_path / 'manifest.json', {'tasks': 89, 'task_names': [f'task-{i}' for i in range(89)]})
+    empirical.write(tmp_path / 'library.json', [])
+    request = tmp_path / 'slots/00-1/requests/001'
+    empirical.write(request / 'error.json', {'error_class': 'runtime_or_artifact'})
+    result = request / 'jobs/job/task/result.json'
+    result.parent.mkdir(parents=True)
+    result.touch()
+    report = scoring.summarize(tmp_path)
+    assert report['empirical']['valid_attempts'] == 0
+    assert not report['empirical']['complete']
+    assert report['invalid_request_artifacts'][0]['path'] == str(result)
+    assert report['infrastructure_failure_counts'] == {'runtime_or_artifact': 1}
+    assert result.read_bytes() == b''
 
 
 @pytest.mark.parametrize('stage,source_stage,executor,selector', [

@@ -84,8 +84,8 @@ def summarize(root):
     rows, rejected = [], []
     settings = []
     for path in sorted((root / 'slots').glob('*/record.json')):
-        row = read(path)
         try:
+            row = read(path)
             if row.get('status') != 'valid':
                 raise ValueError(row.get('error_class', 'unresolved_slot'))
             task, attempt = row['task_id'], row['attempt_index']
@@ -123,12 +123,18 @@ def summarize(root):
                   and bool(baseline['settings']) and all(s == settings[0] for s in baseline['settings']))
     failures = Counter()
     historical_errors = Counter()
+    invalid_request_artifacts = []
     for path in (root / 'slots').glob('*/requests/*/error.json'):
         category = read(path)['error_class']
         historical_errors[category] += 1
         results = list(path.parent.glob('jobs/*/*/result.json'))
         if len(results) == 1:
-            outcome = read(results[0])
+            try:
+                outcome = read(results[0])
+            except (ValueError, OSError) as exc:
+                invalid_request_artifacts.append({'path': str(results[0]), 'error': str(exc)})
+                failures[category] += 1
+                continue
             error = outcome.get('exception_info') or {}
             reward = (outcome.get('verifier_result') or {}).get('rewards', {}).get('reward')
             if (error.get('exception_type') == 'AgentTimeoutError' and
@@ -141,6 +147,7 @@ def summarize(root):
               'infrastructure_failure_counts': dict(failures), 'rejected_slots': rejected,
               'gate_or_evolution_changed': False}
     report['historical_request_error_counts'] = dict(historical_errors)
+    report['invalid_request_artifacts'] = invalid_request_artifacts
     report['accepted_agent_timeout_slots'] = sum(
         (read(row['result_path']).get('exception_info') or {}).get('exception_type') == 'AgentTimeoutError'
         for row in rows)
