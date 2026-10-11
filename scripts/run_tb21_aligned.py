@@ -121,14 +121,14 @@ def source_payloads(task, instruction, rows):
 
 def prepare(args):
     root = args.run_dir.resolve()
-    identity = {"stage": args.stage, "protocol": "tb21-e1-aligned-free-library-v1",
+    identity = {"stage": args.stage, "protocol": "tb21-qwen-deepseek-library-v1" if args.stage == "QD" else "tb21-e1-aligned-free-library-v1",
                 "sources": ([str(args.deepseek_source.resolve())] if args.stage != "E6" else []) +
-                           ([str(args.qwen_source.resolve())] if args.stage in ("E5", "E6") else []),
+                           ([str(args.qwen_source.resolve())] if args.stage in ("E5", "E6", "QD") else []),
                 "task_file": str(args.task_file.resolve()), "workers": args.workers,
                 "executor_model": METHOD if args.stage == "E3" else QWEN,
                 "method_model": METHOD, "scope": "89-task closed-set", "persistence": 0,
                 "old_bootstrap_results_imported": False, "correction_budget_resets": 0}
-    if args.stage == "E6":
+    if args.stage in ("E6", "QD"):
         identity["selector_model"] = QWEN
     if root.exists():
         previous = read(root / "alignment.json")
@@ -158,7 +158,7 @@ def prepare(args):
     if len(tasks) != 89 or len({t["task_name"] for t in tasks}) != 89:
         raise ValueError("Expected 89 unique tasks")
     rows = source_rows(args.deepseek_source, tasks, "deepseek-v4-flash-0731") if args.stage != "E6" else []
-    if args.stage in ("E5", "E6"):
+    if args.stage in ("E5", "E6", "QD"):
         gate = read(args.raw_gate)
         if not gate["input_gate_passed"]["E5"]:
             raise ValueError("Qwen accepted input gate is not passed")
@@ -169,7 +169,17 @@ def prepare(args):
     root.mkdir(parents=True, exist_ok=True)
     write(root / "alignment.json", identity)
     write(root / "tasks.json", tasks)
+    for row in rows:
+        row["source_card_id"] = f"{row['source_model']}:{row['task_id']}"
     write(root / "raw_inputs.json", rows)
+    source_cards = []
+    for (model, task_id), own in sorted({(r["source_model"], r["task_id"]): [x for x in rows if x["source_model"] == r["source_model"] and x["task_id"] == r["task_id"]] for r in rows}.items()):
+        source_cards.append({"source_card_id": f"{model}:{task_id}", "source_model": model,
+                             "task_id": task_id, "task_name": own[0]["task_name"],
+                             "experience_id": f"{model}:{task_id}:experience",
+                             "attempts": [{"attempt_index": r["attempt_index"], "result_path": r["result_path"],
+                                           "trajectory_path": r["trajectory_path"], "reward": r["reward"]} for r in own]})
+    write(root / "source_cards.json", source_cards)
     split = S.SplitPlan.make({i: S.SPLIT_TRAIN for i in range(89)}, "terminalbench", 42)
     cfg = {"agent": {"llm": identity["executor_model"]},
            "benchmark": {"name": "terminalbench", "task_prefix": "", "task_file": identity["task_file"],
@@ -192,7 +202,10 @@ def prepare(args):
           "split": S.to_dict(split), "config": cfg, "task_table_hash": S.content_hash(table),
           "prompts": {}, "k": 3, "supervised": False, "supervised_attempts": 0,
           "card_batch_size": 12, "skill_edit_mode": "rewrite", "routing_mode": "progressive_library",
-          "acceptance_panel": "all_train", "trajectory_import": {"records": len(rows),
+          "acceptance_panel": "all_train", "input_cards": {"total": len(source_cards),
+          "source_counts": Counter(r["source_model"] for r in source_cards),
+          "ids": [r["source_card_id"] for r in source_cards], "ledger": str(root / "source_cards.json")},
+          "trajectory_import": {"records": len(rows),
           "sources": Counter(r["source_model"] for r in rows), "ledger": str(root / "raw_inputs.json")}})
     hashes = {}
     for task, entry in enumerate(tasks):
@@ -204,7 +217,8 @@ def prepare(args):
         freeze(root / f"discovery/results/{task}.json", payload)
         hashes[str(task)] = S.content_hash(P.projection(exp.experience_card))
     freeze(root / "discovery/card_hashes.json", hashes)
-    write(root / "input_audit.json", {"passed": True, "tasks": 89, "records": len(rows),
+    write(root / "input_audit.json", {"passed": len(source_cards) == 178, "tasks": 89, "records": len(rows),
+          "input_cards": len(source_cards), "source_card_counts": Counter(r["source_model"] for r in source_cards),
           "unique_source_task_attempt_keys": len(keys), "source_counts": Counter(r["source_model"] for r in rows),
           "exceptions": dict(Counter(r["exception_type"] for r in rows if r["exception_type"])),
           "unknown_rewards_preserved": sum(r["reward"] is None for r in rows),
@@ -500,7 +514,7 @@ def execute(args, root):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", required=True, choices=("E3", "E5", "E6"))
+    parser.add_argument("--stage", required=True, choices=("E3", "E5", "E6", "QD"))
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--deepseek-source", type=Path)
     parser.add_argument("--qwen-source", type=Path)
@@ -512,7 +526,7 @@ def main():
     parser.add_argument('--l2-only', action='store_true', help='Require accepted slots; never execute new L1 requests')
     args = parser.parse_args()
     if (not 1 <= args.workers <= total_worker_limit() or
-            (args.stage in ("E5", "E6") and args.qwen_source is None) or
+            (args.stage in ("E5", "E6", "QD") and args.qwen_source is None) or
             (args.stage != "E6" and args.deepseek_source is None)):
         parser.error("Workers must fit the total limit; E3/E5 need DeepSeek input; E5/E6 need Qwen input")
     root = prepare(args)
