@@ -710,3 +710,12 @@ E4 PID 1942198, E5_FINAL PID 1942199 and E6_FINAL PID 1942200 now report
 full_panel, with 62/61/63 audited slots at resume. E3_FINAL PID 1349924 remains
 active. All four use 16 workers (64/250 total), existing frozen libraries,
 independent authorized model routes, internal mirror and pipeline v6 cache.
+## Four panels active: 2026-10-11 15:55 Asia/Shanghai
+
+Fresh identity/trajectory/activation/body audits report E4 65/267,
+E3_FINAL 171/267, E5_FINAL 67/267 and E6_FINAL 73/267 valid real rewards.
+All four drivers remain alive in full_panel with recent relay activity.
+Rejected current records number 2/0/0/3; missing scores are not assigned zero.
+The Qwen panels have produced additional valid scores after credential
+recovery. No pipeline_cache.json has appeared yet; cache hit is not claimed.
+Total reservation remains 64/250; no complete final panel audit exists yet.
