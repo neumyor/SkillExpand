@@ -734,3 +734,10 @@ other panels. E4 is 110/267, E5_FINAL 114/267 and E6_FINAL 110/267. All four
 audits remain incomplete and pass@1/pass@3 are intentionally unset. E4 has
 one rejected record and E6 one; these remain unresolved rather than fixed
 zero. No accepted slot was retried.
+## E3 final panel one slot short: 2026-10-11 18:59 Asia/Shanghai
+
+E3_FINAL now has 266/267 valid real verifier attempts, with one slot missing;
+its process remains alive but the last relay activity is stale. E4 advanced to
+122/267, E5_FINAL to 128/267 and E6_FINAL to 140/267. Rejected records remain
+excluded (E4 one, E5 two, E6 one), and no panel has a complete audit or
+pass@1/pass@3 metrics. No accepted slot was retried.
