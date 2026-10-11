@@ -751,3 +751,12 @@ closed-set evidence only and does not establish independent generalization.
 E4 continues against the same audited E3 frozen library at 155/267 valid
 attempts. E5_FINAL and E6_FINAL are also active at 157/267 each. Their audits
 remain incomplete, so no final-panel gate has been cleared yet.
+## E5_FINAL user stop: 2026-10-11
+
+Per explicit user request, stopped E5_FINAL driver PID 1942199 and its 15
+Harbor descendants. The run is marked `stopped`, `complete=false`, with the
+original request history and budgets preserved. One in-flight request finished
+during graceful shutdown; offline reconciliation therefore preserves 175/267
+valid real attempts (the pre-stop status was 174/267). No complete metrics or
+passing execution audit are claimed, and the completed E5 L2 source remains
+unchanged.
