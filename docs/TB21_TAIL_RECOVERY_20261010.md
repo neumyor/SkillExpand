@@ -693,3 +693,20 @@ yet, so cache preparation/hit is not claimed. The three Qwen panels remain
 stopped; no live user-owned process exposes TB21_EXECUTOR_API_KEY. Their
 audited coverage remains E4 62, E5_FINAL 61 and E6_FINAL 63. Reports were
 refreshed without retrying accepted slots or changing cumulative budgets.
+## Qwen panels resumed from user-authorized Desktop credential
+
+The user explicitly identified Desktop .env as the Qwen credential source.
+Its OPENAI_API_KEY was parsed locally and sent through SSH stdin into process
+memory as TB21_EXECUTOR_API_KEY; no secret was written to files or logs.
+The original DeepSeek method credential was inherited from live E3_FINAL.
+
+Confirmed E4/E5 former drivers were gone and their interrupted request dirs
+contained only zero-byte selector/error temporary files with no Harbor jobs.
+Preserved those files under disk-full-preserved names and recorded explicit
+infrastructure interruption errors with no reward. This closes the aborted
+selector requests without deleting evidence or resetting request numbering.
+
+E4 PID 1942198, E5_FINAL PID 1942199 and E6_FINAL PID 1942200 now report
+full_panel, with 62/61/63 audited slots at resume. E3_FINAL PID 1349924 remains
+active. All four use 16 workers (64/250 total), existing frozen libraries,
+independent authorized model routes, internal mirror and pipeline v6 cache.
