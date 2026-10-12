@@ -1,5 +1,20 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 04:16 Asia/Shanghai heartbeat
+
+E7 revised initial execution reached 239/267 records and remains alive with
+16 workers. The initial-only driver has not crossed the strict verifier audit;
+L2 remains locked.
+
+E8 is unchanged at audited_incomplete, 254/267 strict valid scores and 13
+unknown outcomes. It remains finished with no workers.
+
+E9 has 87/89 task states while the evaluator remains alive. There are 42
+completed and 43 initial_failed states, with two blocked infrastructure-budget
+units. The evaluator is still processing the last initial work; no Ralph,
+memory freeze, test, or vanilla phase has begun. No new run or budget reset was
+performed.
+
 ## 2026-10-13 03:18 Asia/Shanghai heartbeat
 
 E7 revised initial execution is at 222/267 recorded valid records. The
