@@ -1,5 +1,15 @@
 # E9 cache permission recovery
 
+2026-10-13 01:16 heartbeat: the resumed evaluation exited while reading an
+existing vector JSON file with owner-only mode 0600. Its evaluation log is
+`launches/b16e3d669bbf43d3863d93ff6cee48ab/evaluation.log`; this was a cache
+read permission failure, distinct from the earlier directory write failure.
+The owner granted read permission to its existing vector JSON files. All 104
+files are readable by the running account. Original processes had exited and
+owned-child readiness passed. Resume supervisor 2092370 uses the original
+contract and cumulative attempts; old recovery metadata is archived.
+The circuit-fibsqrt infrastructure budget remains exhausted and unresolved.
+
 2026-10-12 23:08 Asia/Shanghai: original E9 supervisor and evaluator stopped
 after PermissionError writing the embedding vector cache at
 `/home/xinhaidong/agentbrew-tb21/sources/agentbrew-embeddings/vectors`.

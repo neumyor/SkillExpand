@@ -1,5 +1,37 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 01:16 Asia/Shanghai heartbeat
+
+E7 revised initial panel reached 175/267 unique accepted results. This check
+reconciled all 175 record rewards with raw verifier rewards, task names,
+nonempty trajectories, loaded body counts and Skill files; no mismatch was
+found. The 178-card generation source audit remains passed. The original
+16-worker driver remains alive; full initial execution audit and L2 gates
+remain pending.
+
+E8 has 260 real scores (196 ones, 64 zeros), five missing rewards and two
+unfinished path-tracing-reverse trials. Missing values remain one
+RemoteProtocolError and four VerifierTimeoutError, without filling zeros or
+adding attempts beyond the original retry policy. Three pipeline cache
+artifacts report version pipeline-uv095-py3139-v6, status ready, reused=false:
+the bundles were transferred and unpacked, rather than reused in place.
+Supervisor remains alive; final audit and E2 comparison are pending.
+
+E9 stopped again with PermissionError reading an existing embedding vector
+file owned by xinhaidong with mode 0600. The prior directory write fix did
+not grant read access to those existing files. The owner granted read access
+to its vector JSON files; all 104 current vector files are now readable by
+liyishan. Prior recovery metadata was archived before the new recovery record.
+Owned-child readiness passed; --resume uses the unchanged config and budget.
+New supervisor is 2092370. At recovery there were 24 task states: 13
+initial_failed, 10 completed and one blocked. These labels are not final
+scoring. circuit-fibsqrt remains blocked after exhausting its infrastructure
+budget; resume does not authorize additional attempts for that task.
+
+Capacity was checked under the shared lock: 116 other workers plus E9 64
+equals 180/250. E3_FINAL/E4/E6_FINAL are not rerun and E5_FINAL remains stopped.
+All results remain closed-set; automation continues.
+
 ## 2026-10-13 00:16 Asia/Shanghai
 
 E7 revised 178-card run reached 150/267 accepted initial slots. Read-only

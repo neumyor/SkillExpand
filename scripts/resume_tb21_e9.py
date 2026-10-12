@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import shutil
+import time
 
 REPO = Path('/data2/liyishan/SkillExpand-tb21/SkillExpand')
 ROOT = Path('/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012')
@@ -53,7 +55,10 @@ else:
         reserved, active = active_worker_reservation(REPO / 'runs', REG)
         if reserved + 64 > 250:
             raise SystemExit('Capacity unavailable')
-        write(REG / 'permission_recovery.json', {'reason': 'embedding vector cache write permission',
+        recovery = REG / 'permission_recovery.json'
+        if recovery.exists():
+            shutil.copy2(recovery, REG / f'permission_recovery-{time.time_ns()}.json')
+        write(recovery, {'reason': 'embedding vector cache existing-file read permission',
             'prior_status': prior, 'budget_resets': 0, 'config_changed': False,
             'safe_to_open_run': True, 'other_reserved': reserved})
         with (OUT / 'permission-resume.log').open('a') as log:
