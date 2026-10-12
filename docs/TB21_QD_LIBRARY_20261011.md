@@ -77,6 +77,21 @@ has not appeared yet. Initial full audit, L2 and final panel remain pending.
 E3_FINAL/E4/E6_FINAL remain audited complete at 267/267; E5_FINAL remains
 user-stopped at 175/267. No completed or stopped panel was restarted.
 
+## 2026-10-12 20:02 Asia/Shanghai checkpoint
+
+Initial revision coverage reached 63/267, up 16 accepted slots. All 63 unique
+slots were revalidated for real reward, trajectory, activation and selected
+body; generation source audit remains passing. Prior unresolved slots 00-1
+and 09-1 now have valid results. Slot 09-3 is executing request 002; slot
+09-2 is executing request 003, the final request permitted for this launch.
+Neither currently has an accepted reward. Their timeout histories remain
+preserved; no fourth request or budget reset was initiated.
+
+Driver 2320647 and 16 Harbor children remain active. No restart was needed;
+pipeline cache evidence has not appeared yet. Initial completion audit, L2
+and final frozen panel remain pending. E3_FINAL/E4/E6_FINAL retain complete
+267-slot audits; E5_FINAL remains stopped at 175/267.
+
 - Input inventory: 178 source-qualified cards, 89 from the DeepSeek raw source and 89 from the Qwen source; no task/family deduplication.
 - Roles: Qwen `qwen3.6-flash-distill` selector and executor; `DEEPSEEK_up5zdj` method/evolver.
 - Sequence: initial 89 x 3 verifier slots, one L2 evolution round, then a separate frozen-library 89 x 3 panel.
