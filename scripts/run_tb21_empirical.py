@@ -313,7 +313,16 @@ def execute_slot(cfg, tasks, skills, root, transport, task, attempt):
         if latest and not list(latest[-1].glob('jobs/*/*/result.json')) and not (latest[-1] / 'error.json').exists():
             raise ValueError('Unfinished request blocks final evaluation retry')
     elif existing.exists() and read(existing).get('status') == 'valid':
-        return read(existing)
+        row = read(existing)
+        try:
+            validate_trial(row['result_path'], tasks[task]['task_name'], activation=True,
+                           model=read(root / 'manifest.json')['model'])
+        except (ValueError, OSError):
+            preserved = slot / 'record_pre_verifier_audit.json'
+            if not preserved.exists():
+                write(preserved, row)
+        else:
+            return row
     requests = slot / 'requests'
     requests.mkdir(parents=True, exist_ok=True)
     previous = len(list(requests.glob('*')))

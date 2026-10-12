@@ -37,7 +37,17 @@ def trial(tmp_path, reward=0, exception=None):
         'config': {'agent': {'model_name': 'openai/qwen3.6-flash-distill',
                             'import_path': 'tencent_sandbox_terminus:TencentSkillTerminus2'}}})
     summary.write(tmp_path / 'agent/trajectory.json', {'messages': ['actual execution']})
+    (tmp_path / 'verifier').mkdir(exist_ok=True)
+    (tmp_path / 'verifier/reward.txt').write_text(str(reward))
+    (tmp_path / 'verifier/test-stdout.txt').write_text('test session starts\n1 passed in 1s')
     return path
+
+
+def test_setup_failure_zero_is_not_a_verifier_score(tmp_path):
+    path = trial(tmp_path, 0)
+    (tmp_path / 'verifier/test-stdout.txt').write_text('dns error: failed to lookup address')
+    with pytest.raises(ValueError, match='missing_verifier_test_outcome'):
+        summary.validate_trial(path, 'fix-git')
 
 
 @pytest.mark.parametrize('reward', [0, 1])

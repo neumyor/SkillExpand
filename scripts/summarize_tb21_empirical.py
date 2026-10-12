@@ -1,6 +1,7 @@
 """Audit verifier-backed TB2.1 slots and report closed-set empirical scores."""
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -30,6 +31,14 @@ def validate_trial(result_path, task_name, *, activation=False, model='qwen3.6-f
     reward = (result.get('verifier_result') or {}).get('rewards', {}).get('reward')
     if isinstance(reward, bool) or not isinstance(reward, (int, float)) or reward not in (0, 1):
         raise ValueError('missing_or_invalid_verifier_reward')
+    verifier = result_path.parent / 'verifier'
+    reward_file = verifier / 'reward.txt'
+    if not reward_file.is_file() or float(reward_file.read_text().strip()) != reward:
+        raise ValueError('missing_or_mismatched_verifier_reward_file')
+    stdout = verifier / 'test-stdout.txt'
+    log = stdout.read_text() if stdout.is_file() else ''
+    if 'test session starts' not in log or not re.search(r'\b[1-9]\d* (?:passed|failed)\b', log):
+        raise ValueError('missing_verifier_test_outcome')
     trajectory = result_path.parent / 'agent/trajectory.json'
     if not trajectory.is_file() or not read(trajectory):
         raise ValueError('missing_trajectory')

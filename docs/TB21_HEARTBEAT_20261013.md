@@ -1,5 +1,47 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 02:11 Asia/Shanghai heartbeat
+
+E8 runner finished with all 267 terminal trial results. Earlier 262-score
+counts checked reward presence but missed eight verifier setup failures with
+reported zero. Strict review accepts 254 scores (197 ones, 57 zeros); thirteen
+remain unknown. No retries beyond the original policy are launched. Full
+audit and E2 per-task comparison are saved in the E8 registration. E8 is
+audited_incomplete, not accepted. See TB21_E8_MAX_1M_20261012.md for bounds and
+failure details. Shared active reservations are now 80/250 (E7 16 + E9 64).
+
+E7 continues initial-only execution. At the strict snapshot there were 190
+recorded scores, of which 189 had actual verifier outcomes. Slot 51-2,
+mteb-retrieve, has a reported zero after mirror DNS failure and no pytest
+outcome. It remains unresolved for acceptance. The driver imported its old
+validator before this patch; it is not hot-restarted. A supplementary
+verifier_evidence_audit.json records the rejection. Full initial audit must
+pass before L2. New/resumed processes validate old valid records again and
+preserve rejected record metadata before retry, with original request counts.
+
+E9 is making progress after cache permission recovery: 67 initial task states
+(40 completed, 26 initial_failed, one blocked). All 26 teacher-candidate
+failures have real raw verifier zero and tests_executed evidence. Two completed
+RuntimeError states have no raw reward despite a framework reported zero;
+they remain unresolved and are excluded from success/failure scoring. The
+evaluator is alive; freeze, test and vanilla stages are pending. No budget reset.
+
+Strict read-only review of the previously complete Final panels found gaps:
+E3_FINAL 264/267, E4 262/267, E6_FINAL 261/267 under the new conservative
+outcome policy. Each retains its historical audit and records and gets a
+separate verifier_evidence_audit.json. All three reshard-c4-data attempts in
+each panel end in Hugging Face dataset fixture errors. E4 additionally has
+count-dataset-tokens 15-3 and mteb-retrieve 51-2 mirror DNS setup failures.
+E6 additionally has count-dataset-tokens 15-2 DNS failure, mteb-retrieve 51-1
+curl/uv setup failure, and portfolio-optimization 61-3 a pytest process crash
+involving the agent's compiled extension. The latter needs attribution review;
+it is not automatically classified as an infrastructure failure or model zero.
+Old exact metrics are historical and must not be treated as fully accepted
+under this stricter review. These Final panels are not restarted or rerun.
+
+Validator regression checks passed remotely: 26 tests. Local pytest is absent.
+E5_FINAL remains untouched and stopped. Automation continues.
+
 ## 2026-10-13 01:16 Asia/Shanghai heartbeat
 
 E7 revised initial panel reached 175/267 unique accepted results. This check
