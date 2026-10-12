@@ -1,5 +1,27 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 07:16 Asia/Shanghai heartbeat
+
+E7 initial-only driver stopped with `needs_attention` because strict valid
+coverage is incomplete. Slot 77-3 (`schemelike-metacircular-eval`) has three
+retained requests and no valid verifier outcome, so its per-slot retry budget
+is exhausted. The four previously rejected no-outcome slots remain excluded;
+L2 cannot start. No fourth request or old score import was performed.
+
+E9 stopped with `needs_attention` after the initial barrier. It has 88/89 task
+state records: 42 completed, 43 initial_failed and 3 blocked infrastructure
+budget units (`circuit-fibsqrt`, `schemelike-metacircular-eval`,
+`gpt2-codegolf`). Their missing outcomes are preserved in `initial_audit.json`;
+the framework reported `TransportExhaustedError` after each task's configured
+two physical attempts. Because the initial barrier is unresolved, Ralph,
+teacher curation, frozen memory, memory-enhanced test and vanilla do not run.
+No new driver, retry-preflight, budget reset or contract change is authorized
+by the existing E9 contract.
+
+E8 remains finished but `audited_incomplete` at 254/267 strict scores and 13
+unknown outcomes. E5 remains user-stopped; completed Final panels are not
+rerun. Automation continues to retain these unresolved acceptance states.
+
 ## 2026-10-13 06:16 Asia/Shanghai heartbeat
 
 E7 reached 260 historical valid records, with six live Harbor children for
