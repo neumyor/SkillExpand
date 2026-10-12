@@ -1,5 +1,26 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 05:16 Asia/Shanghai heartbeat
+
+E7 has 251 historical valid records; refreshed strict verifier review accepts
+247 unique scores and rejects four: mteb-retrieve 51-2 and reshard-c4-data
+73-1/2/3 lack executed pytest outcomes. Supplementary audit is refreshed.
+The original initial-only driver remains alive. L2 remains locked.
+
+E9 remains at 87 initial task states, with its evaluator alive. gpt2-codegolf
+continues producing raw model requests. configure-git-webserver stalled after
+pytest collected one test; verifier stdout had been unchanged for over 6,700
+seconds versus its 900-second verifier budget. Its owned rollout process was
+verified against child.json and stopped using stop_owned_process after saving
+verifier_stall_recovery.json in physical_networkfix_01. No reward is fabricated
+and no budget is reset. At the immediate post-stop check, the evaluator remained
+alive but had not yet written a new task state or next physical attempt; this
+does not establish successful recovery. The two previously blocked budget
+units still prevent the teaching barrier from passing.
+
+E8 remains audited_incomplete with 13 unknown outcomes. Final-panel
+supplementary audit gaps remain unresolved; no Final panel or E5 is restarted.
+
 ## 2026-10-13 04:16 Asia/Shanghai heartbeat
 
 E7 revised initial execution reached 239/267 records and remains alive with
