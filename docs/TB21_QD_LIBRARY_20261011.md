@@ -64,6 +64,19 @@ E3_FINAL/E4/E6_FINAL remain complete and audited at 267/267. E5_FINAL remains
 stopped at 175/267. E7 initial completion audit, L2 and final evaluation remain
 pending; the automation stays active.
 
+## 2026-10-12 19:03 Asia/Shanghai checkpoint
+
+Revision initial coverage reached 47/267, up 20 accepted slots. All 47 were
+revalidated for unique identity, real verifier reward, trajectory, activation
+and selected body. Source audit remains passing. Driver 2320647 and 16 Harbor
+children are active. Slots 00-1 and 09-1/09-2/09-3 preserve their first-request
+runtime/timeout errors and are executing request 002; no reward is fabricated
+and no additional driver or budget reset was needed. Pipeline cache evidence
+has not appeared yet. Initial full audit, L2 and final panel remain pending.
+
+E3_FINAL/E4/E6_FINAL remain audited complete at 267/267; E5_FINAL remains
+user-stopped at 175/267. No completed or stopped panel was restarted.
+
 - Input inventory: 178 source-qualified cards, 89 from the DeepSeek raw source and 89 from the Qwen source; no task/family deduplication.
 - Roles: Qwen `qwen3.6-flash-distill` selector and executor; `DEEPSEEK_up5zdj` method/evolver.
 - Sequence: initial 89 x 3 verifier slots, one L2 evolution round, then a separate frozen-library 89 x 3 panel.
