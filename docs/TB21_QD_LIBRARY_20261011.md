@@ -50,6 +50,20 @@ E3_FINAL, E4 and E6_FINAL each retain complete audits: 267 valid slots, 267
 unique result paths and no rejected slots. E5_FINAL remains user-stopped with
 175 historical valid slots and an incomplete audit; it was not resumed.
 
+## 2026-10-12 18:07 Asia/Shanghai checkpoint
+
+Revision initial-panel coverage advanced from 15 to 27/267. All 27 accepted
+slots were revalidated for unique identity, real reward, trajectory, activation
+and selected Skill body. The 178-card generation audit remains passing.
+Driver 2320647 has 16 active Harbor children. Slots 00-1 and 09-1 retain
+RuntimeError/TimeoutException history; each is executing request 002 without
+an accepted result yet. No duplicate driver, new launch or budget reset was
+performed. No pipeline cache evidence file has appeared yet.
+
+E3_FINAL/E4/E6_FINAL remain complete and audited at 267/267. E5_FINAL remains
+stopped at 175/267. E7 initial completion audit, L2 and final evaluation remain
+pending; the automation stays active.
+
 - Input inventory: 178 source-qualified cards, 89 from the DeepSeek raw source and 89 from the Qwen source; no task/family deduplication.
 - Roles: Qwen `qwen3.6-flash-distill` selector and executor; `DEEPSEEK_up5zdj` method/evolver.
 - Sequence: initial 89 x 3 verifier slots, one L2 evolution round, then a separate frozen-library 89 x 3 panel.
