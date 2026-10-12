@@ -1,5 +1,26 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 03:18 Asia/Shanghai heartbeat
+
+E7 revised initial execution is at 222/267 recorded valid records. The
+16-worker driver remains alive in `skill_rollouts`; initial audit, L2 input
+validation, L2 and final frozen-library evaluation are still locked. The
+supplementary verifier audit continues to identify the mteb-retrieve slot with
+mirror DNS failure and no pytest outcome; it is not counted as a valid score.
+
+E8 remains `audited_incomplete` with 254/267 strict valid scores, 197 ones,
+57 zeros and 13 unresolved outcomes. It is finished and no new E8 requests are
+launched. Workers are released; the execution audit and per-task report are
+retained.
+
+E9 remains in initial execution at 74/89 task states: 42 completed, 30
+initial_failed and 2 blocked. The two blocked units, circuit-fibsqrt and
+schemelike-metacircular-eval, exhausted their infrastructure retry budgets;
+they are not model failures and receive no additional attempts. Among the
+recorded states there are 40 reward-one and 32 reward-zero outcomes, plus two
+missing RuntimeError outcomes. No Ralph rounds, frozen memory or test/vanilla
+stage has started. Supervisor/evaluator are alive under the unchanged contract.
+
 ## 2026-10-13 02:11 Asia/Shanghai heartbeat
 
 E8 runner finished with all 267 terminal trial results. Earlier 262-score
