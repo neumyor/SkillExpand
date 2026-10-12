@@ -1,0 +1,25 @@
+# E9 cache permission recovery
+
+2026-10-12 23:08 Asia/Shanghai: original E9 supervisor and evaluator stopped
+after PermissionError writing the embedding vector cache at
+`/home/xinhaidong/agentbrew-tb21/sources/agentbrew-embeddings/vectors`.
+The original evaluation log and 11 states (7 completed, 4 initial_failed)
+remain preserved. Missing raw verifier rewards are not scored as zero.
+
+The cache owner granted write access to the vector directory. No model,
+embedding algorithm, experiment config, contract, input or budget was changed.
+Owned-process readiness passed and old supervisor/evaluator had exited.
+`scripts/resume_tb21_e9.py` resumed the original config/work-dir/relay source
+with --resume after checking the shared reservation lock: 116 other workers
+plus E9's 64 equals 180/250. New supervisor 1024542, remote driver 1024543.
+Read actual latest processes/logs rather than treating these PIDs as progress.
+
+Recovery evidence lives in the shared E9 registration's permission_recovery.json,
+resume_child.json and status.json; output permission-resume.log preserves the
+new launch. The wrapper's owned child checks and frozen contract checks remain
+active. No preflight-only recovery or original result deletion was used.
+
+Same snapshot: E7 122/267; E8 249 real scores and four missing rewards
+(one RemoteProtocolError, three VerifierTimeoutError), with its runner still
+active and remaining trials unresolved. Neither panel is complete. E5_FINAL
+remains user-stopped. E3_FINAL/E4/E6_FINAL are not rerun.
