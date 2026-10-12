@@ -25,6 +25,17 @@ def main() -> int:
         value = json.loads(path.read_text())
         cards.append(value)
     source_cards = json.loads((root / "source_cards.json").read_text()) if (root / "source_cards.json").exists() else []
+    if source_cards:
+        from propose_terminalbench_library import _cards, validate_proposal
+        actual_cards = _cards(root)
+        request = json.loads(Path(proposal['generation_request']).read_text())
+        if request != proposal['generation_payload']:
+            raise ValueError('Generation request differs from proposal')
+        prompt = request['messages'][0]['content']
+        supplied = json.loads(prompt.split('EXPERIENCE CARDS:\n', 1)[1].split('\n\nFORMAT CORRECTION', 1)[0])
+        completion = Path(proposal['generation_request']).with_name(Path(proposal['generation_request']).name.replace('.request.json', '.completion.json'))
+        if supplied != actual_cards or validate_proposal(json.loads(completion.read_text())['choices'][0]['message']['content']) != rows:
+            raise ValueError('Generation cards/completion mismatch')
     provenance_cards = source_cards or cards
     ids = tuple(int(v["task_id"]) for v in provenance_cards)
     experience_ids = tuple(v.get("experience_id", f"discovery:{v['task_id']}:experience") for v in provenance_cards)
@@ -39,7 +50,7 @@ def main() -> int:
             name=str(row["name"]), description=str(row["description"]),
             body=str(row["body"]),
             provenance=S.Provenance(
-                rationale="Model-generated library from 89 imported schema-5 cards; no task assignment",
+                rationale=f"Model-generated library from {len(provenance_cards)} imported schema-5 cards; no task assignment",
                 source_experience_ids=experience_ids,
                 source_task_ids=ids,
             ),
@@ -69,7 +80,7 @@ def main() -> int:
         "skills": [{"skill_id": s.skill_id, "skill_key": s.key, "description": s.description}
                    for s in skills],
         "catalog_has_body": False,
-        "source_cards": len(cards),
+        "source_cards": len(provenance_cards),
         "task_assignment": None,
     })
     print(json.dumps({"status": "materialized", "skills": len(skills), "tasks": len(cards)}))

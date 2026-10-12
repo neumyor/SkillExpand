@@ -52,7 +52,7 @@ def total_worker_limit():
 
 def active_worker_reservation(runs, own):
     reservation, active = 0, []
-    for status_path in runs.glob('tb21-*/status.json'):
+    for status_path in runs.rglob('status.json'):
         if status_path.parent == own:
             continue
         try:

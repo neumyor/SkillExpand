@@ -26,7 +26,7 @@ env.update(PYTHONPATH='src', TB21_TOTAL_WORKER_LIMIT='250',
            OPENAI_API_KEY=method, TB21_EXECUTOR_API_KEY=qwen,
            E2B_API_KEY=values['E2B_API_KEY'], TB21_PIPELINE_CACHE='1',
            TB21_PIPELINE_CACHE_VERSION='pipeline-uv095-py3139-v6')
-run = 'runs/tb21-qwen-deepseek-library-qwen-selector-20261011'
+run = os.environ.get('TB21_QD_RUN_DIR', 'runs/tb21-qwen-deepseek-library-qwen-selector-20261011')
 log = (root / run / 'driver.log').open('ab')
 command = [str(root / '.venv2/bin/python'), 'scripts/run_tb21_aligned.py', '--stage', 'QD',
            '--run-dir', run, '--deepseek-source',
@@ -34,5 +34,7 @@ command = [str(root / '.venv2/bin/python'), 'scripts/run_tb21_aligned.py', '--st
            '--qwen-source', '/data2/liyishan/tb21-e1-qwen-source', '--task-file',
            'src/skillexpand/data/terminalbench/tb21.json', '--raw-gate',
            'runs/tb21-raw-gate-qwen-accepted-20261008/audit.json', '--workers', '16']
+if os.environ.get('TB21_QD_INITIAL_ONLY') == '1':
+    command.append('--initial-only')
 proc = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=log, start_new_session=True)
 print(proc.pid, flush=True)

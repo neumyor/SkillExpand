@@ -2,6 +2,23 @@
 
 Independent run: `runs/tb21-qwen-deepseek-library-qwen-selector-20261011`.
 
+## Corrected revision (2026-10-12)
+
+The accepted E7 setting is now evaluated in the independent child directory
+`revisions/178-cards-v1`. The parent library was generated from 89 merged cards
+and its 267 scores remain historical evidence only. Do not import its completion,
+Skill bodies or accepted slot records into the corrected revision.
+
+The corrected generator validates 89 cards per source, unique source identities,
+task text and three traceable attempts per card. Cache reuse requires the exact
+generation request payload; materialization checks the request's actual cards
+and completion against the proposal. Unknown source rewards remain unknown.
+
+Revision driver PID 2320647 launched with 16 workers and `--initial-only`.
+The global capacity lock records 32/250 reserved workers including E4. Initial
+evaluation starts only after fresh generation and materialization pass. L2 is
+gated on the completed initial audit and validation of the source-card contract.
+
 - Input inventory: 178 source-qualified cards, 89 from the DeepSeek raw source and 89 from the Qwen source; no task/family deduplication.
 - Roles: Qwen `qwen3.6-flash-distill` selector and executor; `DEEPSEEK_up5zdj` method/evolver.
 - Sequence: initial 89 x 3 verifier slots, one L2 evolution round, then a separate frozen-library 89 x 3 panel.

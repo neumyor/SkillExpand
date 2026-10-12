@@ -13,6 +13,7 @@ import time
 import urllib.request
 from urllib.error import HTTPError
 from pathlib import Path
+from collections import Counter
 
 from skillexpand.l1.family_discovery import _extract_json
 from skillexpand.runtime.llm_relay import relay_from_env, coalesce_sse, default_output_token_limit
@@ -28,14 +29,28 @@ def _cards(root: Path) -> list[dict]:
                 "task_id": int(value["task_id"]),
                 "source_card_id": value["source_card_id"],
                 "source_model": value["source_model"],
-                "task": str(card.get("task") or value.get("task_name") or "")[:1200],
-                "reward": bool(card.get("reward", False)),
+                "task": card.get("task", {}).get("text", ""),
+                "reward": (None if any(a.get("reward") is None for a in value["attempts"])
+                           else any(a["reward"] == 1 for a in value["attempts"])),
                 "claims": card.get("claims", []),
                 "evidence": card.get("evidence", [])[:8],
                 "attempts": value.get("attempts", []),
             })
-        if len(rows) != 178 or {r["source_model"] for r in rows} != {"deepseek-v4-flash-0731", "qwen3.6-flash-distill"}:
+        if (Counter(r['source_model'] for r in rows) != {'deepseek-v4-flash-0731': 89, 'qwen3.6-flash-distill': 89}
+                or len({r['source_card_id'] for r in rows}) != 178
+                or len({v['experience_id'] for v in json.loads(source_cards.read_text())}) != 178):
             raise RuntimeError("expected 178 source-qualified imported cards")
+        for model in {r['source_model'] for r in rows}:
+            if {r['task_id'] for r in rows if r['source_model'] == model} != set(range(89)):
+                raise RuntimeError('Source task coverage mismatch')
+        for row in rows:
+            if not row['task'] or [a['attempt_index'] for a in row['attempts']] != [1, 2, 3]:
+                raise RuntimeError('Source task/attempt identity mismatch')
+            for attempt in row['attempts']:
+                result = json.loads(Path(attempt['result_path']).read_text())
+                if (result.get('config', {}).get('agent', {}).get('model_name') != 'openai/' + row['source_model']
+                        or not json.loads(Path(attempt['trajectory_path']).read_text())):
+                    raise RuntimeError('Source model/trajectory mismatch')
         return rows
     rows = []
     for path in sorted((root / "discovery" / "results").glob("*.json"), key=lambda p: int(p.stem)):
@@ -62,17 +77,26 @@ def _cards(root: Path) -> list[dict]:
     return rows
 
 
-def _request(base_url: str, model: str, prompt: str, request_dir: Path, index: int, timeout: float) -> str:
-    body = json.dumps({
+def request_payload(model, prompt):
+    return {
         "model": model,
         "temperature": 0,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 12000,
+        "max_tokens": default_output_token_limit(model) or 12000,
         "stream": True,
         "enable_thinking": True,
-    }).encode()
-    payload = json.loads(body)
-    payload["max_tokens"] = default_output_token_limit(model) or 12000
+    }
+
+
+def cached_completion(path, expected):
+    request = path.with_name(path.name.replace('.completion.json', '.request.json'))
+    if not request.exists() or json.loads(request.read_text()) != expected:
+        return None
+    return json.loads(path.read_text())["choices"][0]["message"]["content"]
+
+
+def _request(base_url: str, model: str, prompt: str, request_dir: Path, index: int, timeout: float) -> str:
+    payload = request_payload(model, prompt)
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         base_url.rstrip("/") + "/chat/completions", data=body,
@@ -172,20 +196,26 @@ EXPERIENCE CARDS:
                 raise RuntimeError("relay required: pass --llm-relay")
         completions = sorted((out / "usage").glob("*.completion.json"))
         clean = None
+        accepted_request = None
+        expected = request_payload(args.model.removeprefix('openai/'), prompt)
         if completions:
-            cached = json.loads(completions[-1].read_text())["choices"][0]["message"]["content"]
             try:
+                cached = cached_completion(completions[-1], expected)
+                if cached is None:
+                    raise RuntimeError('Cached completion input mismatch')
                 clean = validate_proposal(cached)
+                accepted_request = str(completions[-1].with_name(completions[-1].name.replace('.completion.json', '.request.json')))
             except Exception:
                 pass
         if clean is None:
-            if len(completions) >= 4:
+            if len(list((out / 'usage').glob('*.request.json'))) >= 4:
                 raise RuntimeError("Library generation format correction budget exhausted; no reset")
             if completions:
                 prompt += "\n\nFORMAT CORRECTION: Return only the required JSON object, with nonempty executable bodies."
             index = len(list((out / "usage").glob("*.request.json")))
             content = _request(base, args.model.removeprefix("openai/"), prompt, out / "usage", index, args.request_timeout)
             clean = validate_proposal(content)
+            accepted_request = str(out / 'usage' / f'{index:03d}.request.json')
         (out / "library_proposals.json").write_text(json.dumps({
             "schema_version": 1, "benchmark": "terminalbench",
             "proposal_mode": "model_generated_library_no_task_assignments",
@@ -196,6 +226,8 @@ EXPERIENCE CARDS:
             "model": args.model, "max_tokens": default_output_token_limit(args.model) or 12000,
             "thinking": True, "stream": True,
             "skills": clean,
+            "generation_request": accepted_request,
+            "generation_payload": request_payload(args.model.removeprefix('openai/'), prompt),
         }, ensure_ascii=False, indent=2) + "\n")
         (out / "audit.json").write_text(json.dumps({
             "status": "passed", "catalog_has_body": False,

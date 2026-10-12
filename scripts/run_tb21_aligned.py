@@ -357,9 +357,10 @@ def collect_cards(root, tasks, skills, model):
 
 def reserve(root, stage, workers):
     # Serialize check + publication so simultaneous E3/E5 launches cannot overbook.
-    with (root.parent / ".tb21-worker-reservations.lock").open("a") as lock:
+    runs = next((p for p in root.parents if p.name == 'runs'), root.parent)
+    with (runs / ".tb21-worker-reservations.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        reserved, active = active_worker_reservation(root.parent, root)
+        reserved, active = active_worker_reservation(runs, root)
         if workers + reserved > total_worker_limit():
             raise ValueError(f"Worker cap exceeded: {reserved}+{workers}")
         write(root / "capacity.json", {"workers": workers, "other_reserved": reserved,
@@ -476,6 +477,10 @@ def execute(args, root):
                 write(root / "canary.json", {"passed": True, "slots": canaries, "reused": True})
                 batch([(t, a) for t in range(89) for a in (1, 2, 3) if (t, a) not in canaries], "skill_rollouts")
             collect_cards(root, tasks, skills, identity["executor_model"])
+            if getattr(args, 'initial_only', False):
+                write(root / 'status.json', {'stage': args.stage, 'status': 'initial_panel_complete',
+                    'coverage': '267/267', 'workers': args.workers, 'phase': 'awaiting_l2'})
+                return
             # Ephemeral relay replacement is operational, not a new scoring protocol.
             if (root / "l2_manifest.json").exists():
                 manifest = read(root / "l2_manifest.json")
@@ -531,6 +536,7 @@ def main():
     parser.add_argument("--accept-worker-change", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument('--l2-only', action='store_true', help='Require accepted slots; never execute new L1 requests')
+    parser.add_argument('--initial-only', action='store_true')
     args = parser.parse_args()
     if (not 1 <= args.workers <= total_worker_limit() or
             (args.stage in ("E5", "E6", "QD") and args.qwen_source is None) or
