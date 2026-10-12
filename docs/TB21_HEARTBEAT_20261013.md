@@ -1,5 +1,27 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 06:16 Asia/Shanghai heartbeat
+
+E7 reached 260 historical valid records, with six live Harbor children for
+tasks 87/88 and one infrastructure-error record at 77-3. Strict verifier
+review remains the acceptance gate; the four known no-outcome records are
+excluded, so recorded coverage is not accepted coverage. Driver is alive and
+L2 remains locked.
+
+E9 still has 87 state records. gpt2-codegolf is running physical_networkfix_02
+within the original two-attempt infrastructure budget. The configure-git-webserver
+owned process termination did take effect: physical result exists with
+exit_code=-15, reward=null and failure_kind=evidence_invalid. The framework
+classified this as a nonretryable evidence error rather than a retryable
+verifier stall. Its task lock is no longer held; the batch parallel loop waits
+for gpt2-codegolf before raising the saved error. No restart is safe while that
+child remains active. Subsequent recovery must preserve this result and the
+stall diagnostic, explicitly record any compatible classification repair,
+retain cumulative attempts, and use the original --resume contract.
+
+E8 and supplementary Final-panel gaps are unchanged; no reruns or budget
+resets were performed, and E5 remains stopped.
+
 ## 2026-10-13 05:16 Asia/Shanghai heartbeat
 
 E7 has 251 historical valid records; refreshed strict verifier review accepts
