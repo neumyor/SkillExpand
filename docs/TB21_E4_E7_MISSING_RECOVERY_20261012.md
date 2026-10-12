@@ -25,3 +25,22 @@ The launched processes are not evidence of accepted scores. Check each run's
 `missing_slot_resume.json`, `status.json`, request results and execution audit
 for the recovery outcome; credential verification failure creates no new slot
 request and leaves the run in needs_attention.
+
+## Recovery and source audit update
+
+On 2026-10-12, E7 request 004 returned a real verifier reward of 0 and the
+initial execution audit passed with 267 unique slots and 104 task-Skill cards.
+E4 request 006 failed with an infrastructure timeout; request 007 is running.
+
+The E7 library source audit found a material inconsistency. Although the
+current proposal says 178 source cards and each Skill lists 178 provenance
+IDs, the actual generation request 000 contains only 89 merged-source cards.
+The current proposal bodies exactly equal the preserved legacy-89 proposal.
+The proposal generator reused the cached legacy completion after the input
+format change. No independent 178-card generation request is evidenced.
+
+The 267 initial verifier scores remain valid for the actual executed library,
+but cannot establish the requested independent 178-card library setting.
+L2 must remain locked until this source inconsistency is resolved. Do not
+rewrite Skill bodies or claim the existing scores evaluated a newly generated
+library. No additional evaluation panel or budget is authorized by this audit.
