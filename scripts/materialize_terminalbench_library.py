@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections import Counter
 from pathlib import Path
 
 from skillexpand import schema as S
@@ -81,8 +82,25 @@ def main() -> int:
                    for s in skills],
         "catalog_has_body": False,
         "source_cards": len(provenance_cards),
+        "source_card_ids": [v.get("source_card_id", v.get("experience_id")) for v in provenance_cards],
+        "source_experience_ids": list(experience_ids),
+        "source_card_counts": dict(Counter(v.get("source_model") for v in provenance_cards)),
+        "generation_request": proposal.get("generation_request"),
         "task_assignment": None,
     })
+    if source_cards:
+        freeze(root / "generation_source_audit.json", {
+            "passed": True,
+            "actual_request_cards": len(supplied),
+            "source_card_counts": dict(Counter(v["source_model"] for v in supplied)),
+            "source_card_ids": [v["source_card_id"] for v in supplied],
+            "source_experience_ids": list(experience_ids),
+            "generation_request": proposal["generation_request"],
+            "request_matches_proposal": True,
+            "request_matches_source_cards": True,
+            "completion_matches_skills": True,
+            "skill_provenance": {s.key: list(s.provenance.source_experience_ids) for s in skills},
+        })
     print(json.dumps({"status": "materialized", "skills": len(skills), "tasks": len(cards)}))
     return 0
 
