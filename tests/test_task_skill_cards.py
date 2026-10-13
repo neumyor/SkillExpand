@@ -69,6 +69,10 @@ def sources(tmp_path):
                                     'import_path': 'adapter:TencentSkillTerminus2'}},
                 'verifier_result': {'rewards': {'reward': attempt % 2}}})
             aligned.write(trajectory, {'steps': [{'message': f't{task}-a{attempt}'}]})
+            verifier = result.parent / 'verifier'
+            verifier.mkdir()
+            (verifier / 'reward.txt').write_text(str(attempt % 2))
+            (verifier / 'test-stdout.txt').write_text('test session starts\n1 passed\n')
             aligned.write(result.parent / 'agent/skill_activation.json',
                           {'load_stage': 'after_selection', 'source_path': str(body)})
             aligned.write(slot / 'record.json', {'task_id': task, 'attempt_index': attempt,

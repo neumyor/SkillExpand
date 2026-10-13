@@ -104,6 +104,10 @@ def test_final_reconciliation_keeps_earliest_real_reward(tmp_path):
         mounted.write_text(skill['body'])
         empirical.write(request / 'selection.json', selection)
         empirical.write(path.parent / 'agent/trajectory.json', {'steps': ['real']})
+        verifier = path.parent / 'verifier'
+        verifier.mkdir()
+        (verifier / 'reward.txt').write_text(str(reward))
+        (verifier / 'test-stdout.txt').write_text('test session starts\n1 passed\n')
         empirical.write(path.parent / 'agent/skill_activation.json',
                         {'source_path': str(mounted), 'load_stage': 'after_selection'})
     first = empirical.reconcile_slot(tmp_path, 0, 1)
