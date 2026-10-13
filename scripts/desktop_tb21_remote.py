@@ -64,16 +64,18 @@ elif sys.argv[1] in ('resume-e7', 'l2-e7'):
     from run_tb21_empirical import active_worker_reservation
     from summarize_tb21_empirical import read, write
     root = Path(repo) / 'runs/tb21-qwen-deepseek-library-qwen-selector-20261011/revisions/178-cards-v1'
+    workers = int(env.get('TB21_E7_WORKERS', read(root / 'alignment.json').get('workers', 16)))
     os.environ['OPENAI_API_KEY'] = env['TB21_METHOD_API_KEY']
     os.environ['PYTHONPATH'] = repo + '/src'
     command = [sys.executable, repo + '/scripts/run_tb21_aligned.py', '--stage', 'QD',
         '--run-dir', str(root), '--deepseek-source', read(root / 'alignment.json')['sources'][0],
         '--qwen-source', read(root / 'alignment.json')['sources'][1],
-        '--task-file', read(root / 'alignment.json')['task_file'], '--workers', '16',
+        '--task-file', read(root / 'alignment.json')['task_file'], '--workers', str(workers),
         '--initial-only', '--initial-slots', '77-3']
     if sys.argv[1] == 'l2-e7':
         command = command[:-3] + ['--l2-only']
         os.environ['TBENCH_RELAY_MAX_CONCURRENCY'] = '1'
+    command.append('--accept-worker-change')
     with (Path(repo) / 'runs/.tb21-worker-reservations.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         for proc in Path('/proc').iterdir():
@@ -86,7 +88,7 @@ elif sys.argv[1] in ('resume-e7', 'l2-e7'):
             if '-c' not in argv and str(root) in ' '.join(argv) and any('python' in a or 'harbor' in a for a in argv[:1]):
                 raise SystemExit('Existing E7 execution process blocks resume')
         reserved, _ = active_worker_reservation(Path(repo) / 'runs', root)
-        if reserved + 16 > 250:
+        if reserved + workers > 250:
             raise SystemExit('Capacity unavailable')
         previous = len(list((root / 'slots/77-3/requests').iterdir()))
         if (root / 'targeted_resume.json').exists():
@@ -95,13 +97,13 @@ elif sys.argv[1] in ('resume-e7', 'l2-e7'):
             child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
                 stderr=subprocess.STDOUT, start_new_session=True)
         write(root / 'status.json', {'stage': 'QD', 'status': 'running', 'pid': child.pid,
-            'workers': 16, 'phase': 'l2_resume_starting' if sys.argv[1] == 'l2-e7' else 'targeted_initial_resume'})
+            'workers': workers, 'phase': 'l2_resume_starting' if sys.argv[1] == 'l2-e7' else 'targeted_initial_resume'})
         write(root / 'targeted_resume.json', {'pid': child.pid, 'command': command,
             'slots': ['77-3'], 'previous_requests': previous, 'max_new_requests': 3,
-            'budget_resets': 0, 'source': 'authorized_desktop_env', 'total_reserved': reserved + 16,
+            'budget_resets': 0, 'source': 'authorized_desktop_env', 'total_reserved': reserved + workers,
             'reason': 'prior model command transport deadline; fresh role-verified sandbox transport',
             'unresolved_setup_slots': ['51-2', '73-1', '73-2', '73-3']})
-        print(json.dumps({'pid': child.pid, 'total_reserved': reserved + 16,
+        print(json.dumps({'pid': child.pid, 'total_reserved': reserved + workers,
                           'phase': 'l2' if sys.argv[1] == 'l2-e7' else 'initial',
                           'slots': [] if sys.argv[1] == 'l2-e7' else ['77-3']}))
 else:
@@ -140,6 +142,10 @@ if __name__ == '__main__':
            'TBENCH_E2B_RELAY_METADATA_JSON': '{"x-mounts":"[]"}',
            'EXPE_LLM_TIMEOUT_SECONDS': '180',
            'TB21_PIPELINE_CACHE': '1', 'TB21_PIPELINE_CACHE_VERSION': 'pipeline-uv095-py3139-v6'}
+    if args.action in ('resume-e7', 'l2-e7'):
+        import os
+        if os.getenv('TB21_E7_WORKERS'):
+            env['TB21_E7_WORKERS'] = os.environ['TB21_E7_WORKERS']
     if args.action == 'prepare-c4-cache':
         import os
         if os.getenv('TB21_FIXTURE_PROXY'):
