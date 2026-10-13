@@ -188,14 +188,29 @@ def main():
             if read(path) != contract:
                 authorization = Path('/data2/liyishan/SkillExpand-tb21/SkillExpand/runs/tb21-e9-agentbrew-evo89-test89-20261012/budget_reset_20261013.json')
                 old = read(path)
-                allowed = {'source_hashes', 'tb21_snapshot_hash'}
+                allowed = {'source_hashes', 'tb21_snapshot_hash', 'method', 'eval'}
+                expected_method = json.loads(json.dumps(old['method']))
+                expected_method['teacher'].update(
+                    model='deepseek-v4-flash-0731', temperature=None,
+                    max_input_tokens=1048576, max_tokens=65536,
+                    extra_body={'top_p': 0.95, 'top_k': 20, 'enable_thinking': True,
+                                'chat_template_kwargs': {'preserve_thinking': True},
+                                'reasoning_effort': 'max'})
+                # Disclosures may change; executable algorithm settings must match exactly.
+                expected_method['implementation_choices'] = contract['method']['implementation_choices']
+                expected_eval = json.loads(json.dumps(old['eval']))
+                expected_eval['agent']['thinking'] = True
+                settings_match = (contract['method'] == expected_method
+                                  and contract['eval'] == expected_eval)
                 changed = {key for key in set(old) | set(contract) if old.get(key) != contract.get(key)}
                 if (not authorization.exists() or not read(authorization).get('user_authorized')
-                        or not changed <= allowed):
+                        or not changed <= allowed or not settings_match):
                     raise ValueError("resume contract differs (code/config/tasks/budgets/splits)")
                 save(root / 'contract.budget-reset-compatibility-20261013.json',
                      {'original': old, 'current': contract, 'changed_fields': sorted(changed),
-                      'authorization_file': str(authorization), 'historical_requests_preserved': True})
+                      'authorization_file': str(authorization), 'historical_requests_preserved': True,
+                      'settings_authorization': 'User confirmed E8-aligned teacher and student thinking on 2026-10-13',
+                      'historical_contract_retained': True})
                 contract = old
         else:
             save(path, contract)

@@ -26,3 +26,19 @@ executions and contracts remain available; accepted binary scores are reused.
 Credential injection uses authorized Desktop env into process memory over SSH
 stdin. Shared recursive capacity remains at most 250 under the common lock.
 All results remain closed-set and missing rewards remain unknown.
+
+## 2026-10-13 Settings Compatibility Recovery
+
+E9's prior resume stopped before formal execution because its current method
+and eval settings differed from the frozen contract. The user confirmed the
+E8-aligned Teacher settings and Student thinking=true are authorized. Resume
+now validates those precise executable changes, records both contracts in
+contract.budget-reset-compatibility-20261013.json, and retains the original
+contract and historical request identities. Source and task-snapshot changes
+remain explicitly disclosed infrastructure amendments.
+
+E8's latest strict recovery audit accepts five new genuine successes:
+259/267 valid scores (202 successes, 57 failures), with eight missing.
+E7 remains 266/267 in initial execution; request 007 for slot 77-3 is active,
+and L2 remains gated. E9 was relaunched with supervisor 1443537 under the
+shared lock, reserving 93/250 workers in total; launch is not acceptance.
