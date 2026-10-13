@@ -137,7 +137,8 @@ def prepare(args):
             if unchanged != identity:
                 raise ValueError("Only worker allocation may change during authorized resume")
             status = read(root / "status.json")
-            if status.get("status") == "running" and Path('/proc', str(status.get("pid"))).exists():
+            if (status.get("status") == "running" and status.get("pid") != os.getpid()
+                    and Path('/proc', str(status.get("pid"))).exists()):
                 raise ValueError("Stop the previous driver before changing worker allocation")
             transition = root / "worker_transitions.json"
             history = read(transition) if transition.exists() else []
