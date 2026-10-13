@@ -67,6 +67,21 @@ def test_mixed_evidence_is_balanced_without_source_substitution(tmp_path):
         aligned.source_payloads(0, "instruction", rows[:-1])
 
 
+def test_explicit_remaining_request_budget_is_not_reset(tmp_path, monkeypatch):
+    path = tmp_path / 'slots/00-1/record.json'
+    aligned.write(path, {'status': 'infrastructure_error'})
+    (path.parent / 'requests/001').mkdir(parents=True)
+    def reject(*args, **kwargs):
+        raise ValueError('setup unavailable')
+    monkeypatch.setattr(aligned, 'select_and_load', reject)
+    aligned.run_slot(tmp_path, None, [], [{'task_name': 'task', 'instruction': 'task'}],
+                     None, 0, 1, aligned.QWEN, max_new_requests=2)
+    assert sorted(p.name for p in (path.parent / 'requests').iterdir()) == ['001', '002', '003']
+    aligned.run_slot(tmp_path, None, [], [{'task_name': 'task', 'instruction': 'task'}],
+                     None, 0, 1, aligned.QWEN, max_new_requests=0)
+    assert len(list((path.parent / 'requests').iterdir())) == 3
+
+
 def test_model_specific_verifier_validation(tmp_path):
     raw(tmp_path, aligned.METHOD, 1)
     path = tmp_path / f"{aligned.METHOD}-1/result.json"

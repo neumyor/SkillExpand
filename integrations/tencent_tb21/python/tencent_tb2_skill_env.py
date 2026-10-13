@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import shlex
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from tencent_tb2_snapshot import TencentSnapshotE2BEnvironment
-from tencent_package_mirrors import configure
-from tencent_verifier_cache import configure as configure_verifier_cache
 
 
 _TASK_SKILL_DIRECTORY_OVERRIDES = {
@@ -97,16 +94,6 @@ class TencentTaskSkillE2BEnvironment(TencentSnapshotE2BEnvironment):
 
     async def start(self, force_build: bool) -> None:
         await super().start(force_build)
-        mirror = os.getenv('TB21_PACKAGE_MIRROR_URL', 'https://mirrors.tencent.com')
-        if mirror:
-            certificate_path = '/etc/ssl/certs/ca-certificates.crt'
-            certificate_check = await self.exec('test -s ' + certificate_path, user='root', timeout_sec=30)
-            if certificate_check.return_code != 0:
-                await self._sandbox.files.write_files(
-                    [{'path': certificate_path, 'data': Path(certificate_path).read_bytes()}], user='root'
-                )
-            paths = await configure(self._sandbox, mirror)
-            self.logger.info('Configured package mirror %s in %s', mirror, paths)
         prerequisite = await self.exec('command -v tmux', user='root', timeout_sec=30)
         if prerequisite.return_code != 0:
             update = await self.exec('apt-get update', user='root', timeout_sec=120)
@@ -115,8 +102,3 @@ class TencentTaskSkillE2BEnvironment(TencentSnapshotE2BEnvironment):
                 raise RuntimeError('Failed to install the required tmux agent runtime: ' +
                                    update.stderr[-1000:] + install.stderr[-1000:])
         await self._mount_task_skill()
-        if await configure_verifier_cache(self._sandbox):
-            result = await self.exec('chmod 755 /usr/local/bin/curl', user='root', timeout_sec=30)
-            if result.return_code != 0:
-                raise RuntimeError('Failed to activate the cached uv installer')
-            self.logger.info('Configured cached uv 0.9.5 installer')

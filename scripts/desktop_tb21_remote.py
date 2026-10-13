@@ -20,7 +20,21 @@ os.environ.update(env)
 repo = '/data2/liyishan/SkillExpand-tb21/SkillExpand'
 os.chdir(repo)
 sys.path[:0] = [repo + '/src', repo + '/scripts']
-if sys.argv[1] == 'resume-e9':
+if sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache'):
+    adapter = '/data2/liyishan/tb21-tencent-skill/python'
+    os.environ['PYTHONPATH'] = ':'.join([repo + '/src', repo + '/scripts', adapter,
+                                      '/data2/liyishan/tbench2-openclaw-min/framework/python'])
+    if sys.argv[1] == 'recover-e7-verifiers':
+        command = [sys.executable, repo + '/scripts/recover_e7_verifier_slots.py',
+                   '--credential-pid', str(os.getpid())]
+        if env.get('TB21_RECOVERY_SLOTS'):
+            command += ['--slots', *env['TB21_RECOVERY_SLOTS'].split(',')]
+    else:
+        command = ['/data2/liyishan/tbench2-openclaw-min/.venv/bin/python',
+                   adapter + '/prepare_task_verifier_cache.py', '--credential-pid', str(os.getpid()),
+                   '--version', 'repair-20261013-v3', '--resume-assembly', 'reshard-c4-data']
+    os.execvpe(command[0], command, os.environ)
+elif sys.argv[1] == 'resume-e9':
     sys.argv = [repo + '/scripts/resume_tb21_e9.py']
     runpy.run_path(sys.argv[0], run_name='__main__')
 elif sys.argv[1] == 'resume-e7':
@@ -85,7 +99,8 @@ else:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7'])
+    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7',
+                                         'recover-e7-verifiers', 'prepare-c4-cache'])
     args = parser.parse_args()
     desktop = Path.home() / 'Desktop'
     qwen, method = load(desktop / '.env'), load(desktop / '.env_deepseek')
@@ -99,6 +114,16 @@ if __name__ == '__main__':
            'TBENCH_E2B_RELAY_METADATA_JSON': '{"x-mounts":"[]"}',
            'EXPE_LLM_TIMEOUT_SECONDS': '180',
            'TB21_PIPELINE_CACHE': '1', 'TB21_PIPELINE_CACHE_VERSION': 'pipeline-uv095-py3139-v6'}
+    if args.action == 'prepare-c4-cache':
+        import os
+        if os.getenv('TB21_FIXTURE_PROXY'):
+            env['TB21_FIXTURE_PROXY'] = os.environ['TB21_FIXTURE_PROXY']
+        if os.getenv('TB21_C4_SOURCE_FILE'):
+            env['TB21_C4_SOURCE_FILE'] = os.environ['TB21_C4_SOURCE_FILE']
+    if args.action == 'recover-e7-verifiers':
+        import os
+        if os.getenv('TB21_RECOVERY_SLOTS'):
+            env['TB21_RECOVERY_SLOTS'] = os.environ['TB21_RECOVERY_SLOTS']
     command = '/data2/liyishan/SkillExpand-tb21/SkillExpand/.venv2/bin/python -c ' + shlex.quote(REMOTE) + ' ' + args.action
     result = subprocess.run(['ssh', 'jinan40', command], input=json.dumps(env),
                             text=True, capture_output=True)

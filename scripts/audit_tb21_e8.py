@@ -85,13 +85,37 @@ def metrics(rows):
                 complete_three_trial_tasks=sum(len(v) == 3 and None not in v for v in tasks.values()))
 
 
+def merge_recovery(original, recovery):
+    by_trial = {row['trial']: row for row in original}
+    for row in recovery:
+        prior = by_trial.get(row['trial'])
+        if prior is None or prior['task'] != row['task']:
+            raise ValueError('Recovery identity absent from original panel')
+        if prior['reward'] is not None:
+            raise ValueError('Recovery would replace an accepted score')
+        if row['reward'] is not None:
+            intent_path = Path(row['result']).parent / 'recovery_intent.json'
+            intent = json.loads(intent_path.read_text())
+            if (Path(intent['original_result']).resolve() != Path(prior['result']).resolve()
+                    or intent.get('previous_executions') != 1
+                    or intent.get('execution_limit') != 2
+                    or intent.get('remaining_after_reservation') != 0):
+                raise ValueError('Recovery has no valid cumulative budget reservation')
+            by_trial[row['trial']] = dict(row, historical_result=prior['result'],
+                                           recovery=True)
+    return list(by_trial.values())
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--job', type=Path, required=True)
     parser.add_argument('--baseline', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--recovery', type=Path)
     args = parser.parse_args()
     current, baseline = panel(args.job, True), panel(args.baseline)
+    if args.recovery:
+        current = merge_recovery(current, panel(args.recovery, True))
     by_task = defaultdict(dict)
     for name, rows in [('E8', current), ('E2', baseline)]:
         for task in sorted({row['task'] for row in rows}):
@@ -115,7 +139,7 @@ def main():
                   baseline_comparable=False, closed_set=True,
                   missing_policy='Unknown stays null. Bounds vary missing rewards from 0 to 1.',
                   provider_full_context_or_effort_proven=False,
-                  environment_differences='E8 uses Tencent internal mirrors and pipeline v6 cache.')
+                  environment_differences='Historical E8 uses pipeline v6 only for torch-pipeline-parallelism; bare Snapshot setup did not apply the Skill package mirrors or generic uv cache. Later infrastructure repairs do not change these historical trials.')
     args.out.mkdir(parents=True, exist_ok=True)
     for name, data in [('execution_audit.json', audit), ('report.json', report)]:
         (args.out / name).write_text(json.dumps(data, indent=2) + '\n')

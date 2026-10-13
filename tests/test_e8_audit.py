@@ -11,6 +11,22 @@ spec.loader.exec_module(audit)
 
 
 class E8AuditTests(unittest.TestCase):
+    def test_recovery_is_unique_and_preserves_accepted_originals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = [dict(task='a', trial='a__1', reward=None, result='old'),
+                        dict(task='a', trial='a__2', reward=0, result='accepted')]
+            recovery = [dict(task='a', trial='a__1', reward=1, result=str(root / 'result.json'))]
+            with self.assertRaises(FileNotFoundError):
+                audit.merge_recovery(original, recovery)
+            (root / 'recovery_intent.json').write_text(json.dumps(dict(original_result='old',
+                previous_executions=1, execution_limit=2, remaining_after_reservation=0)))
+            merged = audit.merge_recovery(original, recovery)
+            self.assertEqual(len(merged), 2)
+            self.assertEqual(merged[0]['historical_result'], 'old')
+            self.assertEqual(merged[1]['result'], 'accepted')
+            with self.assertRaises(ValueError):
+                audit.merge_recovery(original, [dict(task='a', trial='a__2', reward=1)])
     def test_missing_metrics_stay_unknown(self):
         rows = [dict(task='a', reward=r) for r in [1, 0, None]]
         rows += [dict(task='b', reward=r) for r in [0, 0, None]]

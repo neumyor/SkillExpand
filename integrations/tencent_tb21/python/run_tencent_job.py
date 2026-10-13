@@ -103,6 +103,8 @@ async def run_job(
 ) -> int:
     config = JobConfig.model_validate(yaml.safe_load(config_path.read_text()))
     job = Job(config)
+    from tencent_task_verifier_cache import on_verification_started as task_cache_hook
+    job.on_verification_started(task_cache_hook)
     from tencent_pipeline_cache import enabled, on_verification_started, on_trial_ended
     if enabled():
         job.on_verification_started(on_verification_started)

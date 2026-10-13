@@ -72,6 +72,8 @@ class TencentSnapshotE2BEnvironment(_BaseE2BEnvironment):
         self._persist_sandboxes = os.getenv("TBENCH_PERSIST_SANDBOXES", "0") == "1"
         from tencent_pipeline_cache import register_environment
         register_environment(self)
+        from tencent_task_verifier_cache import register
+        register(self)
 
     def _snapshot_path(self) -> Path:
         return self.trial_paths.trial_dir / "snapshot.json"
@@ -142,6 +144,8 @@ class TencentSnapshotE2BEnvironment(_BaseE2BEnvironment):
             raise RuntimeError(
                 f"Failed to prepare Harbor log directories: {result.stderr or result.stdout}"
             )
+        from tencent_environment_setup import prepare_environment
+        await prepare_environment(self)
 
     async def _create_persistent_snapshot(self) -> dict[str, Any]:
         sandbox = getattr(self, "_sandbox", None)
@@ -181,6 +185,8 @@ class TencentSnapshotE2BEnvironment(_BaseE2BEnvironment):
         """Use the 539641 exec behavior without assuming task config.workdir."""
         from tencent_pipeline_cache import verifier_command_env
         env = verifier_command_env(self, command, env)
+        from tencent_task_verifier_cache import command_env
+        env = command_env(self, command, env)
         resolved_user = self._resolve_user(user)
         merged_env = self._merge_env(env)
         if self._sandbox is None:
@@ -205,6 +211,13 @@ class TencentSnapshotE2BEnvironment(_BaseE2BEnvironment):
         )
         try:
             result = await handle.wait()
+        except asyncio.CancelledError:
+            # Cancel the owned command when Harbor's agent/verifier budget ends.
+            try:
+                await handle.kill()
+            except Exception as exc:
+                self.logger.warning('Failed to stop canceled sandbox command: %s', type(exc).__name__)
+            raise
         except CommandExitException as exc:
             result = exc
         return ExecResult(

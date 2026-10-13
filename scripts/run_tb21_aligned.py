@@ -234,7 +234,7 @@ def prepare(args):
     return root
 
 
-def run_slot(root, cfg, skills, tasks, transport, task, attempt, model, selector_model=METHOD):
+def run_slot(root, cfg, skills, tasks, transport, task, attempt, model, selector_model=METHOD, max_new_requests=3):
     path = root / f"slots/{task:02d}-{attempt}/record.json"
     if path.exists() and read(path).get("status") == "valid":
         record = read(path)
@@ -248,7 +248,9 @@ def run_slot(root, cfg, skills, tasks, transport, task, attempt, model, selector
             return record
     request_root = path.parent / "requests"
     request_root.mkdir(parents=True, exist_ok=True)
-    for retry in range(3):
+    if max_new_requests not in (0, 1, 2, 3):
+        raise ValueError('New request budget must be between zero and three')
+    for retry in range(max_new_requests):
         directory = request_root / f"{len(list(request_root.iterdir()))+1:03d}"
         directory.mkdir()
         record = {"task_id": task, "attempt_index": attempt, "task_name": tasks[task]["task_name"]}
@@ -282,7 +284,7 @@ def run_slot(root, cfg, skills, tasks, transport, task, attempt, model, selector
             record.update(status="infrastructure_error", error_class=failure_class(exc), error=message[:1500])
             write(directory / "error.json", record)
             write(path, record)
-    return record
+    return record if max_new_requests else read(path)
 
 
 def grouped_cards(root, tasks, skills, model):
