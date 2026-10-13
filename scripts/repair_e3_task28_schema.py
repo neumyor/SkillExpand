@@ -37,10 +37,11 @@ report = {
     'stage': 'E3', 'status': 'needs_attention', 'source_run': str(SRC),
     'recovery_run': str(OUT), 'task_id': 28, 'schema_valid': True,
     'old_runs_read_only': True,
-    'reason': 'Schema is repaired, but original task-28 evidence was produced in a quarantined recovery and requires provenance review before stage completion.',
+    'quarantined': True, 'eligible_for_merge': False,
+    'reason': 'Diagnostic wrapper only: selector, Skill load and full trial provenance are not established. This artifact must not enter the production library or stage acceptance.',
     'provenance_paths': [str(OUT / 'source_provenance.json'), str(OUT / 'source_card.json')],
 }
 for name in ('status.json', 'audit.json', 'result.json'):
     (OUT / name).write_text(json.dumps(report, indent=2) + '\n')
-(OUT / 'recovery_summary.md').write_text('# E3 task 28 schema recovery\n\nSchema-valid TaskExperience materialized from the frozen recovery card. Stage remains needs_attention pending provenance review.\n')
+(OUT / 'recovery_summary.md').write_text('# E3 task 28 diagnostic draft\n\nQuarantined and ineligible for merge. Schema parsing alone does not establish selector, Skill loading or full trial provenance. Stage remains needs_attention.\n')
 print(json.dumps(report))

@@ -102,6 +102,26 @@ def test_relay_preserves_provider_http_status(status):
         relay.close()
 
 
+def test_reasoning_only_stream_is_an_explicit_error_not_empty_success():
+    class ReasoningTransport(FakeTransport):
+        def stream(self, payload):
+            yield b'data: {"choices":[{"delta":{"reasoning_content":"unfinished reasoning"}}]}\n\n'
+            yield b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+            yield b'data: [DONE]\n\n'
+    relay = TencentSandboxLLMRelay(ReasoningTransport())
+    base = relay.start()
+    try:
+        request = urllib.request.Request(base + '/chat/completions',
+            data=b'{"stream":true}', headers={'Content-Type': 'application/json'})
+        body = urllib.request.urlopen(request).read().decode()
+        assert 'provider_output_truncated' in body
+        assert '[DONE]' not in body
+        with pytest.raises(RelayError, match='no visible answer'):
+            list(iter_sse_events([body]))
+    finally:
+        relay.close()
+
+
 def test_sse_parser_handles_chunk_boundaries_and_done():
     chunks = [
         b'data: {"choices":[{"delta":{"content":"O',

@@ -734,3 +734,29 @@ other panels. E4 is 110/267, E5_FINAL 114/267 and E6_FINAL 110/267. All four
 audits remain incomplete and pass@1/pass@3 are intentionally unset. E4 has
 one rejected record and E6 one; these remain unresolved rather than fixed
 zero. No accepted slot was retried.
+## E3 final panel one slot short: 2026-10-11 18:59 Asia/Shanghai
+
+E3_FINAL now has 266/267 valid real verifier attempts, with one slot missing;
+its process remains alive but the last relay activity is stale. E4 advanced to
+122/267, E5_FINAL to 128/267 and E6_FINAL to 140/267. Rejected records remain
+excluded (E4 one, E5 two, E6 one), and no panel has a complete audit or
+pass@1/pass@3 metrics. No accepted slot was retried.
+## E3_FINAL complete: 2026-10-11 19:08 Asia/Shanghai
+
+E3_FINAL completed all 267 unique attempts and passed its final execution
+audit. Closed-set metrics are pass@1 0.801498 and pass@3 0.898876. The report
+contains the per-task comparison to the original E3 panel; this is descriptive
+closed-set evidence only and does not establish independent generalization.
+
+E4 continues against the same audited E3 frozen library at 155/267 valid
+attempts. E5_FINAL and E6_FINAL are also active at 157/267 each. Their audits
+remain incomplete, so no final-panel gate has been cleared yet.
+## E5_FINAL user stop: 2026-10-11
+
+Per explicit user request, stopped E5_FINAL driver PID 1942199 and its 15
+Harbor descendants. The run is marked `stopped`, `complete=false`, with the
+original request history and budgets preserved. One in-flight request finished
+during graceful shutdown; offline reconciliation therefore preserves 175/267
+valid real attempts (the pre-stop status was 174/267). No complete metrics or
+passing execution audit are claimed, and the completed E5 L2 source remains
+unchanged.

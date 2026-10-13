@@ -22,6 +22,7 @@ def main():
         if d.get('task_name') in by_name: grouped[d['task_name']].append((rp.parent,d))
     names=sorted(by_name); assert len(names)==89 and all(len(grouped[n])==3 for n in names), {n:len(grouped[n]) for n in names if len(grouped[n])!=3}
     # Progressive E1 routes all tasks through the Skill catalog at execution time.
+    source_model = args.source_model
     assignment={i: S.SPLIT_TRAIN for i in range(89)}
     family='terminalbench.general'; train_ids=[i for i in range(89) if assignment[i]==S.SPLIT_TRAIN]
     task_rows=[{'task':by_name[n]['instruction'],'env_kwargs':{'instruction':by_name[n]['instruction'],'task_name':n},'env_name':'terminalbench'} for n in names]
@@ -40,7 +41,7 @@ def main():
             rewards.append(reward); remote=str(d.get('trial_uri','')).removeprefix('file://')
             local=str(td/'agent'/'trajectory.json'); traj_paths.append(remote or local)
             trial_manifest.append({'task_id':i,'task_name':n,'attempt_index':idx,'reward':int(reward),
-                                  'source_model':'openai/qwen3.6-flash-distill','trial_dir':remote or str(td),
+                                  'source_model':source_model,'trial_dir':remote or str(td),
                                   'result_path':remote+'/result.json' if remote else str(td/'result.json'),
                                   'trajectory_path':remote+'/agent/trajectory.json' if remote else local})
             tpath=td/'agent'/'trajectory.json'; steps=json.loads(tpath.read_text()).get('steps',[]) if tpath.exists() else []
@@ -54,7 +55,7 @@ def main():
     method_model = args.method_model or args.source_model
     config={'benchmark':{'name':'terminalbench','task_prefix':'','task_file':str(args.task_file.resolve()),'max_steps':1,'num_fewshots':0,'ai_name':'terminal agent','env':{'show_admissible_commands':False},'l1':{'adapter':'skillexpand.l1.adapters:TerminalBenchAdapter'},'progressive_library':True,'rollout':{'mode':'harbor_rollout','runner_script':'/data2/liyishan/tb21-tencent-skill/scripts/run_tencent_tb21_smoke.sh'}},'agent':{'llm':method_model},'models':{k:method_model for k in ('l1_executor','cold_start','l2_planner','l2_editor','l2_reviewer','selector')}}
     freeze(root/'config.json',config); freeze(root/'split.json',S.to_dict(split)); freeze(root/'initial_skills.json',[S.to_dict(initial)]); freeze(root/'cold_start_complete.json',{'protocol':'progressive-library','train_count':len(train_ids),'initial_skills_hash':S.content_hash([S.to_dict(initial)])})
-    manifest={'protocol':'progressive-library-experience-first','split':S.to_dict(split),'config':config,'task_table_hash':S.content_hash(task_rows),'prompts':{},'k':3,'supervised':False,'supervised_attempts':0,'card_batch_size':12,'skill_edit_mode':'rewrite','routing_mode':'progressive_library','acceptance_panel':'all_train','code':{'importer':'tb21-parallel-stage-v1'},'trajectory_import':{'source_root':str(source),'source_model':args.source_model,'trial_count':267,'valid_rollout_count':267,'coverage':'89 tasks x 3 attempts'}}
+    manifest={'protocol':'progressive-library-experience-first','split':S.to_dict(split),'config':config,'task_table_hash':S.content_hash(task_rows),'prompts':{},'k':3,'supervised':False,'supervised_attempts':0,'card_batch_size':12,'skill_edit_mode':'rewrite','routing_mode':'progressive_library','acceptance_panel':'all_train','code':{'importer':'tb21-parallel-stage-v2'},'trajectory_import':{'source_root':str(source),'source_model':source_model,'trial_count':267,'valid_rollout_count':None,'coverage':'89 tasks x 3 attempts raw; validity recorded by input_coverage.json'}}
     from skillexpand.l1.protocol import projection
     freeze(root/'manifest.json',manifest); freeze(root/'discovery/card_hashes.json',{str(i):S.content_hash(projection(cards[i])) for i in train_ids})
     for i,e in exps.items(): freeze(root/'discovery/results'/f'{i}.json',S.to_dict(e))
@@ -67,6 +68,6 @@ def main():
     if not skills_path.exists():
         skills_path.write_text(skill_line)
     (root/'trial_manifest.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in sorted(trial_manifest,key=lambda x:(x['task_id'],x['attempt_index']))) )
-    summary={'status':'cold_start_imported','benchmark':'terminalbench','tasks':89,'trials':267,'valid_rollout_count':267,'coverage':'89 tasks x 3 attempts','train_tasks':len(train_ids),'reward_1':sum(bool((json.loads((td/'result.json').read_text()).get('verifier_result') or {}).get('rewards',{}).get('reward',0)) for v in grouped.values() for td,_ in v),'source_model':args.source_model,'next':'run Harbor-backed L2 on jinan40'}
+    summary={'status':'cold_start_imported','benchmark':'terminalbench','tasks':89,'trials':267,'valid_rollout_count':None,'coverage':'89 tasks x 3 attempts raw; validity recorded by input_coverage.json','train_tasks':len(train_ids),'reward_1':sum(bool((json.loads((td/'result.json').read_text()).get('verifier_result') or {}).get('rewards',{}).get('reward',0)) for v in grouped.values() for td,_ in v),'source_model':source_model,'next':'run Harbor-backed L2 on jinan40'}
     freeze(root/'batch_import_summary.json',summary); print(json.dumps(summary,indent=2))
 if __name__=='__main__': main()

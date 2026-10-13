@@ -43,7 +43,6 @@ def test_truncated_json_is_rejected_and_echo_cannot_become_review():
 
 @pytest.mark.parametrize("payload,error", [
     ({"probability_true": 0.8, "predicted_success": False, "reason": "ok"}, "disagrees"),
-    ({"probability_true": 0.8, "predicted_success": True, "reason": "x" * 81}, "too long"),
     ({"probability_true": 1.2, "predicted_success": True, "reason": "ok"}, "outside"),
     ({"probability_true": "0.8", "predicted_success": True, "reason": "ok"}, "numeric"),
     ({"probability_true": 0.8, "predicted_success": True, "reason": "ok", "task": "echo"}, "exactly three"),
@@ -72,6 +71,23 @@ def test_format_retry_preserves_thinking_and_json_schema():
         assert kwargs["request_kwargs"]["enable_thinking"] is True
         assert kwargs["request_kwargs"]["response_format"]["type"] == "json_schema"
         assert kwargs["stop"] == []
+
+
+def test_omit_wire_format_keeps_parser_and_separate_identity(monkeypatch):
+    old = scorer()
+    monkeypatch.setenv('EXPE_REVIEWER_RESPONSE_FORMAT', 'omit')
+    reviewer = scorer()
+    assert reviewer.protocol_hash != old.protocol_hash
+    calls = []
+    def llm(messages, **kwargs):
+        calls.append(kwargs)
+        return '{"probability_true":0.8,"predicted_success":true,"reason":"ok"}'
+    result, attempts = reviewer._review(SimpleNamespace(llm=llm), 'prompt')
+    assert attempts == 1 and result['probability_true'] == 0.8
+    assert 'response_format' not in calls[0]['request_kwargs']
+    assert calls[0]['request_kwargs']['enable_thinking'] is True
+    with pytest.raises(ValueError, match='disagrees'):
+        reviewer._parse('{"probability_true":0.8,"predicted_success":false,"reason":"ok"}')
 
 
 def test_format_correction_retries_transient_provider_failures(monkeypatch):

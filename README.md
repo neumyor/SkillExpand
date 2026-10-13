@@ -112,3 +112,9 @@ auditable. When this protocol is used for an evolution rollout, the recorded
 `skill_key` is the candidate's base and the acceptance path commits a new
 version of that selected family. The catalog itself is never pasted into the
 executor prompt and sibling Skill bodies are not loaded.
+
+## TB2.1 Experiment Entry Points
+
+The 89-task closed-set experiments have separate launch, empirical evaluation,
+and historical recovery scripts. See [the TB2.1 code map](docs/TB21_CODE_MAP.md)
+for current entry points and experiment definitions.

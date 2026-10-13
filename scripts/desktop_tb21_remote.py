@@ -68,7 +68,6 @@ elif sys.argv[1] in ('resume-e7', 'l2-e7'):
     os.environ['OPENAI_API_KEY'] = env['TB21_METHOD_API_KEY']
     os.environ['PYTHONPATH'] = repo + '/src'
     os.environ['TB21_TOTAL_WORKER_LIMIT'] = '250'
-    os.environ['SKILLEXPAND_ALLOW_RELAY_CODE_DRIFT'] = '1'
     command = [sys.executable, repo + '/scripts/run_tb21_aligned.py', '--stage', 'QD',
         '--run-dir', str(root), '--deepseek-source', read(root / 'alignment.json')['sources'][0],
         '--qwen-source', read(root / 'alignment.json')['sources'][1],

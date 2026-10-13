@@ -15,6 +15,34 @@ from skillexpand.l2.loop import SerialEvolutionLoop, EvolutionConfig, LoopPaths
 from skillexpand.l2 import audit as A
 
 
+def test_qd_source_context_is_identical_for_generation_and_replay(tmp_path):
+    from dataclasses import dataclass
+    @dataclass
+    class Experience:
+        task_id: int
+        experience_card: dict
+    card = dict(schema_version=5, card_id='source', task={}, execution={},
+                evidence=[], claims=[], claim_status='valid')
+    sources = [{'task_id': t, 'experience_id': f'{model}:{t}',
+                'source_card_id': f'{model}:{t}', 'source_model': model,
+                'attempts': [{'reward': None}], 'experience_card': card}
+               for model in ('qwen', 'deepseek') for t in range(89)]
+    aligned.write(tmp_path / 'source_cards.json', sources)
+    aligned.write(tmp_path / 'l2_source_integration_audit.json',
+                  {'passed': True, 'source_experience_ids': sorted(r['experience_id'] for r in sources)})
+    original = Experience(7, card.copy())
+    generated = TS.with_source_context(tmp_path, [original])[0]
+    replayed = TS.with_source_context(tmp_path, [original])[0]
+    assert generated == replayed
+    assert TS.with_source_context(tmp_path, [generated])[0] == generated
+    assert 'source_context' not in original.experience_card
+    assert all(c['attempts'][0]['reward'] is None
+               for c in generated.experience_card['source_context']['cards'])
+    generated.experience_card['source_context']['policy'] = 'changed'
+    with pytest.raises(ValueError, match='Cached source context differs'):
+        TS.with_source_context(tmp_path, [generated])
+
+
 @pytest.fixture
 def sources(tmp_path):
     tasks = [{'task_name': f'task{t}', 'instruction': f'instruction{t}'} for t in range(2)]
