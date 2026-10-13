@@ -67,6 +67,7 @@ elif sys.argv[1] in ('resume-e7', 'l2-e7'):
     workers = int(env.get('TB21_E7_WORKERS', read(root / 'alignment.json').get('workers', 16)))
     os.environ['OPENAI_API_KEY'] = env['TB21_METHOD_API_KEY']
     os.environ['PYTHONPATH'] = repo + '/src'
+    os.environ['TB21_TOTAL_WORKER_LIMIT'] = '250'
     command = [sys.executable, repo + '/scripts/run_tb21_aligned.py', '--stage', 'QD',
         '--run-dir', str(root), '--deepseek-source', read(root / 'alignment.json')['sources'][0],
         '--qwen-source', read(root / 'alignment.json')['sources'][1],
@@ -74,7 +75,7 @@ elif sys.argv[1] in ('resume-e7', 'l2-e7'):
         '--initial-only', '--initial-slots', '77-3']
     if sys.argv[1] == 'l2-e7':
         command = command[:-3] + ['--l2-only']
-        os.environ['TBENCH_RELAY_MAX_CONCURRENCY'] = '1'
+        os.environ['TBENCH_RELAY_MAX_CONCURRENCY'] = '50'
     command.append('--accept-worker-change')
     with (Path(repo) / 'runs/.tb21-worker-reservations.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
