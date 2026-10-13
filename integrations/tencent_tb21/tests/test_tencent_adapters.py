@@ -222,6 +222,10 @@ class FakeFiles:
     async def write(self, path: str, value: bytes, **_: object) -> None:
         self.values[path] = value
 
+    async def write_files(self, entries, **kwargs):
+        for entry in entries:
+            await self.write(entry['path'], entry['data'], **kwargs)
+
     async def read(self, path: str, **_: object) -> bytes:
         return self.values[path]
 
@@ -278,11 +282,15 @@ class SkillTerminusTests(unittest.IsolatedAsyncioTestCase):
     async def test_skill_agent_appends_read_instruction(self) -> None:
         agent = TencentSkillTerminus2.__new__(TencentSkillTerminus2)
         agent._skill_read_suffix = "Please read the skill first."
+        environment = SimpleNamespace(_task_skill_source=lambda: (
+            Path('/source/fix-git'), Path('/opt/openclaw-skills/fix-git')))
         with patch.object(TencentSandboxTerminus2, "run", new=AsyncMock()) as run:
-            await agent.run("Solve the task.", SimpleNamespace(), SimpleNamespace())
+            with patch.object(agent, '_append_skill_activation') as activation:
+                await agent.run("Solve the task.", environment, SimpleNamespace())
+        activation.assert_called_once_with('/opt/openclaw-skills/fix-git/SKILL.md', '/source/fix-git/SKILL.md')
         self.assertEqual(
             run.await_args.args[0],
-            "Solve the task.\n\nPlease read the skill first.",
+            "Solve the task.\n\nPlease read the skill first. Read /opt/openclaw-skills/fix-git/SKILL.md before executing task commands.",
         )
 
 

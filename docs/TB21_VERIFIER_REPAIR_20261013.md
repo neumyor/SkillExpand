@@ -99,10 +99,17 @@ Final panels are outside this repair.
 Eleven focused local setup/cache/config/audit tests passed. Seven focused
 remote adapter/config tests passed, including cancellation cleanup. A real
 Harbor factory check selected TencentSandboxTerminus2 without agent execution.
+Three Skill mounting/activation tests and two focused cumulative-budget tests
+also passed remotely.
 The six disposable same-image DNS/apt/uv probes passed. Cache manifests and
 validation.json provide the separate dependency/test evidence above.
 
-Run scripts/prepare_c4_via_desktop.py for original-source fixture preparation,
+Run scripts/fetch_c4_fixture.py to fetch the original shard with resumable
+ranges, copy the completed file to jinan40, then set TB21_C4_SOURCE_FILE to
+that remote path when running scripts/prepare_c4_via_desktop.py. The original
+Hub metadata and unmodified load_dataset call are retained; fresh same-image
+offline lookup and original verifier execution are required before ready.
+Alternatively run scripts/prepare_c4_via_desktop.py for direct preparation,
 then use scripts/desktop_tb21_remote.py recover-e7-verifiers. Restrict slots
 with TB21_RECOVERY_SLOTS=51-2 or 73-1,73-2,73-3. Credentials come from the
 already authorized Desktop environment into process memory via SSH stdin.
