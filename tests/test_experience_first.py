@@ -346,7 +346,12 @@ class ExperienceFirstTests(unittest.TestCase):
         self.assertFalse(record["success"])
         self.assertEqual(record["steps"], 0)
         self.assertIsNone(record["skill_key"])
-        self.assertIsNone(record["error"])
+        self.assertEqual(
+            record["error"],
+            "RuntimeError: progressive Skill selection failed: unparsable",
+        )
+        self.assertIsNone(record["skill_load"])
+        self.assertEqual(record["selection"]["stage"], "select")
         self.assertEqual(record["failure_mode"], "routing_failure")
 
     def test_usage_accumulates_across_restart_and_lock_excludes_second_writer(self):

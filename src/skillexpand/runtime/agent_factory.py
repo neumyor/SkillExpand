@@ -47,8 +47,8 @@ def load_config(benchmark: str = 'alfworld', agent: str = 'expel') -> Any:
     (``ai_name: ${benchmark.ai_name}``, ``agent_type: ${agent.name}``), so the
     resulting object is interchangeable with the ``cfg`` the entry points see.
 
-    Two upstream defaults are overridden, both because this deployment differs
-    from the paper's.  Each override is deliberate and logged:
+    Two upstream defaults are overridden because this deployment differs
+    from the paper's:
 
     *   ``agent.llm`` -- upstream ships ``gpt-3.5-turbo``.  Pointing
         ``EXPE_LLM_BASE_URL`` at a local server is not enough: the *name* is sent
@@ -63,11 +63,8 @@ def load_config(benchmark: str = 'alfworld', agent: str = 'expel') -> Any:
         applied identically to every arm; set ``EXPE_SHOW_ADMISSIBLE=0`` to
         recover ExpeL's original, pristine observation for a comparison run.
 
-    *   ``agent.retrieval_kwargs.embedder_type`` -- upstream ships
-        ``huggingface``, which makes every agent construction download a ~420 MB
-        SentenceTransformer checkpoint.  This experiment must not pull weights
-        onto the local host, so the zero-download lexical backend is the default.
-        See :mod:`skillexpand.runtime.embedders`.
+    The packaged agent config uses the zero-download lexical embedding backend.
+    See :mod:`skillexpand.runtime.embedders` for the optional remote backend.
     """
     import os
 
@@ -90,8 +87,6 @@ def load_config(benchmark: str = 'alfworld', agent: str = 'expel') -> Any:
     task_file = os.environ.get('EXPE_TASK_FILE')
     if task_file:
         bench.task_file = task_file
-
-    ag.retrieval_kwargs.embedder_type = embedders.BACKEND_LEXICAL
 
     return OmegaConf.create({
         'benchmark': bench,
