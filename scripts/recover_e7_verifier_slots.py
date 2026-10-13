@@ -34,7 +34,7 @@ def main():
     os.environ.update(E2B_API_KEY=values['E2B_API_KEY'], OPENAI_API_KEY=values['TB21_METHOD_API_KEY'],
         TB21_METHOD_API_KEY=values['TB21_METHOD_API_KEY'], TB21_EXECUTOR_API_KEY=values['TB21_EXECUTOR_API_KEY'],
         TB21_TASK_VERIFIER_CACHES=json.dumps(VERSIONS),
-        TBENCH_PERSIST_SANDBOXES='0', TB21_TOTAL_WORKER_LIMIT='250')
+        HARBOR_E2B_FS_USER='root', TBENCH_PERSIST_SANDBOXES='0', TB21_TOTAL_WORKER_LIMIT='250')
     relay = selector = None
     with RunLock(ROOT / 'driver.pid'):
         remaining = {}
