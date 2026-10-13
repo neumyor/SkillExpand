@@ -44,7 +44,7 @@ Root: `/data2/liyishan/tbench2-openclaw-min/cache/task-verifiers`.
 | mteb-retrieve | repair-20261013-v2 | passed; injection 744s, original tests 76s |
 | torch-tensor-parallelism | repair-20261013-v2 | passed; injection 603s, original tests 109s |
 | pytorch-model-recovery | repair-20261013-v2 | passed; injection 467s, original tests 76s |
-| reshard-c4-data | repair-20261013-v4 | offline fixture validation pending |
+| reshard-c4-data | repair-20261013-v4 | passed; injection 138s, offline fixture and original tests 25s |
 
 Engineering runs have no agent solution. Their rewards are not benchmark
 scores. Only manifest.status=ready can be enabled. Failed v1/v2 preparations
@@ -70,6 +70,10 @@ Hub URLs and the original data_files argument. Version v4 adds a relative
 cache alias computed through BuilderConfig.create_config_id for that exact
 argument; it references the same Arrow files without modifying the loader or
 verifier. Version v3 stays unpublished and retains its failure evidence.
+Version v4 passed in a fresh task image: the original call loaded all 356,318
+rows with HF_HUB_OFFLINE=1 and HF_DATASETS_OFFLINE=1, then the unmodified
+verifier executed actual pytest outcomes. The cache is ready. E7 C4 requests
+002 were launched for 73-1/2/3 within the original remaining budgets.
 
 ## Recovery incident and budgets
 
