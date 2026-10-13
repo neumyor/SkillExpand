@@ -383,19 +383,19 @@ def install_qd_source_context(loop, root):
             actual = (result.get('verifier_result') or {}).get('rewards', {}).get('reward')
             if actual != attempt['reward']:
                 raise ValueError('QD source reward changed')
-    original = loop._run_batch
-    def run_batch(batch):
-        for eid in batch.get('experience_ids', batch['task_ids']):
-            exp = loop.cards[eid]
+    original = loop._read_evolution_cards
+    def read_cards(round_index):
+        cards = original(round_index)
+        for eid, exp in cards.items():
             context = [{'source_card_id': row['source_card_id'],
                         'source_model': row['source_model'], 'attempts': row['attempts'],
                         'card': P.projection(row['experience_card'])}
                        for row in by_task[exp.task_id]]
-            loop.cards[eid] = replace(exp, experience_card={**exp.experience_card,
+            cards[eid] = replace(exp, experience_card={**exp.experience_card,
                 'source_context': {'policy': 'Original unskilled source trajectories are context, not executions of CURRENT Skill. Unknown rewards remain unknown.',
                                    'cards': context}})
-        return original(batch)
-    loop._run_batch = run_batch
+        return cards
+    loop._read_evolution_cards = read_cards
     write(root / 'l2_source_integration_audit.json', {'passed': True,
           'source_cards': len(supplied), 'source_attempts': sum(len(r['attempts']) for r in sources),
           'source_experience_ids': sorted(identities), 'task_count': len(by_task),

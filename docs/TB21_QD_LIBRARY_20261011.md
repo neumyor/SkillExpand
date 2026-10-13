@@ -1,5 +1,14 @@
 # TB2.1 Qwen + DeepSeek Skill Library
 
+## 2026-10-13 18:35 Asia/Shanghai checkpoint
+
+L2 produced its first batch journal, then replay rejected a missing cached
+hypotheses response because source context was attached only during batch
+generation. Source context is now installed when evolution cards are read, so
+generation and replay use the same evidence identity. Existing responses and
+journal remain intact. Driver 2196909 resumed under the shared lock at 80/250;
+initial 267 valid scores remain unchanged. Focused aligned checks: 13 passed.
+
 ## 2026-10-13 17:27 Asia/Shanghai checkpoint
 
 The corrected initial panel is complete: 267 accepted unique slots and a passing
