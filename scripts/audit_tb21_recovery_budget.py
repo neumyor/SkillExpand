@@ -41,9 +41,19 @@ def main():
         limit = 6 if slot == '77-3' else 3
         active = [p.name for p in requests if not list(p.glob('jobs/*/*/result.json'))
                   and not (p / 'error.json').exists()]
+        record = json.loads((e7 / 'slots' / slot / 'record.json').read_text())
+        accepted = False
+        if record.get('status') == 'valid':
+            from summarize_tb21_empirical import validate_trial
+            try:
+                validate_trial(record['result_path'], record['task_name'], activation=True)
+                accepted = True
+            except (ValueError, OSError, KeyError):
+                pass
         rows.append({'slot': slot, 'requests_used': len(requests), 'request_limit': limit,
-                     'remaining': max(0, limit - len(requests)), 'active_requests': active,
-                     'reason': 'active_request' if active else 'budget_exhausted' if len(requests) >= limit else 'within_budget'})
+                     'remaining': 0 if accepted else max(0, limit - len(requests)), 'active_requests': active,
+                     'accepted': accepted,
+                     'reason': 'accepted_no_dispatch' if accepted else 'active_request' if active else 'budget_exhausted' if len(requests) >= limit else 'within_budget'})
     job = args.jobs / 'tb21_e8_deepseek_max_1m_raw_20261012'
     audit = json.loads((e8 / 'execution_audit.json').read_text())
     payload = {'E7': rows, 'E8': e8_rows(job, args.jobs / 'e8_retry_archives', audit['rejected'],

@@ -89,6 +89,12 @@ their remaining budgets. The standalone recovery launcher supports --slots.
 It uses driver.pid and the shared 250-worker reservation lock. Initial source,
 selection, activation, body and verifier evidence must all pass before L2.
 
+E7 51-2 request 002 recovered a real reward of 1 with two passing original
+tests, valid Qwen trajectory, selected Skill activation/body and ready cache
+evidence (injection 459 seconds). Strict coverage advanced to 263/267.
+The initial full gate still fails on the three C4 slots and 77-3; workers are
+released and L2 stays locked. Do not rerun accepted 51-2.
+
 Recompute `runs/verifier_recovery_budget_20261013.json` using
 scripts/audit_tb21_recovery_budget.py. Retained recovery reservations count
 even when cancellation produces no reward. E5 stays stopped; E9 and completed
