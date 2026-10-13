@@ -383,11 +383,14 @@ def install_qd_source_context(loop, root):
             actual = (result.get('verifier_result') or {}).get('rewards', {}).get('reward')
             if actual != attempt['reward']:
                 raise ValueError('QD source reward changed')
-    original = loop._read_evolution_cards
-    def read_cards(round_index):
-        cards = original(round_index)
-        return dict(zip(cards, TS.with_source_context(root, cards.values())))
-    loop._read_evolution_cards = read_cards
+    original = loop._run_batch
+    def run_batch(batch):
+        ids = batch.get('experience_ids', batch['task_ids'])
+        values = TS.with_source_context(root, [loop.cards[eid] for eid in ids])
+        for eid, value in zip(ids, values):
+            loop.cards[eid] = value
+        return original(batch)
+    loop._run_batch = run_batch
     write(root / 'l2_source_integration_audit.json', {'passed': True,
           'source_cards': len(supplied), 'source_attempts': sum(len(r['attempts']) for r in sources),
           'source_experience_ids': sorted(identities), 'task_count': len(by_task),
@@ -533,7 +536,11 @@ def execute(args, root):
                     if (changed - {'l2/audit.py', 'benchmarks/task_skill.py'}
                             or not read(root / 'l2_source_integration_audit.json').get('passed')):
                         raise ValueError('Unapproved L2 compatibility code change')
-                    freeze(root / 'l2_manifest.before-source-replay-repair.json', manifest)
+                    backup = root / 'l2_manifest.before-source-replay-repair.json'
+                    if not backup.exists():
+                        freeze(backup, manifest)
+                    else:
+                        freeze(root / f'l2_manifest.before-source-replay-{os.getpid()}.json', manifest)
                     write(root / 'l2_source_replay_compatibility.json', {
                         'changed_files': sorted(changed), 'original_code': manifest['code'],
                         'current_code': current_code, 'budgets_reset': False,

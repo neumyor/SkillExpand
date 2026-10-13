@@ -169,7 +169,6 @@ def audit_round(root, round_index):
         require(progressive and split['benchmark'] == 'terminalbench',
                 'external task-Skill cards require progressive TerminalBench')
         cards = TS.read_cards(root, round_index, list(heads.values()), train)
-        cards = {eid: exp for eid, exp in zip(cards, TS.with_source_context(root, cards.values()))}
         expected_evidence = tuple(manifest['experience_ids'])
     else:
         require({p.name for p in (directory / 'cards').glob('*.json')} ==
