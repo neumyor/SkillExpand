@@ -175,6 +175,24 @@ if alias != config_dir and not alias.exists():
     alias.symlink_to(config_dir.name, target_is_directory=True)
 print('offline_config', offline_id)
 '''
+        if source:
+            fixture = '''import os
+from pathlib import Path
+from datasets import BuilderConfig, load_dataset
+offline_id = BuilderConfig('default').create_config_id(
+    config_kwargs={'data_files': {'train': ['en/c4-train.00009-of-01024.json.gz']}},
+    custom_features=None)
+root = Path(os.environ['HF_HOME']) / 'datasets/allenai___c4'
+configs = [p for p in root.iterdir() if p.is_dir() and not p.is_symlink()]
+if len(configs) != 1:
+    raise ValueError('Original C4 config is ambiguous')
+alias = root / offline_id
+if not alias.exists():
+    alias.symlink_to(configs[0].name, target_is_directory=True)
+d = load_dataset('allenai/c4', data_files={'train':['en/c4-train.00009-of-01024.json.gz']}, split='train')
+print('fixture_rows', len(d), 'offline_config', offline_id)
+'''
+            env.update(HF_DATASETS_OFFLINE='1', HF_HUB_OFFLINE='1')
         args = [str(payload / 'bin/uvx'), '-p', '3.13']
         for requirement in REQUIREMENTS[name]:
             args += ['-w', requirement]
