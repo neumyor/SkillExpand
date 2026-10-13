@@ -161,6 +161,20 @@ print('fixture_rows', len(d))
             env.update(HTTPS_PROXY=os.environ['TB21_FIXTURE_PROXY'],
                        HTTP_PROXY=os.environ['TB21_FIXTURE_PROXY'], HF_ENDPOINT='https://huggingface.co')
             fixture = "from datasets import load_dataset; d=load_dataset('allenai/c4',data_files={'train':['en/c4-train.00009-of-01024.json.gz']},split='train'); print('fixture_rows',len(d))"
+        # Online resolution uses Hub URLs, while the offline builder uses the
+        # original data_files argument. Index the same Arrow data under both.
+        fixture += '''
+from pathlib import Path
+from datasets import BuilderConfig
+offline_id = BuilderConfig('default').create_config_id(
+    config_kwargs={'data_files': {'train': ['en/c4-train.00009-of-01024.json.gz']}},
+    custom_features=None)
+config_dir = Path(d.cache_files[0]['filename']).parents[2]
+alias = config_dir.parent / offline_id
+if alias != config_dir and not alias.exists():
+    alias.symlink_to(config_dir.name, target_is_directory=True)
+print('offline_config', offline_id)
+'''
         args = [str(payload / 'bin/uvx'), '-p', '3.13']
         for requirement in REQUIREMENTS[name]:
             args += ['-w', requirement]

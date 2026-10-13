@@ -13,7 +13,7 @@ from summarize_tb21_empirical import read, write
 
 ROOT = Path('/data2/liyishan/SkillExpand-tb21/SkillExpand/runs/tb21-qwen-deepseek-library-qwen-selector-20261011/revisions/178-cards-v1')
 SLOTS = ['51-2', '73-1', '73-2', '73-3']
-VERSIONS = {'mteb-retrieve': 'repair-20261013-v2', 'reshard-c4-data': 'repair-20261013-v3'}
+VERSIONS = {'mteb-retrieve': 'repair-20261013-v2', 'reshard-c4-data': 'repair-20261013-v4'}
 
 
 def main():

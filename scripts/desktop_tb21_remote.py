@@ -32,7 +32,7 @@ if sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache'):
     else:
         command = ['/data2/liyishan/tbench2-openclaw-min/.venv/bin/python',
                    adapter + '/prepare_task_verifier_cache.py', '--credential-pid', str(os.getpid()),
-                   '--version', 'repair-20261013-v3', '--resume-assembly', 'reshard-c4-data']
+                   '--version', env.get('TB21_C4_CACHE_VERSION', 'repair-20261013-v4'), '--resume-assembly', 'reshard-c4-data']
     os.execvpe(command[0], command, os.environ)
 elif sys.argv[1] == 'resume-e9':
     sys.argv = [repo + '/scripts/resume_tb21_e9.py']

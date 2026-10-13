@@ -44,7 +44,7 @@ Root: `/data2/liyishan/tbench2-openclaw-min/cache/task-verifiers`.
 | mteb-retrieve | repair-20261013-v2 | passed; injection 744s, original tests 76s |
 | torch-tensor-parallelism | repair-20261013-v2 | passed; injection 603s, original tests 109s |
 | pytorch-model-recovery | repair-20261013-v2 | passed; injection 467s, original tests 76s |
-| reshard-c4-data | repair-20261013-v3 | fixture preparation pending |
+| reshard-c4-data | repair-20261013-v4 | offline fixture validation pending |
 
 Engineering runs have no agent solution. Their rewards are not benchmark
 scores. Only manifest.status=ready can be enabled. Failed v1/v2 preparations
@@ -63,6 +63,13 @@ pagination then returned invalid JSON/403. A temporary desktop SSH proxy can
 prepare original public-source data. The formal verifier must subsequently
 load the cache offline in a fresh same-image sandbox; the proxy is not used
 in formal evaluation. Hidden verifier data is injected only after agent work.
+
+The original shard contains 356,318 rows. Version v3 failed the fresh offline
+lookup because datasets 3.6 computes different configuration IDs from resolved
+Hub URLs and the original data_files argument. Version v4 adds a relative
+cache alias computed through BuilderConfig.create_config_id for that exact
+argument; it references the same Arrow files without modifying the loader or
+verifier. Version v3 stays unpublished and retains its failure evidence.
 
 ## Recovery incident and budgets
 
