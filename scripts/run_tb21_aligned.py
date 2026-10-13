@@ -530,6 +530,17 @@ def execute(args, root):
             # Ephemeral relay replacement is operational, not a new scoring protocol.
             if (root / "l2_manifest.json").exists():
                 manifest = read(root / "l2_manifest.json")
+                worker_fields = ('evolve_l1_workers', 'l2_review_workers')
+                previous_workers = {key: manifest['config'][key] for key in worker_fields}
+                if any(value != args.workers for value in previous_workers.values()):
+                    if not args.accept_worker_change:
+                        raise ValueError('L2 worker transition requires explicit authorization')
+                    freeze(root / f'l2_manifest.before-worker-change-{os.getpid()}.json', manifest)
+                    write(root / 'l2_worker_transition.json', {
+                        'previous': previous_workers, 'current': args.workers,
+                        'budgets_reset': False, 'task_card_skill_inputs_preserved': True})
+                    for key in worker_fields:
+                        manifest['config'][key] = args.workers
                 current_code = code_signature()
                 changed = {key for key in set(manifest['code']) | set(current_code)
                            if manifest['code'].get(key) != current_code.get(key)}
