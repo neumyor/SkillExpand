@@ -1,5 +1,24 @@
 # TB2.1 Qwen + DeepSeek Skill Library
 
+## 2026-10-13 17:27 Asia/Shanghai checkpoint
+
+The corrected initial panel is complete: 267 accepted unique slots and a passing
+execution audit. The generation-source audit remains passing. L2 source-context
+integration was verified against 178 source-qualified cards, 534 attempts, raw
+model/trajectory/reward evidence and initial Skill provenance. The same task's
+two original unskilled cards are supplied as labeled context alongside each
+executed Skill card; they are not treated as executions of the current Skill.
+The source integration audit is persisted in l2_source_integration_audit.json.
+
+L2-only driver 1663947 launched under the shared lock with 80/250 reserved.
+No new initial requests or budget reset was performed. L2 round/journal audits,
+frozen actual heads including retained v0, and independent final 267-slot
+evaluation remain pending. Focused aligned tests: 13 passed.
+
+E8 remains accepted at 267/267. E9 evaluation 1519252 remains alive; its initial
+states currently show 43 completed, 43 initial_failed and three blocked, with
+no completed Ralph rounds yet. These states are not final experiment scores.
+
 Independent run: `runs/tb21-qwen-deepseek-library-qwen-selector-20261011`.
 
 ## Corrected revision (2026-10-12)

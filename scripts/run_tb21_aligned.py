@@ -363,6 +363,45 @@ def collect_cards(root, tasks, skills, model):
           "initial_library_execution": True, "not_final_library_empirical": True})
 
 
+def install_qd_source_context(loop, root):
+    from propose_terminalbench_library import _cards
+    supplied = _cards(root)
+    audit = read(root / 'generation_source_audit.json')
+    if not audit.get('passed') or not read(root / 'execution_audit.json').get('passed'):
+        raise ValueError('QD source context requires generation and initial execution audits')
+    sources = read(root / 'source_cards.json')
+    by_task = {task: [row for row in sources if row['task_id'] == task] for task in range(89)}
+    if any(len(rows) != 2 for rows in by_task.values()):
+        raise ValueError('QD source context requires both model cards per task')
+    identities = {row['experience_id'] for row in sources}
+    _, _, skills, _ = load_cold_start(root)
+    if any(set(skill.provenance.source_experience_ids) != identities for skill in skills):
+        raise ValueError('QD initial Skill provenance differs from source cards')
+    for source in sources:
+        for attempt in source['attempts']:
+            result = read(attempt['result_path'])
+            actual = (result.get('verifier_result') or {}).get('rewards', {}).get('reward')
+            if actual != attempt['reward']:
+                raise ValueError('QD source reward changed')
+    original = loop._run_batch
+    def run_batch(batch):
+        for eid in batch.get('experience_ids', batch['task_ids']):
+            exp = loop.cards[eid]
+            context = [{'source_card_id': row['source_card_id'],
+                        'source_model': row['source_model'], 'attempts': row['attempts'],
+                        'card': P.projection(row['experience_card'])}
+                       for row in by_task[exp.task_id]]
+            loop.cards[eid] = replace(exp, experience_card={**exp.experience_card,
+                'source_context': {'policy': 'Original unskilled source trajectories are context, not executions of CURRENT Skill. Unknown rewards remain unknown.',
+                                   'cards': context}})
+        return original(batch)
+    loop._run_batch = run_batch
+    write(root / 'l2_source_integration_audit.json', {'passed': True,
+          'source_cards': len(supplied), 'source_attempts': sum(len(r['attempts']) for r in sources),
+          'source_experience_ids': sorted(identities), 'task_count': len(by_task),
+          'initial_valid_slots': 267, 'mode': 'same-task two-model source context plus executed Skill card'})
+
+
 def reserve(root, stage, workers):
     # Serialize check + publication so simultaneous E3/E5 launches cannot overbook.
     runs = next((p for p in root.parents if p.name == 'runs'), root.parent)
@@ -506,6 +545,8 @@ def execute(args, root):
                 predicted_review_scope="val", progressive_library=True, acceptance_panel="all_train",
                 external_experience_format=TS.FORMAT))
             install_review_budget(loop, root, tasks)
+            if args.stage == 'QD':
+                install_qd_source_context(loop, root)
             result = loop.run_evolutions(1)
             if result["status"] != "complete" or result["invalid_batches"]:
                 raise ValueError("Evolution journal incomplete")

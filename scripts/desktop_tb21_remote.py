@@ -55,7 +55,7 @@ elif sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-ca
 elif sys.argv[1] == 'resume-e9':
     sys.argv = [repo + '/scripts/resume_tb21_e9.py']
     runpy.run_path(sys.argv[0], run_name='__main__')
-elif sys.argv[1] == 'resume-e7':
+elif sys.argv[1] in ('resume-e7', 'l2-e7'):
     import fcntl, subprocess, time
     from pathlib import Path
     from run_tb21_empirical import active_worker_reservation
@@ -68,6 +68,8 @@ elif sys.argv[1] == 'resume-e7':
         '--qwen-source', read(root / 'alignment.json')['sources'][1],
         '--task-file', read(root / 'alignment.json')['task_file'], '--workers', '16',
         '--initial-only', '--initial-slots', '77-3']
+    if sys.argv[1] == 'l2-e7':
+        command = command[:-3] + ['--l2-only']
     with (Path(repo) / 'runs/.tb21-worker-reservations.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         for proc in Path('/proc').iterdir():
@@ -117,7 +119,7 @@ else:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7',
+    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7', 'l2-e7',
                                          'recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache', 'reset-e8'])
     args = parser.parse_args()
     desktop = Path.home() / 'Desktop'

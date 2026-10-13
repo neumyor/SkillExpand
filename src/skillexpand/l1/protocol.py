@@ -182,4 +182,7 @@ def projection(card):
     """One compact, deterministic card view shared by discovery and editing."""
     if card['schema_version'] != 5:
         raise ValueError('Only fresh schema-5 cards are supported')
-    return {k: card[k] for k in ('card_id', 'task', 'execution', 'evidence', 'claims', 'claim_status')}
+    value = {k: card[k] for k in ('card_id', 'task', 'execution', 'evidence', 'claims', 'claim_status')}
+    if 'source_context' in card:
+        value['source_context'] = card['source_context']
+    return value
