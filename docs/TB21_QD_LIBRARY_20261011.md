@@ -1,5 +1,19 @@
 # TB2.1 Qwen + DeepSeek Skill Library
 
+## L2 Replay Compatibility Repair, 2026-10-13
+
+The first L2 batch produced a journal, but replay loaded the base execution
+cards without the source context used during proposal generation. This changed
+the proposal cache identity and stopped the driver with
+`Missing cached L2 response: hypotheses.json`. Generation, batch replay and
+round auditing now share the same source-context projection. The existing real
+journal replay passes offline; no candidate or validation budget was reset.
+The focused source-context regression and aligned checks pass (14 tests).
+Older task-Skill fixture checks still fail because they omit the verifier reward
+files required by the existing strict validator; those checks are not claimed
+passing. Driver 2220724 is an existing L2-only recovery; duplicate launch was
+correctly rejected by the process guard.
+
 ## 2026-10-13 18:35 Asia/Shanghai checkpoint
 
 L2 produced its first batch journal, then replay rejected a missing cached

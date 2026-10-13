@@ -386,15 +386,7 @@ def install_qd_source_context(loop, root):
     original = loop._read_evolution_cards
     def read_cards(round_index):
         cards = original(round_index)
-        for eid, exp in cards.items():
-            context = [{'source_card_id': row['source_card_id'],
-                        'source_model': row['source_model'], 'attempts': row['attempts'],
-                        'card': P.projection(row['experience_card'])}
-                       for row in by_task[exp.task_id]]
-            cards[eid] = replace(exp, experience_card={**exp.experience_card,
-                'source_context': {'policy': 'Original unskilled source trajectories are context, not executions of CURRENT Skill. Unknown rewards remain unknown.',
-                                   'cards': context}})
-        return cards
+        return dict(zip(cards, TS.with_source_context(root, cards.values())))
     loop._read_evolution_cards = read_cards
     write(root / 'l2_source_integration_audit.json', {'passed': True,
           'source_cards': len(supplied), 'source_attempts': sum(len(r['attempts']) for r in sources),

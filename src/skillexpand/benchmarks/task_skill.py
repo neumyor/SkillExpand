@@ -1,11 +1,41 @@
 """External Harbor evidence indexed by original task and executed Skill version."""
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from skillexpand import schema as S
 from skillexpand.benchmarks.terminalbench import audit_harbor_experience
 
 FORMAT = 'task-skill-v1'
+
+
+def with_source_context(root, experiences):
+    """Share the audited source context between generation and offline replay."""
+    root = Path(root)
+    audit_path = root / 'l2_source_integration_audit.json'
+    if not audit_path.exists():
+        return list(experiences)
+    from skillexpand.l1.protocol import projection
+    audit = read(audit_path)
+    sources = read(root / 'source_cards.json')
+    if (not audit.get('passed') or len(sources) != 178
+            or sorted(row['experience_id'] for row in sources) != audit['source_experience_ids']):
+        raise ValueError('Source context differs from integration audit')
+    result = []
+    for exp in experiences:
+        context = [{'source_card_id': row['source_card_id'],
+                    'source_model': row['source_model'], 'attempts': row['attempts'],
+                    'card': projection(row['experience_card'])}
+                   for row in sources if row['task_id'] == exp.task_id]
+        if len(context) != 2:
+            raise ValueError('Missing two-model source context')
+        value = {'policy': 'Original unskilled source trajectories are context, not executions of CURRENT Skill. Unknown rewards remain unknown.',
+                 'cards': context}
+        if ('source_context' in exp.experience_card
+                and exp.experience_card['source_context'] != value):
+            raise ValueError('Cached source context differs')
+        result.append(replace(exp, experience_card={**exp.experience_card, 'source_context': value}))
+    return result
 
 
 def read(path):

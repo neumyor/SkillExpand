@@ -25,6 +25,7 @@ def require(condition, message):
 def audit_batch(root, batch, base, cards):
     """Replay cached decisions without any model, environment, or file writes."""
     root = Path(root)
+    cards = TS.with_source_context(root, cards)
     records = ST.read_jsonl(root / 'meta_skills.jsonl', repair_tail=False)
     require(len(records) == 1 and records[0]['version'] == 0, 'L3 must stay frozen')
     meta = S.from_dict(S.MetaSkill, records[0])
@@ -168,6 +169,7 @@ def audit_round(root, round_index):
         require(progressive and split['benchmark'] == 'terminalbench',
                 'external task-Skill cards require progressive TerminalBench')
         cards = TS.read_cards(root, round_index, list(heads.values()), train)
+        cards = {eid: exp for eid, exp in zip(cards, TS.with_source_context(root, cards.values()))}
         expected_evidence = tuple(manifest['experience_ids'])
     else:
         require({p.name for p in (directory / 'cards').glob('*.json')} ==
