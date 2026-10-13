@@ -58,6 +58,24 @@ elif sys.argv[1] == 'resume-e9':
 elif sys.argv[1] == 'hkuds-e9':
     sys.argv = [repo + '/scripts/launch_hkuds_upskill_tb21.py']
     runpy.run_path(sys.argv[0], run_name='__main__')
+elif sys.argv[1] == 'final-e7':
+    import fcntl, subprocess
+    from pathlib import Path
+    from run_tb21_empirical import active_worker_reservation
+    root = Path(repo) / 'runs/tb21-qwen-deepseek-library-qwen-selector-20261011/revisions/178-cards-v1'
+    out = Path(repo) / 'runs/tb21-qwen-deepseek-library-qwen-selector-20261011/revisions/178-cards-v1-final-empirical-20261013'
+    os.environ.update(PYTHONPATH=repo + '/src', TB21_TOTAL_WORKER_LIMIT='250', TBENCH_RELAY_MAX_CONCURRENCY='50',
+                      TB21_EXECUTOR_API_KEY=env['TB21_EXECUTOR_API_KEY'])
+    command = [sys.executable, repo + '/scripts/run_tb21_empirical.py', '--source', str(root), '--run-dir', str(out),
+               '--workers', '64', '--stage', 'QD_FINAL', '--executor-model', 'qwen3.6-flash-distill',
+               '--selector-model', 'qwen3.6-flash-distill']
+    with (Path(repo) / 'runs/.tb21-worker-reservations.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        reserved, _ = active_worker_reservation(Path(repo) / 'runs', out)
+        if reserved + 64 > 250: raise SystemExit(f'Capacity unavailable: {reserved}+64')
+        with (out.parent / 'final-driver.log').open('a') as log:
+            child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        print(json.dumps({'pid': child.pid, 'reserved': reserved + 64, 'run_dir': str(out)}))
 elif sys.argv[1] in ('resume-e7', 'l2-e7'):
     import fcntl, subprocess, time
     from pathlib import Path
@@ -129,7 +147,7 @@ else:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7', 'l2-e7', 'hkuds-e9',
+    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7', 'l2-e7', 'final-e7', 'hkuds-e9',
                                          'recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache', 'reset-e8'])
     args = parser.parse_args()
     desktop = Path.home() / 'Desktop'
