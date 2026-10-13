@@ -75,6 +75,8 @@ def main():
                 raise RuntimeError('Capacity unavailable')
             if (ROOT / 'status.json').exists():
                 raise RuntimeError('Reset epoch already launched')
+            write_json(ROOT / 'manifest.json', {'workers': len(rows),
+                'stage': 'E8_authorized_reset', 'model': 'deepseek-v4-flash-0731'})
             write_json(ROOT / 'status.json', {'status': 'running', 'pid': os.getpid(),
                 'workers': len(rows), 'missing_trials': len(rows), 'total_reserved': reserved + len(rows)})
         try:
