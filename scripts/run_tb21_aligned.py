@@ -238,8 +238,14 @@ def run_slot(root, cfg, skills, tasks, transport, task, attempt, model, selector
     path = root / f"slots/{task:02d}-{attempt}/record.json"
     if path.exists() and read(path).get("status") == "valid":
         record = read(path)
-        validate_trial(record["result_path"], tasks[task]["task_name"], activation=True, model=model)
-        return record
+        try:
+            validate_trial(record["result_path"], tasks[task]["task_name"], activation=True, model=model)
+        except ValueError:
+            rejected = path.parent / "record.before-verifier-rejection.json"
+            if not rejected.exists():
+                write(rejected, record)
+        else:
+            return record
     request_root = path.parent / "requests"
     request_root.mkdir(parents=True, exist_ok=True)
     for retry in range(3):
@@ -475,7 +481,10 @@ def execute(args, root):
                 if not all(read(root / f"slots/{t:02d}-{a}/record.json")["status"] == "valid" for t, a in canaries):
                     raise ValueError("Canary failed; full panel locked")
                 write(root / "canary.json", {"passed": True, "slots": canaries, "reused": True})
-                batch([(t, a) for t in range(89) for a in (1, 2, 3) if (t, a) not in canaries], "skill_rollouts")
+                slots = ([(int(slot.split('-')[0]), int(slot.split('-')[1]))
+                          for slot in args.initial_slots] if getattr(args, 'initial_slots', None)
+                         else [(t, a) for t in range(89) for a in (1, 2, 3)])
+                batch([slot for slot in slots if slot not in canaries], "skill_rollouts")
             collect_cards(root, tasks, skills, identity["executor_model"])
             if getattr(args, 'initial_only', False):
                 write(root / 'status.json', {'stage': args.stage, 'status': 'initial_panel_complete',
@@ -537,7 +546,17 @@ def main():
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument('--l2-only', action='store_true', help='Require accepted slots; never execute new L1 requests')
     parser.add_argument('--initial-only', action='store_true')
+    parser.add_argument('--initial-slots', nargs='+', help='Target missing initial slots while retaining the full audit barrier')
     args = parser.parse_args()
+    if args.initial_slots:
+        if not args.initial_only or args.l2_only:
+            parser.error('Targeted initial slots require --initial-only')
+        try:
+            slots = [tuple(map(int, slot.split('-'))) for slot in args.initial_slots]
+            if len(set(slots)) != len(slots) or any(len(s) != 2 or not 0 <= s[0] < 89 or s[1] not in (1, 2, 3) for s in slots):
+                raise ValueError('invalid slots')
+        except ValueError:
+            parser.error('Initial slots must be unique task-attempt identities')
     if (not 1 <= args.workers <= total_worker_limit() or
             (args.stage in ("E5", "E6", "QD") and args.qwen_source is None) or
             (args.stage != "E6" and args.deepseek_source is None)):

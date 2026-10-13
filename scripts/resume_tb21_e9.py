@@ -38,8 +38,11 @@ else:
     if not readiness['safe_to_open_run']:
         raise SystemExit('Owned rollout children remain active')
     env = os.environ.copy()
-    source = dict(v.split('=', 1) for v in Path('/proc/2320647/environ').read_bytes().decode().split('\0') if '=' in v)
-    env.update(AGENTBREW_TEACHER_KEY=source['OPENAI_API_KEY'],
+    source = env
+    if not all(source.get(k) for k in ('TB21_METHOD_API_KEY', 'TB21_EXECUTOR_API_KEY', 'E2B_API_KEY')):
+        source = dict(v.split('=', 1) for v in Path('/proc/2320647/environ').read_bytes().decode().split('\0') if '=' in v)
+    method_key = source.get('TB21_METHOD_API_KEY') or source['OPENAI_API_KEY']
+    env.update(AGENTBREW_TEACHER_KEY=method_key,
         TBENCH_LLM_KEY=source['TB21_EXECUTOR_API_KEY'], OPENAI_API_KEY=source['TB21_EXECUTOR_API_KEY'],
         E2B_API_KEY=source['E2B_API_KEY'], E2B_DOMAIN='ap-beijing.tencentags.com',
         TBENCH_E2B_RELAY_TEMPLATE='sdt-28lb4d9k', TBENCH_E2B_RELAY_USE_TEMPLATE_DEFAULT='1',
@@ -58,12 +61,12 @@ else:
         recovery = REG / 'permission_recovery.json'
         if recovery.exists():
             shutil.copy2(recovery, REG / f'permission_recovery-{time.time_ns()}.json')
-        write(recovery, {'reason': 'embedding vector cache existing-file read permission',
+        write(recovery, {'reason': 'resume with retained verifier-stall classification repair and authorized credentials',
             'prior_status': prior, 'budget_resets': 0, 'config_changed': False,
             'safe_to_open_run': True, 'other_reserved': reserved})
         with (OUT / 'permission-resume.log').open('a') as log:
             p = subprocess.Popen([sys.executable, __file__, '--worker'], env=env, cwd=ROOT,
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         write(REG / 'status.json', {'stage': 'E9', 'status': 'running', 'pid': p.pid,
-            'workers': 64, 'phase': 'resume_after_cache_permission_fix', 'output_root': str(OUT)})
+            'workers': 64, 'phase': 'resume_after_verifier_stall_repair', 'output_root': str(OUT)})
         print(json.dumps({'supervisor_pid': p.pid, 'total_reserved': reserved + 64}))

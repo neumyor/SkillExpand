@@ -36,6 +36,23 @@ def test_raw_timeout_preserves_unknown_reward_and_unique_source_keys(tmp_path):
         aligned.source_rows(tmp_path, [{"task_name": "task"}], "deepseek")
 
 
+def test_rejected_old_slot_retains_history_and_gets_three_new_requests(tmp_path, monkeypatch):
+    path = tmp_path / 'slots/00-1/record.json'
+    prior = {'status': 'valid', 'result_path': 'old', 'reward': 0}
+    aligned.write(path, prior)
+    requests = path.parent / 'requests'
+    for index in range(1, 4):
+        (requests / f'{index:03d}').mkdir(parents=True)
+    def reject(*args, **kwargs):
+        raise ValueError('missing_verifier_test_outcome')
+    monkeypatch.setattr(aligned, 'validate_trial', reject)
+    monkeypatch.setattr(aligned, 'select_and_load', reject)
+    aligned.run_slot(tmp_path, None, [], [{'task_name': 'task', 'instruction': 'task'}],
+                     None, 0, 1, aligned.QWEN)
+    assert aligned.read(path.parent / 'record.before-verifier-rejection.json') == prior
+    assert sorted(p.name for p in requests.iterdir()) == ['001', '002', '003', '004', '005', '006']
+
+
 def test_mixed_evidence_is_balanced_without_source_substitution(tmp_path):
     rows = []
     for model, steps in [("qwen", 4), ("deepseek", 1)]:

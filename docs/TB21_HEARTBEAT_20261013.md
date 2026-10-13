@@ -1,5 +1,47 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 10:13 Asia/Shanghai heartbeat
+
+Corrected the earlier E7 retry-budget interpretation: three new requests are
+allowed per slot per launch, retaining all cumulative history. Three historical
+requests do not permanently exhaust E7. Recovery now preserves rejected old
+records before retrying, and supports a targeted initial slot list without
+bypassing the complete initial/L2 audit barrier.
+
+Both authorized Desktop role keys were verified through Tencent sandbox
+requests (Qwen executor/selector and DeepSeek method); credentials were sent
+over SSH stdin into process memory only. E7 resumed only slot 77-3 with driver
+606643 and request 004 actually created. The first launcher failed before any
+request because PYTHONPATH was missing; its launch metadata and log remain,
+and the corrected launcher uses the repository source path. Strict accepted
+coverage remains 262/267 pending new verifier evidence. Other unresolved slots
+51-2 and 73-1/2/3 are not retried yet: mirror DNS failure and an unavailable
+Hugging Face C4 fixture cache configuration need infrastructure work. L2 stays
+locked; no old parent scores or completions are imported.
+
+E9 resumed its original contract after owned-child readiness and shared capacity
+checks. Supervisor 603772, remote driver 603806 and fresh evaluation 607827
+were verified live; fresh preflight passed. The second
+configure-git-webserver physical attempt now has child.json, driver.log and a
+jobs directory. This is execution launch evidence, not task completion.
+The repaired first physical attempt and its original
+backup are retained. Three exhausted infrastructure tasks still block teaching;
+no additional attempts or contract changes are made for those tasks.
+
+E9 initial audit is now based on raw verifier results, identity, model,
+trajectory and executed test outcomes, with all 89 expected tasks represented:
+40 success, 42 failure, 7 missing. The seven include two RuntimeError framework
+zeros, three exhausted infrastructure tasks, configure-git-webserver's missing
+state, and reshard-c4-data's fixture setup error. The old initial audit is
+backed up; raw states are unchanged. No Ralph, freeze, test or vanilla acceptance.
+
+Shared active reservation at launch was 80/250 (E9 64 plus E7 16). E8 remains
+audited_incomplete at 254/267; Final supplementary gaps remain unresolved and
+those panels are not rerun. E5 stays user-stopped. All conclusions are closed-set.
+Automation remains active.
+Focused remote validation passed 13 tests covering aligned recovery and the
+E9 raw-verifier audit, including framework-zero and absent-state handling.
+
 ## 2026-10-13 08:13 Asia/Shanghai heartbeat
 
 E7 remains stopped at the initial-only barrier. The strict supplementary audit
