@@ -1,5 +1,25 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 08:13 Asia/Shanghai heartbeat
+
+E7 remains stopped at the initial-only barrier. The strict supplementary audit
+now accepts 262 scores; four records with reported zero lack executed verifier
+test outcomes and remain unresolved. Slot 77-3 has three retained requests,
+no reward, and is excluded. No L2 or fourth request was started.
+
+E9 remains stopped after the initial barrier with 88/89 state records and
+three blocked infrastructure tasks. The manually terminated
+configure-git-webserver verifier was reclassified using the approved evidence
+repair: its original `result.json` was backed up, then marked
+`infra=true`, `infra_retryable`, `reward=null`; no attempt or budget was added.
+The normal E9 resume can consume only the remaining configured physical
+attempt, but no active credential process is available in this heartbeat, so
+resume was not launched. circuit-fibsqrt, schemelike-metacircular-eval and
+gpt2-codegolf remain exhausted after two TimeoutException attempts.
+
+E8 remains audited_incomplete at 254/267 strict scores and 13 unknowns. E5 is
+untouched and stopped. All conclusions remain closed-set.
+
 ## 2026-10-13 07:16 Asia/Shanghai heartbeat
 
 E7 initial-only driver stopped with `needs_attention` because strict valid
