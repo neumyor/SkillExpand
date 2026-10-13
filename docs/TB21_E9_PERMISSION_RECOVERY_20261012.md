@@ -1,5 +1,16 @@
 # E9 cache permission recovery
 
+2026-10-13 11:16 Asia/Shanghai: the latest original-contract resume completed
+configure-git-webserver on its second configured physical attempt with actual
+verifier reward 1. All 89 initial states exist. Raw-verifier review accepts
+41 successes, 42 failures and six unknowns; framework-filled zeros and fixture
+setup errors remain unknown. The initial audit preserves its prior backup.
+The evaluation then exited with BatchBlockedError naming circuit-fibsqrt,
+gpt2-codegolf and schemelike-metacircular-eval, whose two infrastructure attempts
+are exhausted. No teaching, freeze, test or vanilla phase started. Repeated
+resume cannot clear those budgets, and no contract change or extra attempt is
+made. See the current status and initial audit in the shared E9 registration.
+
 2026-10-13 01:16 heartbeat: the resumed evaluation exited while reading an
 existing vector JSON file with owner-only mode 0600. Its evaluation log is
 `launches/b16e3d669bbf43d3863d93ff6cee48ab/evaluation.log`; this was a cache

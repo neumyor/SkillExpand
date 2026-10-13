@@ -1,5 +1,36 @@
 # TB2.1 heartbeat checkpoint
 
+## 2026-10-13 11:16 Asia/Shanghai heartbeat
+
+E7 targeted slot 77-3 request 004 ended with TimeoutException and no reward.
+Request 005 now has an actual raw_model_requests.jsonl; driver 606643 remains
+alive in skill_rollouts. Existing requests 001-004 are retained. This launch
+still allows at most three new requests (004-006); no valid slot is repeated.
+Strict accepted initial coverage remains 262/267, and L2 stays locked. DNS and
+C4 fixture-cache gaps at 51-2 and 73-1/2/3 remain unresolved and are not retried.
+
+E9 configure-git-webserver physical_networkfix_02 completed with real verifier
+reward 1. The original first-attempt evidence and repair backup remain intact.
+All 89 initial task states now exist. Refreshed initial_audit.json accepts
+41 successes and 42 failures, retaining six missing outcomes: three exhausted
+infrastructure tasks, two RuntimeError framework-zero records and one C4
+fixture setup error. The old audit is preserved in its backup.
+
+The resumed E9 supervisor and evaluator exited with code 1. Its evaluation
+log explicitly reports the initial barrier blocked by circuit-fibsqrt,
+gpt2-codegolf and schemelike-metacircular-eval. No Ralph, curation, frozen
+memory, memory-enhanced test or vanilla evaluation has run. Another resume
+cannot resolve the exhausted physical-attempt budgets under the frozen
+contract, so no restart, budget increase or barrier bypass is performed.
+Owned-child readiness and supervisor/evaluator exit were verified; under the
+shared capacity lock E9 registration now has workers=0 and phase
+blocked_initial_barrier. Current recursive active reservation is 16/250 (E7).
+
+E8 remains finished and audited_incomplete at 254/267 valid scores, 13 missing.
+Final panels retain their historical reports and supplementary unresolved
+verifier audits; none is rerun. E5 stays stopped. Automation remains active,
+and every conclusion remains limited to the closed task set.
+
 ## 2026-10-13 10:13 Asia/Shanghai heartbeat
 
 Corrected the earlier E7 retry-budget interpretation: three new requests are
