@@ -533,6 +533,9 @@ def execute(args, root):
                 current_code = code_signature()
                 changed = {key for key in set(manifest['code']) | set(current_code)
                            if manifest['code'].get(key) != current_code.get(key)}
+                # Reader-only edits are outside the execution protocol and must
+                # not invalidate a frozen L2 cache identity.
+                changed -= {key for key in changed if key.startswith('reader/')}
                 if args.stage == 'QD' and changed:
                     if (changed - {'l2/audit.py', 'benchmarks/task_skill.py'}
                             or not read(root / 'l2_source_integration_audit.json').get('passed')):
