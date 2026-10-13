@@ -66,6 +66,10 @@ def build_parser():
         default="predicted", help="Accept by card review, paired execution, or JEV validation")
     p.add_argument("--predicted-review-scope", choices=("val", "train_cards"),
         default="val", help="Evidence scope for predicted acceptance")
+    p.add_argument("--progressive-library", action="store_true",
+        help="Expose the Skill catalog, select one Skill, then load only its body")
+    p.add_argument("--acceptance-panel", choices=("val", "all_train"), default="val",
+        help="LLM-as-Judge panel; all_train is closed-set evaluation")
     p.add_argument("--evolve-l1-workers", type=int, default=8,
         help="Concurrent train tasks during each Skill-aware L1 round")
     p.add_argument("--l2-review-workers", type=int, default=8,
@@ -84,6 +88,8 @@ def build_parser():
     p.add_argument('--selector-model', help='LLM used to route validation/test tasks')
     p.add_argument("--resume", action="store_true")
     p.add_argument("--show-plan", action="store_true")
+    p.add_argument("--llm-relay", action="store_true",
+                   help="Route all LLM calls through a persistent Tencent E2B relay sandbox")
     return p
 
 
@@ -292,6 +298,8 @@ def main(argv=None):
     root.mkdir(parents=True, exist_ok=True)
     lock = L.RunLock(root / "campaign.lock")
     lock.acquire()
+    relay = None
+    relay_env = {}
     try:
         if args.cold_start_dir:
             cfg, plan = import_cold_start(source, root)
@@ -299,7 +307,53 @@ def main(argv=None):
         # the stage's role map afterwards so Planner/Editor/Reviewer/selector
         # can intentionally differ from the L1 executor in the new run.
         cfg = apply_model_overrides(cfg, args)
-        C.freeze(root / "config.json", OmegaConf.to_container(cfg, resolve=True))
+        if args.llm_relay:
+            from skillexpand.runtime.llm_relay import relay_from_env
+            relay = relay_from_env()
+            relay_env = {
+                'EXPE_LLM_BASE_URL': os.environ.get('EXPE_LLM_BASE_URL'),
+                'OPENAI_API_BASE': os.environ.get('OPENAI_API_BASE'),
+                'MODEL_API_BASE': os.environ.get('MODEL_API_BASE'),
+                'EXPE_LLM_RELAY_REQUIRED': os.environ.get('EXPE_LLM_RELAY_REQUIRED'),
+            }
+            base_url = relay.start()
+            os.environ['EXPE_LLM_BASE_URL'] = base_url
+            os.environ['OPENAI_API_BASE'] = base_url
+            os.environ['MODEL_API_BASE'] = base_url
+            os.environ['EXPE_LLM_RELAY_REQUIRED'] = '1'
+            # Tencent ModelBest accepts bare model ids, not the OpenAI provider
+            # namespace used by Harbor's generic config.
+            for role in ('l1_executor', 'cold_start', 'l2_planner', 'l2_editor',
+                         'l2_reviewer', 'selector'):
+                if role in cfg.models:
+                    cfg.models[role] = str(cfg.models[role]).removeprefix('openai/')
+            cfg.agent.llm = str(cfg.agent.llm).removeprefix('openai/')
+            cfg.benchmark.rollout.llm_transport = 'tencent_e2b_relay'
+            cfg.benchmark.rollout.relay_base_url = base_url
+            cfg.benchmark.rollout.provider_base_url = os.environ.get(
+                'TBENCH_RELAY_PROVIDER_BASE', 'https://llm-center.modelbest.co/v1')
+            cfg.benchmark.rollout.direct_provider_fallback = False
+            save(root / 'relay_manifest.json', {
+                'llm_transport': 'tencent_e2b_relay', 'relay_base_url': base_url,
+                'relay_scope': 'experiment', 'direct_provider_fallback': False,
+                'sandbox_id': relay.transport.sandbox_id,
+            })
+        resolved_config = OmegaConf.to_container(cfg, resolve=True)
+        config_path = root / "config.json"
+        if args.llm_relay and config_path.exists():
+            # The relay binds an ephemeral loopback port and normalizes Tencent
+            # model names after cold-start import.  A formal relay run therefore
+            # has to replace the copied input config once, while preserving the
+            # ordinary frozen-input behavior for all non-relay runs.
+            existing_config = json.loads(config_path.read_text())
+            if existing_config != resolved_config:
+                config_path.unlink()
+                manifest_path = root / "manifest.json"
+                if manifest_path.exists():
+                    manifest = json.loads(manifest_path.read_text())
+                    manifest["config"] = resolved_config
+                    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        C.freeze(config_path, resolved_config)
         os.environ["EXPE_CONFIG_FILE"] = str(root / "config.json")
         os.environ["EXPE_TASK_FILE"] = cfg.benchmark.task_file
         if not completed:
@@ -326,6 +380,8 @@ def main(argv=None):
                 skill_edit_mode=args.skill_edit_mode,
                 acceptance_mode=args.acceptance_mode,
                 predicted_review_scope=args.predicted_review_scope,
+                progressive_library=args.progressive_library,
+                acceptance_panel=args.acceptance_panel,
             )
             loop = L.SerialEvolutionLoop(cfg, plan, L.LoopPaths(root), config)
             # All evolution entry points execute Skill-aware L1 before L2.
@@ -338,6 +394,13 @@ def main(argv=None):
                 )
             )
     finally:
+        if relay is not None:
+            relay.close()
+            for key, value in relay_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         lock.release()
     return 0
 

@@ -1,0 +1,17 @@
+name: terminalbench
+task_prefix: ""
+task_file: data/terminalbench/tb21.json
+max_steps: 1
+num_fewshots: 0
+ai_name: terminal agent
+env:
+  show_admissible_commands: false
+l1:
+  adapter: skillexpand.l1.adapters:TerminalBenchAdapter
+  card_target_tokens: 400
+  card_limit_tokens: 800
+  action_format_attempts: 1
+  action_only_attempts: 1
+rollout:
+  mode: harbor_rollout
+  runner_script: /data2/liyishan/tb21-tencent-skill/scripts/run_tencent_tb21_smoke.sh

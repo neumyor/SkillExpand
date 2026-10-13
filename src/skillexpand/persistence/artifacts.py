@@ -30,8 +30,9 @@ FILES = (
 def code_signature():
     source = Path(__file__).resolve().parents[1]
     return {
-        str(p.relative_to(source)): S.content_hash(p.read_text())
+        str(p.relative_to(source)): S.content_hash(p.read_text(encoding="utf-8"))
         for p in sorted(source.rglob("*.py"))
+        if not p.name.startswith("._")
     }
 
 
@@ -50,7 +51,11 @@ def provider_signature():
 
 def load_cold_start(root):
     root = Path(root)
-    values = {name: json.loads((root / name).read_text()) for name in FILES}
+    values = {
+        name: json.loads((root / name).read_text())
+        for name in FILES
+        if (root / name).exists()
+    }
     manifest = values["manifest.json"]
     if (
         manifest["split"] != values["split.json"]
@@ -59,6 +64,40 @@ def load_cold_start(root):
         raise ValueError("Cold-start split/config differs from its frozen manifest")
     cfg = OmegaConf.create(values["config.json"])
     plan = read_split(root / "split.json")
+    progressive = bool(cfg.benchmark.get("progressive_library", False))
+    if progressive:
+        train = set(plan.tasks_in(S.SPLIT_TRAIN))
+        complete = values["cold_start_complete.json"]
+        if complete.get("train_count") != len(train):
+            raise ValueError("Progressive cold-start train count mismatch")
+        table = F.task_table(cfg, refresh=True)
+        if values["manifest.json"]["task_table_hash"] != S.content_hash(table):
+            raise ValueError("Progressive cold-start task data changed")
+        skills = tuple(S.from_dict(S.Skill, item) for item in values["initial_skills.json"])
+        if not skills:
+            raise ValueError("Progressive cold start has no initial Skills")
+        cards = {}
+        for t in sorted(train):
+            exp = S.from_dict(
+                S.TaskExperience,
+                json.loads((root / "discovery/results" / f"{t}.json").read_text()),
+            )
+            if (exp.task_id != t or exp.benchmark != plan.benchmark or
+                    exp.split != S.SPLIT_TRAIN or exp.initial_skill_key is not None or
+                    exp.selected_skill_id is not None or not exp.experience_card or
+                    exp.experience_card.get("schema_version") != 5):
+                raise ValueError(f"Invalid progressive cold-start experience: task {t}")
+            cards[t] = exp
+        hashes_path = root / "discovery/card_hashes.json"
+        if hashes_path.exists():
+            expected_hashes = json.loads(hashes_path.read_text())
+            actual_hashes = {
+                str(t): S.content_hash(projection(e.experience_card))
+                for t, e in cards.items()
+            }
+            if expected_hashes != actual_hashes:
+                raise ValueError("Progressive cold-start cards differ from discovery hashes")
+        return cfg, plan, skills, cards
     clusters = load_family_plan(root / "clusters.json", benchmark=plan.benchmark)
     mapping = values["task_skill_map.json"]
     initial = values["initial_skills.json"]
@@ -106,8 +145,6 @@ def load_cold_start(root):
         cards[t] = exp
     hashes_path = root / "discovery/card_hashes.json"
     if hashes_path.exists():
-        from skillexpand.l1.protocol import projection
-
         expected_hashes = json.loads(hashes_path.read_text())
         actual_hashes = {
             str(t): S.content_hash(projection(e.experience_card))

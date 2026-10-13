@@ -21,6 +21,7 @@ from skillexpand.runtime import parallel as PL
 from skillexpand.evaluation.routing import FrozenRoutes
 from skillexpand.evaluation import validation as VA
 from skillexpand.evaluation.jev import JevSkillScorer
+from skillexpand.benchmarks import task_skill as TS
 
 
 @dataclass
@@ -35,6 +36,9 @@ class EvolutionConfig:
     skill_edit_mode: str = "rewrite"
     acceptance_mode: str = "predicted"
     predicted_review_scope: str = "val"
+    progressive_library: bool = False
+    acceptance_panel: str = "val"
+    external_experience_format: str | None = None
 
     def __post_init__(self):
         if min(self.batch_size, self.candidate_count, self.evolve_l1_workers,
@@ -48,9 +52,16 @@ class EvolutionConfig:
             raise ValueError("Unknown acceptance mode")
         if self.predicted_review_scope not in ("val", "train_cards"):
             raise ValueError("Unknown predicted review scope")
+        if self.acceptance_panel not in ("val", "all_train"):
+            raise ValueError("Unknown acceptance panel")
+        if self.external_experience_format not in (None, TS.FORMAT):
+            raise ValueError('Unknown external experience format')
 
     def to_dict(self):
-        return S.to_dict(self)
+        value = S.to_dict(self)
+        if self.external_experience_format is None:
+            value.pop('external_experience_format')
+        return value
 
 
 class RunLock:
@@ -127,6 +138,12 @@ class SerialEvolutionLoop:
     def _initialize(self, cfg, plan, paths, config):
         self.cfg, self.plan, self.paths = cfg, plan, paths
         self.config = config or EvolutionConfig()
+        if (self.config.progressive_library and
+                self.config.acceptance_panel == 'all_train' and
+                self.config.predicted_review_scope != 'val'):
+            raise ValueError(
+                'Progressive closed-set acceptance requires the frozen all-train '
+                'predicted panel; train_cards review cannot commit Skills')
         input_cfg, checked_plan, self.initial, cold_cards = load_cold_start(paths.root)
         if input_cfg != cfg:
             raise ValueError(
@@ -234,10 +251,19 @@ class SerialEvolutionLoop:
             return None
         if self.predicted_scorer is not None:
             return self.predicted_scorer
-        self.predicted_routes = FrozenRoutes(
-            self.cfg, self.plan, self.initial, self.paths.root / "routes",
-            S.SPLIT_VAL, self.config.l2_review_workers
-        ).run()
+        panel = S.SPLIT_TRAIN if self.config.acceptance_panel == 'all_train' else S.SPLIT_VAL
+        route_root = self.paths.root / "routes" / panel
+        if (route_root / "manifest.json").exists() and (route_root / "complete.json").exists():
+            # Route selection is immutable once complete.  Reusing it avoids
+            # rebinding the same route to a new ephemeral relay port on resume.
+            self.predicted_routes = FrozenRoutes.load_existing(
+                self.cfg, self.plan, self.initial, self.paths.root / "routes", panel
+            )
+        else:
+            self.predicted_routes = FrozenRoutes(
+                self.cfg, self.plan, self.initial, self.paths.root / "routes",
+                panel, self.config.l2_review_workers
+            ).run()
 
         def judge_factory(task_id, skill, usage_path):
             # The predicted reviewer is an ordinary configured L2 reviewer model;
@@ -247,7 +273,7 @@ class SerialEvolutionLoop:
         self.predicted_scorer = VA.PredictedSkillScorer(
             self.cfg,
             self.predicted_routes,
-            VA.ScoreCache(self.paths.root / "val" / "predicted_scores.jsonl"),
+            VA.ScoreCache(self.paths.root / ("train" if panel == S.SPLIT_TRAIN else "val") / "predicted_scores.jsonl"),
             self.config.l2_review_workers,
             judge_factory=judge_factory,
         )
@@ -275,6 +301,28 @@ class SerialEvolutionLoop:
 
     def batches(self):
         batches = []
+        if self.config.progressive_library:
+            if self.cards and isinstance(next(iter(self.cards)), str):
+                round_index = next(iter(self.cards.values())).evolution_round
+                return self._evolution_batches(round_index, self.cards)
+            # Progressive runs have no plan.families/task-family map.  The
+            # fallback summary path can execute before round cards exist, so
+            # derive only from actual selected routes and return an empty set
+            # while the round is still pending.
+            grouped = {}
+            for task_id, card in self.cards.items():
+                if card.selected_skill_id:
+                    grouped.setdefault(card.selected_skill_id, []).append(task_id)
+            for skill_id, task_ids in sorted(grouped.items()):
+                skill = self.skills.load(skill_id)
+                for offset in range(0, len(task_ids), self.config.batch_size):
+                    batch_ids = sorted(task_ids)[offset:offset + self.config.batch_size]
+                    batches.append({
+                        "skill_id": skill.skill_id, "family_id": skill.family_id,
+                        "task_ids": batch_ids,
+                        "batch_id": S.content_hash({"skill": skill.skill_id, "tasks": batch_ids}),
+                    })
+            return batches
         for skill in sorted(self.initial, key=lambda s: s.skill_id):
             ids = sorted(self.plan.families[skill.family_id])
             for offset in range(0, len(ids), self.config.batch_size):
@@ -294,8 +342,14 @@ class SerialEvolutionLoop:
     def _restore(self, value):
         from skillexpand.l2.audit import audit_batch
         directory = self.paths.root / 'evolution' / f'round-{value["round"]}' / 'cards'
-        cards = [S.from_dict(S.TaskExperience, json.loads((directory / f'{t}.json').read_text()))
-                 for t in value['task_ids']]
+        if 'experience_ids' in value:
+            inputs = json.loads((directory.parent / 'input.json').read_text())
+            all_cards = TS.read_cards(self.paths.root, value['round'],
+                                     [S.from_dict(S.Skill, s) for s in inputs['skills']], inputs['task_ids'])
+            cards = [all_cards[eid] for eid in value['experience_ids']]
+        else:
+            cards = [S.from_dict(S.TaskExperience, json.loads((directory / f'{t}.json').read_text()))
+                     for t in value['task_ids']]
         audit_batch(self.paths.root, value, self.skills.get(value['base_skill_key']), cards)
         raw = value.get("candidate")
         if raw:
@@ -318,15 +372,22 @@ class SerialEvolutionLoop:
         directory = self.paths.root / "l2_batches"
         if not directory.exists():
             return
-        # Replay in round and task order, never hash-filename order.
+        # Replay the frozen batch order: experience IDs need not sort like task IDs.
         records = [json.loads(p.read_text()) for p in directory.glob('*.json')]
-        for value in sorted(records, key=lambda r: (r.get('round', 0), r['skill_id'],
-                                                   r['task_ids'][0])):
-            round_index = value.get('round', 0)
+        planned = {}
+        for record in records:
+            round_index = record.get('round', 0)
             if round_index < 1:
                 raise ValueError('Legacy card-only journals require a separate run directory')
-            plans = json.loads((self.paths.root / 'evolution' / f'round-{round_index}' /
-                                'batches.json').read_text())
+            if round_index not in planned:
+                planned[round_index] = json.loads((self.paths.root / 'evolution' /
+                                                  f'round-{round_index}' / 'batches.json').read_text())
+        positions = {(r, b['batch_id']): i for r, plans in planned.items() for i, b in enumerate(plans)}
+        if any((v['round'], v['batch_id']) not in positions for v in records):
+            raise ValueError('Journal differs from frozen evolution plan')
+        for value in sorted(records, key=lambda v: (v['round'], positions[(v['round'], v['batch_id'])])):
+            round_index = value.get('round', 0)
+            plans = planned[round_index]
             plan = next((b for b in plans if b['batch_id'] == value['batch_id']), None)
             if plan is None or any(value.get(k) != v for k, v in plan.items()):
                 raise ValueError('Journal differs from frozen evolution plan')
@@ -341,7 +402,7 @@ class SerialEvolutionLoop:
             self._restore(value)
             return
         skill = self.skills.head(batch["family_id"])
-        evidence = [self.cards[t] for t in batch["task_ids"]]
+        evidence = [self.cards[t] for t in batch.get('experience_ids', batch['task_ids'])]
         planner_host = self._reasoning_host(
             'l2_planner', self.paths.root / "usage" / f"planner-{skill.skill_id}.json")
         editor_host = None
@@ -391,10 +452,14 @@ class SerialEvolutionLoop:
         self._restore(value)
 
     def _evolution_batches(self, round_index, cards):
-        """Build fixed family batches from one and only one L1 evolution round."""
+        """Build batches from the Skill actually loaded by each evolution card."""
         batches = []
         for skill in sorted(self.skill_heads(), key=lambda s: s.skill_id):
-            ids = sorted(self.plan.families[skill.family_id])
+            if self.config.progressive_library:
+                ids = sorted(t for t, card in cards.items()
+                             if card.selected_skill_id == skill.skill_id)
+            else:
+                ids = sorted(self.plan.families[skill.family_id])
             for offset in range(0, len(ids), self.config.batch_size):
                 task_ids = ids[offset:offset + self.config.batch_size]
                 batches.append(self._make_evolution_batch(round_index, skill.family_id, task_ids, cards))
@@ -404,13 +469,17 @@ class SerialEvolutionLoop:
         """Stable evidence identity; the journal separately records the current head."""
         skill = self.skills.head(family_id)
         hashes = {str(t): S.content_hash(S.to_dict(cards[t])) for t in task_ids}
-        return {
+        batch = {
             'round': round_index, 'skill_id': skill.skill_id,
             'family_id': family_id, 'task_ids': list(task_ids),
             'card_hashes': hashes,
             'batch_id': S.content_hash({'round': round_index, 'skill': skill.skill_id,
                                         'tasks': list(task_ids), 'cards': hashes}),
         }
+        if task_ids and isinstance(task_ids[0], str):
+            batch['experience_ids'] = list(task_ids)
+            batch['task_ids'] = sorted({cards[eid].task_id for eid in task_ids})
+        return batch
 
     def _round_input(self, round_index):
         directory = self.paths.root / 'evolution' / f'round-{round_index}'
@@ -422,7 +491,8 @@ class SerialEvolutionLoop:
             skills = [S.from_dict(S.Skill, s) for s in value['skills']]
             if value['round'] != round_index or value['task_ids'] != sorted(self.plan.tasks_in(S.SPLIT_TRAIN)):
                 raise ValueError('Round input identity mismatch')
-            if {s.family_id for s in skills} != set(self.plan.families):
+            if (not self.config.progressive_library and
+                    {s.family_id for s in skills} != set(self.plan.families)):
                 raise ValueError('Round input family coverage mismatch')
             if {s.skill_id: s.key for s in skills} != expected:
                 raise ValueError('Round input differs from previous output')
@@ -438,39 +508,61 @@ class SerialEvolutionLoop:
         return skills
 
     def _check_card(self, exp, task_id, round_index, skills):
-        skill = next(s for s in skills if s.family_id == self.plan.family_of(task_id))
+        skill = next((s for s in skills if s.skill_id == exp.selected_skill_id), None)
+        if skill is None and not self.config.progressive_library:
+            skill = next(s for s in skills if s.family_id == self.plan.family_of(task_id))
         if (exp.task_id != task_id or exp.benchmark != self.plan.benchmark or
                 exp.split != S.SPLIT_TRAIN or exp.evolution_round != round_index or
-                exp.family_id != skill.family_id or exp.initial_skill_key != skill.key or
-                exp.selected_skill_id != skill.skill_id or exp.selection_source != S.SELECTION_FIXED or
+                skill is None or exp.family_id != skill.family_id or exp.initial_skill_key != skill.key or
+                exp.selected_skill_id != skill.skill_id or
+                (self.config.progressive_library and exp.selection_source != S.SELECTION_AGENT) or
+                (not self.config.progressive_library and exp.selection_source != S.SELECTION_FIXED) or
                 exp.experience_card is None or exp.experience_card.get('task', {}).get('task_id') != task_id):
             raise ValueError(f'Evolution card identity/provenance mismatch: {task_id}')
 
     def _collect_evolution_cards(self, round_index):
         """Run L1 with the current Skill heads and persist every task result."""
         directory = self.paths.root / "evolution" / f"round-{round_index}"
+        manifest_path = directory / 'manifest.json'
+        if self.config.external_experience_format == TS.FORMAT:
+            external = json.loads(manifest_path.read_text())
+            if external.get('format') != TS.FORMAT or not external.get('external_harbor'):
+                raise ValueError('Missing/invalid external experience manifest')
+            return self._read_evolution_cards(round_index)
+        if manifest_path.exists():
+            external = json.loads(manifest_path.read_text())
+            if external.get('external_harbor') or external.get('format') == TS.FORMAT:
+                if external.get('format') != TS.FORMAT:
+                    raise ValueError('Unknown external experience manifest format')
+                return self._read_evolution_cards(round_index)
         results_dir = directory / "cards"
         results_dir.mkdir(parents=True, exist_ok=True)
         specs = []
         skills = self._round_input(round_index)
-        for skill in skills:
-            for task_id in sorted(self.plan.families[skill.family_id]):
-                path = results_dir / f"{task_id}.json"
-                if path.exists():
-                    continue
-                specs.append(PL.ExperienceSpec(
-                    unit_id=f"evolution:{round_index}:{task_id}",
-                    benchmark=self.plan.benchmark, task_id=task_id,
-                    family_id=skill.family_id, split=S.SPLIT_TRAIN,
-                    skill_key=skill.key, skill_body=skill.body,
-                    skill_description=skill.description, skill_aware=True,
-                    selected_skill_id=skill.skill_id,
-                    selection_source=S.SELECTION_FIXED,
-                    max_trials=self.l1_attempts,
-                    supervised_repair=self.l1_supervised,
-                    supervised_attempts=self.l1_supervised_attempts,
-                    evolution_round=round_index,
-                    l1_checkpoint_path=str(directory / "trials" / f"{task_id}.json")))
+        for task_id in sorted(self.plan.tasks_in(S.SPLIT_TRAIN)):
+            skill = (skills[0] if self.config.progressive_library else
+                     next(s for s in skills if s.family_id == self.plan.family_of(task_id)))
+            path = results_dir / f"{task_id}.json"
+            if path.exists():
+                continue
+            specs.append(PL.ExperienceSpec(
+                unit_id=f"evolution:{round_index}:{task_id}",
+                benchmark=self.plan.benchmark, task_id=task_id,
+                family_id=skill.family_id if not self.config.progressive_library else 'unassigned',
+                split=S.SPLIT_TRAIN,
+                skill_key=None if self.config.progressive_library else skill.key,
+                skill_body=None if self.config.progressive_library else skill.body,
+                skill_description='' if self.config.progressive_library else skill.description,
+                skill_aware=True,
+                selected_skill_id=None if self.config.progressive_library else skill.skill_id,
+                selection_source=(S.SELECTION_AGENT if self.config.progressive_library else S.SELECTION_FIXED),
+                skill_library=tuple(S.to_dict(s) for s in skills) if self.config.progressive_library else (),
+                progressive_selection=self.config.progressive_library,
+                max_trials=self.l1_attempts,
+                supervised_repair=self.l1_supervised,
+                supervised_attempts=self.l1_supervised_attempts,
+                evolution_round=round_index,
+                l1_checkpoint_path=str(directory / "trials" / f"{task_id}.json")))
         errors = []
         pending = {s.task_id for s in specs}
         received = set()
@@ -496,6 +588,15 @@ class SerialEvolutionLoop:
             'round': round_index,
             'skill_keys': {s.family_id: s.key for s in skills},
             'cards': {str(t): S.content_hash(S.to_dict(c)) for t, c in cards.items()},
+            'routes': {str(t): {
+                'selected_skill_id': c.selected_skill_id,
+                'selected_skill_key': c.initial_skill_key,
+                'selection_source': c.selection_source,
+                'selection_reason': c.selection_reason,
+                'selection_raw': c.selection_raw,
+                'selection_catalog': list(c.selection_catalog),
+                'skill_load': c.skill_load,
+            } for t, c in cards.items()},
             'task_ids': sorted(cards),
         })
         return cards
@@ -505,8 +606,15 @@ class SerialEvolutionLoop:
         results_dir = directory / "cards"
         manifest_path = directory / "manifest.json"
         manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
+        if self.config.external_experience_format == TS.FORMAT and (
+                not manifest or manifest.get('format') != TS.FORMAT):
+            raise ValueError('Missing/invalid external experience manifest')
         skills = self._round_input(round_index)
-        expected = sorted(t for ids in self.plan.families.values() for t in ids)
+        if manifest and (manifest.get('external_harbor') or manifest.get('format') == TS.FORMAT):
+            return TS.read_cards(self.paths.root, round_index, skills,
+                                 sorted(self.plan.tasks_in(S.SPLIT_TRAIN)))
+        expected = (sorted(self.plan.tasks_in(S.SPLIT_TRAIN)) if self.config.progressive_library
+                    else sorted(t for ids in self.plan.families.values() for t in ids))
         if {p.name for p in results_dir.glob('*.json')} != {f'{t}.json' for t in expected}:
             raise ValueError('Round card coverage differs from train tasks')
         cards = {}
@@ -516,12 +624,17 @@ class SerialEvolutionLoop:
                 raise RuntimeError(f"Missing evolution card for task {task_id}")
             exp = S.from_dict(S.TaskExperience, json.loads(path.read_text()))
             self._check_card(exp, task_id, round_index, skills)
-            from skillexpand.l1.audit import audit_checkpoint
-            from skillexpand.l1.adapters import resolve
-            checkpoint = json.loads((directory / 'trials' / f'{task_id}.json').read_text())
-            if checkpoint['experience'] != S.to_dict(exp):
-                raise ValueError(f'Evolution card/checkpoint mismatch: {task_id}')
-            audit_checkpoint(checkpoint, resolve(self.cfg))
+            if self.cfg.benchmark.name == 'terminalbench' and self.cfg.benchmark.get('rollout', {}).get('mode') == 'harbor_rollout':
+                from skillexpand.benchmarks.terminalbench import audit_harbor_experience
+                audit = audit_harbor_experience(exp)
+                save(directory / 'trials' / f'{task_id}.json', audit)
+            else:
+                from skillexpand.l1.audit import audit_checkpoint
+                from skillexpand.l1.adapters import resolve
+                checkpoint = json.loads((directory / 'trials' / f'{task_id}.json').read_text())
+                if checkpoint['experience'] != S.to_dict(exp):
+                    raise ValueError(f'Evolution card/checkpoint mismatch: {task_id}')
+                audit_checkpoint(checkpoint, resolve(self.cfg))
             if manifest is not None:
                 expected_skill = manifest.get('skill_keys', {}).get(exp.family_id)
                 if expected_skill and exp.initial_skill_key != expected_skill:

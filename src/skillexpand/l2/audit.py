@@ -14,6 +14,7 @@ from skillexpand.l1.audit import audit_checkpoint
 from skillexpand.l1.adapters import resolve
 from omegaconf import OmegaConf
 from skillexpand.l2 import structured_skill as SS
+from skillexpand.benchmarks import task_skill as TS
 
 
 def require(condition, message):
@@ -24,6 +25,7 @@ def require(condition, message):
 def audit_batch(root, batch, base, cards):
     """Replay cached decisions without any model, environment, or file writes."""
     root = Path(root)
+    cards = TS.with_source_context(root, cards)
     records = ST.read_jsonl(root / 'meta_skills.jsonl', repair_tail=False)
     require(len(records) == 1 and records[0]['version'] == 0, 'L3 must stay frozen')
     meta = S.from_dict(S.MetaSkill, records[0])
@@ -130,10 +132,13 @@ def audit_round(root, round_index):
     manifest = json.loads((directory / 'manifest.json').read_text())
     inputs = json.loads((directory / 'input.json').read_text())
     split = json.loads((root / 'split.json').read_text())
-    mapping = json.loads((root / 'task_skill_map.json').read_text())
+    progressive = bool(json.loads((root / 'config.json').read_text()).get('benchmark', {}).get('progressive_library', False))
+    mapping = (json.loads((root / 'task_skill_map.json').read_text())
+               if (root / 'task_skill_map.json').exists() else {})
     train = sorted(int(t) for t, value in split['assignment'].items() if value == S.SPLIT_TRAIN)
     require(manifest['task_ids'] == train == inputs['task_ids'], 'round/train coverage mismatch')
     heads = {s['family_id']: S.from_dict(S.Skill, s) for s in inputs['skills']}
+    heads_by_id = {s.skill_id: s for s in heads.values()}
     protocol = json.loads((root / 'l2_manifest.json').read_text())
     expected_acceptance_mode = protocol['config'].get('acceptance_mode', 'predicted')
     expected_predicted_scope = protocol['config'].get('predicted_review_scope', 'val')
@@ -159,32 +164,55 @@ def audit_round(root, round_index):
     adapter = resolve(OmegaConf.load(root / 'config.json'))
     require(manifest['skill_keys'] == {f: s.key for f, s in heads.items()}, 'input Skill keys mismatch')
     expected_tasks = tuple(sorted(manifest['task_ids']))
-    require({p.name for p in (directory / 'cards').glob('*.json')} ==
-            {f'{t}.json' for t in train}, 'unexpected/missing card files')
-    cards = {}
-    for task_id in expected_tasks:
+    external = manifest.get('external_harbor') or manifest.get('format') == TS.FORMAT
+    if external:
+        require(progressive and split['benchmark'] == 'terminalbench',
+                'external task-Skill cards require progressive TerminalBench')
+        cards = TS.read_cards(root, round_index, list(heads.values()), train)
+        expected_evidence = tuple(manifest['experience_ids'])
+    else:
+        require({p.name for p in (directory / 'cards').glob('*.json')} ==
+                {f'{t}.json' for t in train}, 'unexpected/missing card files')
+        cards = {}
+        expected_evidence = expected_tasks
+    for task_id in (() if external else expected_tasks):
         path = directory / 'cards' / f'{task_id}.json'
         value = json.loads(path.read_text())
         exp = S.from_dict(S.TaskExperience, value)
         require(exp.task_id == task_id, f'card filename/task mismatch: {task_id}')
         require(exp.split == S.SPLIT_TRAIN, f'non-train card: {task_id}')
         require(exp.evolution_round == round_index, f'wrong card round: {task_id}')
-        require(exp.benchmark == split['benchmark'] and exp.selected_skill_id == mapping[str(task_id)],
-                'card benchmark/routing mismatch')
+        require(exp.benchmark == split['benchmark'], 'card benchmark mismatch')
+        if progressive:
+            require(exp.selected_skill_id in heads_by_id,
+                    'card selected an unknown Skill')
+        else:
+            require(exp.selected_skill_id == mapping[str(task_id)], 'card benchmark/routing mismatch')
         expected_skill = manifest['skill_keys'].get(exp.family_id)
         require(expected_skill == exp.initial_skill_key,
                 f'card {task_id} was executed with a different Skill head')
         require(S.content_hash(value) == manifest['cards'][str(task_id)],
                 f'card hash mismatch: {task_id}')
-        require(exp.selection_source == S.SELECTION_FIXED and
+        require(exp.selection_source == (S.SELECTION_AGENT if progressive else S.SELECTION_FIXED) and
                 exp.selected_skill_id == heads[exp.family_id].skill_id, 'card selection mismatch')
+        if progressive:
+            require(exp.skill_load and exp.skill_load.get('skill_id') == exp.selected_skill_id,
+                    'card Skill load provenance mismatch')
+            require(exp.skill_load.get('load_stage') == 'after_selection',
+                    'progressive Skill was loaded before selection')
+            require(all('body' not in item and 'key' not in item for item in exp.selection_catalog),
+                    'card selector catalog leaked Skill body')
         checkpoint = json.loads((directory / 'trials' / f'{task_id}.json').read_text())
-        require(checkpoint['experience'] == value, f'card/checkpoint mismatch: {task_id}')
-        require(checkpoint['identity']['skill'] ==
-                {'key': expected_skill, 'body': heads[exp.family_id].body}, 'executed Skill body mismatch')
-        require(checkpoint['identity']['k'] == protocol['l1']['attempts'] and
-                checkpoint['identity']['supervised'] == protocol['l1']['supervised'], 'L1 budget changed')
-        audit_checkpoint(checkpoint, adapter)
+        if progressive and split['benchmark'] == 'terminalbench':
+            from skillexpand.benchmarks.terminalbench import audit_harbor_experience
+            audit_harbor_experience(exp)
+        else:
+            require(checkpoint['experience'] == value, f'card/checkpoint mismatch: {task_id}')
+            require(checkpoint['identity']['skill'] ==
+                    {'key': expected_skill, 'body': heads[exp.family_id].body}, 'executed Skill body mismatch')
+            require(checkpoint['identity']['k'] == protocol['l1']['attempts'] and
+                    checkpoint['identity']['supervised'] == protocol['l1']['supervised'], 'L1 budget changed')
+            audit_checkpoint(checkpoint, adapter)
         cards[task_id] = exp
 
     planned = json.loads((directory / 'batches.json').read_text())
@@ -212,9 +240,14 @@ def audit_round(root, round_index):
                 bool(batch['reviews']) or
                 (expected_acceptance_mode == 'predicted' and expected_predicted_scope == 'val'),
                 'approval without reviews')
-        audit_batch(root, batch, base, [cards[t] for t in batch['task_ids']])
+        evidence_ids = batch.get('experience_ids', batch['task_ids'])
+        if external:
+            require('experience_ids' in batch and
+                    batch['task_ids'] == sorted({cards[eid].task_id for eid in evidence_ids}),
+                    'batch original task identities mismatch')
+        audit_batch(root, batch, base, [cards[t] for t in evidence_ids])
         require(batch.get('card_hashes'), 'round batch has no card hashes')
-        for task_id in batch['task_ids']:
+        for task_id in evidence_ids:
             require(task_id in cards, f'batch references task outside round: {task_id}')
             require(batch['card_hashes'].get(str(task_id)) ==
                     S.content_hash(S.to_dict(cards[task_id])),
@@ -275,15 +308,15 @@ def audit_round(root, round_index):
                 }
                 require(candidate_ids == proposed_ids,
                         'JEV acceptance does not cover every proposed candidate')
-    require(tuple(sorted(seen)) == expected_tasks,
-            'round batches do not cover each train task exactly once')
+    require(tuple(sorted(seen)) == expected_evidence,
+            'round batches do not cover each experience exactly once')
     for skill in heads.values():
         require(library.get(skill.key) == skill, 'round output differs from Skill history')
     summary_path = directory / 'summary.json'
     if summary_path.exists():
         summary = json.loads(summary_path.read_text())
         require(summary.get('status') == 'complete', 'round summary is incomplete')
-        require(summary.get('train_cards') == len(expected_tasks),
+        require(summary.get('train_cards') == len(cards),
                 'round summary card count mismatch')
         expected_mode = expected_acceptance_mode
         require(summary.get('acceptance_mode') == expected_mode,
@@ -313,7 +346,7 @@ def audit_round(root, round_index):
             require(summary.get('predicted_val_candidates') == sum(
                 len(b.get('acceptance', {}).get('candidates', ())) for b in journals
             ), 'predicted val candidate count mismatch')
-    return {'round': round_index, 'tasks': len(cards), 'batches': len(journals),
+    return {'round': round_index, 'tasks': len(expected_tasks), 'experience_cards': len(cards), 'batches': len(journals),
             'review_approved': sum(x.get('outcome') == 'review_approved' for x in journals),
             'acceptance_mode': expected_acceptance_mode,
             'empirical_validation': expected_acceptance_mode == 'empirical'}

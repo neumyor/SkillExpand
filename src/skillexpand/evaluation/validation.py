@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -448,6 +449,13 @@ class PredictedSkillScorer:
         self.workers = max(1, int(workers))
         self.judge_factory = judge_factory
         self.threshold = float(threshold)
+        legacy_omit = os.environ.get("EXPE_LLM_REVIEWER_NO_RESPONSE_FORMAT", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        self.wire_response_format = os.environ.get(
+            "EXPE_REVIEWER_RESPONSE_FORMAT", "omit" if legacy_omit else "json_schema")
+        if self.wire_response_format not in {"json_schema", "omit"}:
+            raise ValueError("EXPE_REVIEWER_RESPONSE_FORMAT must be json_schema or omit")
         if not 0.0 <= self.threshold <= 1.0:
             raise ValueError("prediction threshold must be between 0 and 1")
         self.protocol_hash = S.content_hash({
@@ -456,6 +464,7 @@ class PredictedSkillScorer:
             "benchmark": cfg.benchmark.name,
             "routes": routes.fingerprint,
             "threshold": self.threshold,
+            **({"wire_response_format": "omit"} if self.wire_response_format == "omit" else {}),
         })
 
     def prompt(self, task: str, skill: S.Skill) -> str:
@@ -471,13 +480,12 @@ class PredictedSkillScorer:
                 "JSON object with only probability_true, predicted_success, and reason. "
                 "Do not output markdown, analysis, a task/skill echo, or any other key. "
                 f"probability_true is a number in [0,1]; predicted_success is true "
-                f"exactly when probability_true >= {self.threshold:.6g}; reason is a "
-                "concise string of at most 80 characters."
+                f"exactly when probability_true >= {self.threshold:.6g}; reason is a string."
             ),
             "output_schema": {
                 "probability_true": "number in [0,1]",
                 "predicted_success": "boolean",
-                "reason": "string, <= 80 characters",
+                "reason": "string",
             },
         }
         return json.dumps(payload, ensure_ascii=False)
@@ -506,8 +514,6 @@ class PredictedSkillScorer:
             raise ValueError("Predicted reviewer reason must be a string")
         if not reason.strip():
             raise ValueError("Predicted reviewer reason must not be empty")
-        if len(reason) > self.REASON_MAX_CHARS:
-            raise ValueError("Predicted reviewer reason is too long")
         return {
             "probability_true": probability,
             "predicted_success": predicted_success,
@@ -526,11 +532,15 @@ class PredictedSkillScorer:
         from langchain.schema import HumanMessage
         messages = [HumanMessage(content=prompt)]
         request_kwargs = {
-            "response_format": self.response_format(),
             # Campaigns may disable thinking for executors.  The reviewer is a
-            # separate role and should retain its long internal reasoning budget.
-            "enable_thinking": True,
+            # separate role, but a reasoning-only provider response cannot pass
+            # the strict JSON schema. Respect the explicit provider switch so
+            # recovery runs can request a visible structured answer.
+            "enable_thinking": os.environ.get("EXPE_LLM_DISABLE_THINKING", "").strip().lower()
+            not in {"1", "true", "yes", "on"},
         }
+        if self.wire_response_format == "json_schema":
+            request_kwargs["response_format"] = self.response_format()
         try:
             return host.llm(messages, stop=[], replace_newline=False,
                             request_kwargs=request_kwargs)
@@ -549,9 +559,27 @@ class PredictedSkillScorer:
                 "match the required schema (" + str(first_error) + "). Return only "
                 "the single JSON object now; do not repeat the input or your analysis."
             )
-            repaired = self._call(host, correction)
-            parsed = self._parse(repaired)
-            return parsed, 2
+            # A malformed first answer is recoverable, but the correction call
+            # can hit transient relay/provider failures. Retry those boundedly
+            # without ever turning an unavailable response into a score.
+            for attempt in range(3):
+                try:
+                    repaired = self._call(host, correction)
+                    parsed = self._parse(repaired)
+                    return parsed, attempt + 2
+                except Exception as exc:
+                    error_class = getattr(exc, "error_class", "")
+                    transient = error_class in {
+                        "provider_429", "provider_timeout",
+                        "provider_connectivity", "provider_http_error",
+                    } or type(exc).__name__ in {
+                        "ServiceUnavailableError", "RateLimitError",
+                        "Timeout", "APITimeoutError", "APIConnectionError",
+                        "TimeoutError", "ConnectionError",
+                    } or getattr(exc, "status_code", None) in {429, 500, 502, 503, 504}
+                    if not transient or attempt == 2:
+                        raise
+                    time.sleep(2 ** attempt)
 
     def score(self, skill, task_ids, panel_key):
         task_ids = tuple(sorted(int(t) for t in task_ids))
@@ -584,7 +612,7 @@ class PredictedSkillScorer:
                     "cache_key": keys[task_id], "panel_key": panel_key,
                     "protocol_hash": self.protocol_hash,
                     "format_attempts": format_attempts,
-                    "response_format": "json_schema", **result}
+                    "response_format": self.wire_response_format, **result}
 
         errors = []
         if pending:
@@ -601,7 +629,13 @@ class PredictedSkillScorer:
                         self.cache.put(keys[task_id], record)
                         records[task_id] = record
         if errors or set(records) != set(task_ids):
-            raise RuntimeError(f"Incomplete predicted validation ({len(errors)} failed task(s))")
+            detail = "; ".join(
+                f"task_id={item.get('task_id')} error={item.get('error')}"
+                for item in errors
+            ) or f"missing_task_ids={sorted(set(task_ids) - set(records))}"
+            raise RuntimeError(
+                f"Incomplete predicted validation ({len(errors)} failed task(s)): {detail}"
+            )
         return PredictedPanelScore(
             skill.key, skill.body, task_ids,
             tuple(records[t] for t in task_ids),

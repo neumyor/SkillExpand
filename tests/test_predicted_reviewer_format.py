@@ -74,6 +74,29 @@ def test_format_retry_preserves_thinking_and_json_schema():
         assert kwargs["stop"] == []
 
 
+def test_format_correction_retries_transient_provider_failures(monkeypatch):
+    reviewer = scorer()
+    calls = []
+
+    class ProviderUnavailable(RuntimeError):
+        status_code = 503
+
+    def llm(messages, **kwargs):
+        calls.append(messages[-1].content)
+        if len(calls) == 1:
+            return '{"probability_true":0.95,"reason":"' + ("x" * 81) + '"}'
+        if len(calls) < 4:
+            raise ProviderUnavailable("503")
+        return json.dumps({"probability_true": 0.3,
+                           "predicted_success": False, "reason": "ambiguous clue"})
+
+    monkeypatch.setattr("skillexpand.evaluation.validation.time.sleep", lambda _: None)
+    result, attempts = reviewer._review(SimpleNamespace(llm=llm), "task prompt")
+    assert result["probability_true"] == 0.3
+    assert attempts == 4
+    assert len(calls) == 4
+
+
 def test_request_kwargs_are_reviewer_local_and_restored():
     client = Mock()
     client.model_kwargs = {"enable_thinking": False}

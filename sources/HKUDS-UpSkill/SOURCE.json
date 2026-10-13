@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/HKUDS/UpSkill",
+  "revision": "ed42b147411bde72620a9a61bc956693413b0607",
+  "files": ["scripts/run_brew.py", "scripts/run_curator.py", "scripts/run_ralph.py"],
+  "license": "MIT",
+  "modifications": "none"
+}

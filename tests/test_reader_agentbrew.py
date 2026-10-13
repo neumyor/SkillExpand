@@ -1,0 +1,58 @@
+import json
+
+from skillexpand.reader.data import Reader
+
+
+def write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
+
+
+def test_agentbrew_phases_retries_notes_and_frozen(tmp_path):
+    root = tmp_path / 'external'
+    base = root / 'run'
+    write(tmp_path / 'runs/external_roots.json', [str(root)])
+    write(base / 'contract.json', {})
+    write(tmp_path / 'runs/e9/manifest.json', {'stage': 'E9', 'output_root': str(root)})
+    unit = base / 'serve/rep00/task-a'
+    paths = [unit / f'physical_{i}/jobs/job/trial/agent/trajectory.json' for i in (1, 2)]
+    for path in paths:
+        write(path, {'steps': [{'step_id': 1, 'source': 'user', 'message': 'hello'}]})
+    write(paths[1].parent.parent / 'result.json', {'verifier_result': {'rewards': {'reward': 0}}, 'exception_info': {'exception_type': 'AgentTimeoutError'}})
+    write(unit / 'request.json', {'task': 'task-a', 'retrieval': {'memory_generation': 2, 'rendered_system': 'exact injected note'}})
+    write(unit / 'rollout.json', {'trajectory_path': str(paths[0])})
+    write(base / 'serve/progress.json', [{'task': 'task-a', 'replicate': 0, 'trajectory_path': str(paths[1]), 'raw_result_path': str(paths[1].parent.parent / 'result.json')}])
+    write(base / 'vanilla/rep00/task-a/request.json', {'task': 'task-a'})
+    brew = base / 'brew/000-task-a'
+    write(brew / 'initial/request.json', {'task': 'task-a'})
+    write(brew / 'draft/r01/candidate.json', {'note_key': 'candidate', 'corrective_rule': 'try'})
+    write(brew / 'ralph/r01/rollout.json', {'trajectory_path': str(paths[1]), 'reward': 0})
+    write(brew / 'state.json', {'disposition': 'ralph_exhausted'})
+    write(brew / 'curator/decision.json', {'action': 'reject', 'rationale': 'test'})
+    note = {'note_key': 'n', 'corrective_rule': 'old'}
+    write(base / 'memory/versions/000001.json', {'generation': 1, 'notes': {'n': {'note': note, 'version': 1}}})
+    write(base / 'frozen/manifest.json', {'payload': {'memory': {'generation': 2, 'notes': {'n': {'note': {**note, 'corrective_rule': 'frozen'}, 'version': 2}}}}})
+    write(base / 'memory/current.json', {'generation': 3, 'notes': {'n': {'note': {**note, 'corrective_rule': 'latest'}, 'version': 3}}})
+    reader = Reader(tmp_path / 'runs')
+    serve = next(k for k, r in reader.runs.items() if r.manifest.get('stage') == 'serve')
+    assert reader.runs[serve].label == 'E9 · AgentBrew · serve'
+    vanilla = next(k for k, r in reader.runs.items() if r.manifest.get('stage') == 'vanilla')
+    assert reader.same_task(vanilla, 'task-a') == 'task-a'
+    traces = reader.traces(serve, 'task-a')
+    assert len(traces) == 2
+    adopted = next(t for t in traces if t.accepted)
+    assert adopted.path == paths[1]
+    assert adopted.selection['rendered_system'] == 'exact injected note'
+    assert reader.trace_detail(adopted)['reward'] == 0
+    assert reader.trace_detail(next(t for t in traces if not t.accepted))['reward'] is None
+    notes = reader.skills(serve)
+    assert len(notes) == 2
+    assert notes[-1]['skill']['body'] == '\n\nfrozen\n\n'
+    assert notes[-1]['kind'] == '冻结记忆'
+    assert len([c for c in reader.cards(serve) if c.kind == 'AgentBrew 冻结记忆']) == 1
+    initial = next(k for k, r in reader.runs.items() if r.manifest.get('stage') == 'initial')
+    batch = reader.batches(initial)[0]['data']
+    assert batch['acceptance_mode'] == 'real_validation'
+    assert batch['acceptance']['curator']['action'] == 'reject'
+    assert batch['acceptance']['validation']['reward'] == 0
+    assert batch['outcome'] == 'ralph_exhausted'
