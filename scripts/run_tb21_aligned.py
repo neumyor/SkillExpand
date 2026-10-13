@@ -16,7 +16,7 @@ from skillexpand import schema as S
 from skillexpand.l1 import learning as L, protocol as P
 from skillexpand.l1.cold_start import freeze
 from skillexpand.l2.loop import EvolutionConfig, LoopPaths, RunLock, SerialEvolutionLoop
-from skillexpand.persistence.artifacts import load_cold_start, provider_signature
+from skillexpand.persistence.artifacts import load_cold_start, provider_signature, code_signature
 from skillexpand.runtime.llm_relay import relay_from_env
 from skillexpand.runtime.progressive import select_and_load
 from skillexpand.benchmarks.terminalbench import harbor_rollout
@@ -526,6 +526,19 @@ def execute(args, root):
             # Ephemeral relay replacement is operational, not a new scoring protocol.
             if (root / "l2_manifest.json").exists():
                 manifest = read(root / "l2_manifest.json")
+                current_code = code_signature()
+                changed = {key for key in set(manifest['code']) | set(current_code)
+                           if manifest['code'].get(key) != current_code.get(key)}
+                if args.stage == 'QD' and changed:
+                    if (changed - {'l2/audit.py', 'benchmarks/task_skill.py'}
+                            or not read(root / 'l2_source_integration_audit.json').get('passed')):
+                        raise ValueError('Unapproved L2 compatibility code change')
+                    freeze(root / 'l2_manifest.before-source-replay-repair.json', manifest)
+                    write(root / 'l2_source_replay_compatibility.json', {
+                        'changed_files': sorted(changed), 'original_code': manifest['code'],
+                        'current_code': current_code, 'budgets_reset': False,
+                        'reason': 'Same source context for proposal generation and audit replay'})
+                    manifest['code'] = current_code
                 manifest["provider"] = provider_signature()
                 write(root / "l2_manifest.json", manifest)
             write(root / "status.json", {"stage": args.stage, "status": "running", "pid": os.getpid(),

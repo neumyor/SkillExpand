@@ -8,6 +8,10 @@ the proposal cache identity and stopped the driver with
 `Missing cached L2 response: hypotheses.json`. Generation, batch replay and
 round auditing now share the same source-context projection. The existing real
 journal replay passes offline; no candidate or validation budget was reset.
+The two changed package files also required an explicit code compatibility
+record. The original manifest is retained in
+l2_manifest.before-source-replay-repair.json; l2_source_replay_compatibility.json
+records the before/after code identities without changing algorithm settings.
 The focused source-context regression and aligned checks pass (14 tests).
 Older task-Skill fixture checks still fail because they omit the verifier reward
 files required by the existing strict validator; those checks are not claimed

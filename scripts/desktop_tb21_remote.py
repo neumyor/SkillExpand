@@ -91,13 +91,15 @@ elif sys.argv[1] in ('resume-e7', 'l2-e7'):
             child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
                 stderr=subprocess.STDOUT, start_new_session=True)
         write(root / 'status.json', {'stage': 'QD', 'status': 'running', 'pid': child.pid,
-            'workers': 16, 'phase': 'targeted_initial_resume'})
+            'workers': 16, 'phase': 'l2_resume_starting' if sys.argv[1] == 'l2-e7' else 'targeted_initial_resume'})
         write(root / 'targeted_resume.json', {'pid': child.pid, 'command': command,
             'slots': ['77-3'], 'previous_requests': previous, 'max_new_requests': 3,
             'budget_resets': 0, 'source': 'authorized_desktop_env', 'total_reserved': reserved + 16,
             'reason': 'prior model command transport deadline; fresh role-verified sandbox transport',
             'unresolved_setup_slots': ['51-2', '73-1', '73-2', '73-3']})
-        print(json.dumps({'pid': child.pid, 'total_reserved': reserved + 16, 'slots': ['77-3']}))
+        print(json.dumps({'pid': child.pid, 'total_reserved': reserved + 16,
+                          'phase': 'l2' if sys.argv[1] == 'l2-e7' else 'initial',
+                          'slots': [] if sys.argv[1] == 'l2-e7' else ['77-3']}))
 else:
     from skillexpand.runtime.llm_relay import relay_from_env, coalesce_sse
     for model, role in [('qwen3.6-flash-distill', 'TB21_EXECUTOR_API_KEY'),
