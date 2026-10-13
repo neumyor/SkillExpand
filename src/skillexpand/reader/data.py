@@ -327,7 +327,12 @@ class Reader:
             job = Path(config.get("jobs_dir", "")) / config.get("job_name", "")
             rows = sources.setdefault(str(job), {})
             attempts = {}
+            audited = mapping(self.optional(e8.parent / 'execution_audit.json', {}))
+            accepted_paths = {row['trial']: Path(row['result'])
+                              for row in audited.get('rows', [])
+                              if row.get('reward') in (0, 1)}
             for result_path in sorted(job.glob("*/result.json")):
+                result_path = accepted_paths.get(result_path.parent.name, result_path)
                 result = mapping(self.optional(result_path, {}))
                 task = result.get("task_name", result_path.parent.name.split("__")[0])
                 attempts[task] = attempts.get(task, 0) + 1

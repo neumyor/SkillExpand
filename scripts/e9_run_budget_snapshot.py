@@ -256,6 +256,13 @@ def main():
                 task_failure_policy=method.task_failure_policy,
             ),
         )
+        migration_path = root / 'contract.budget-reset-compatibility-20261013.json'
+        if migration_path.exists():
+            migration = read(migration_path)
+            if migration['original'] != contract:
+                raise ValueError('settings migration does not match historical contract')
+            runtime.adapter.legacy_eval_contracts = [contract['eval']]
+            runtime.adapter.execution_contract_hash = digest(migration['current'])
 
         def terminate(_signum, _frame):
             # Cancel before raising: ThreadPoolExecutor drains its running

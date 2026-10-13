@@ -42,3 +42,19 @@ E8's latest strict recovery audit accepts five new genuine successes:
 E7 remains 266/267 in initial execution; request 007 for slot 77-3 is active,
 and L2 remains gated. E9 was relaunched with supervisor 1443537 under the
 shared lock, reserving 93/250 workers in total; launch is not acceptance.
+
+## 2026-10-13 16:30 Checkpoint
+
+E8 recovery completed: strict audit complete=true, 267 unique valid scores,
+209 successes and 58 failures. Closed-set pass@1=78.28%, pass@3=87.64%
+(78/89 solved tasks). Historical E2 has 261 valid scores and six missing;
+environment differences and baseline_comparable=false remain disclosed.
+The independent E8 reader entry uses the earliest accepted recovery trajectory
+selected by execution_audit.json. E8 reservations are released.
+
+E9 resume exposed an unconnected legacy eval signature compatibility path.
+The recorded migration now supplies the historical eval to that path, keeping
+request identity checks and preserving physical-attempt history. New executions
+retain the current eval signature and the explicit execution contract identity.
+Supervisor 1515767 launched under the shared capacity lock with 80/250 reserved.
+E7 request 007 remains running with no result; initial coverage remains 266/267.

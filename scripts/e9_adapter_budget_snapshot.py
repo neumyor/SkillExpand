@@ -150,13 +150,13 @@ class RolloutAdapter:
     def _run(self, unit, request):
         unit = Path(unit)
         signature = digest({"request": request, "eval": read_eval_contract(self.eval_config)})
+        permitted = {signature} | {
+            digest({"request": request, "eval": previous})
+            for previous in self.legacy_eval_contracts
+        }
         completed = unit / "rollout.json"
         if completed.exists():
             result = read(completed)
-            permitted = {signature} | {
-                digest({"request": request, "eval": previous})
-                for previous in self.legacy_eval_contracts
-            }
             if result["signature"] not in permitted:
                 raise ValueError("rollout signature changed")
             self._validate_saved(result, request)
@@ -199,7 +199,9 @@ class RolloutAdapter:
             if status.exists():
                 result = read(status)
             elif intent.exists():
-                if read(intent) != {"signature": signature, "request_hash": digest(request)}:
+                saved_intent = read(intent)
+                if (saved_intent.get('signature') not in permitted
+                        or saved_intent.get('request_hash') != digest(request)):
                     raise EvidenceError("pending rollout intent changed")
                 child_file = physical / "child.json"
                 if child_file.exists():
@@ -217,7 +219,7 @@ class RolloutAdapter:
                 if code == 2:
                     result.update(infra=False, failure_kind="configuration_invalid")
                 save(status, result)
-            if result.get("signature") != signature:
+            if result.get("signature") not in permitted:
                 raise EvidenceError("physical rollout signature changed")
             self._refuse_verifier_resampling(result)
             if not result["infra"]:
