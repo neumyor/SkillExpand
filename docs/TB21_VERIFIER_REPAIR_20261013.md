@@ -127,11 +127,15 @@ tests, valid Qwen trajectory, selected Skill activation/body and ready cache
 evidence (injection 459 seconds). Strict coverage advanced to 263/267.
 Request 002 of 73-1 also recovered reward 1 (one original test passed in
 58 seconds). Request 002 of 73-3 passed the source gate with reward 0.
-After rejecting 73-2's build dependency failure, strict coverage is 265/267:
-117 successes, 148 failures, missing 73-2 and 77-3. Request 003 of 73-2 was
-launched only after the hatchling probe passed, using its last remaining
-request. The full gate remains incomplete and L2 stays locked. Do not rerun
-accepted 51-2, 73-1 or 73-3.
+After rejecting 73-2's build dependency failure, strict coverage was 265/267.
+Request 003 of 73-2 was launched only after the hatchling probe passed, using
+its last remaining request. It produced a real reward 0: the original test
+again found 331 root-directory entries against the maximum of 30, with no
+build dependency failure. Cache injection took 109 seconds and the original
+test completed in 38 seconds. The full source gate now accepts 266/267:
+117 successes, 149 failures, only 77-3 missing. Both E7 and E8 remaining budgets
+are zero. Owned recovery drivers exited and workers were released; the full
+gate remains incomplete and L2 stays locked. Do not rerun accepted slots.
 
 After the driver exits, run scripts/refresh_e7_verifier_recovery.py to preserve
 the rejected slot record, revalidate all accepted sources and refresh the
