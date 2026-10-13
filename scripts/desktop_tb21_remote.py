@@ -55,6 +55,9 @@ elif sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-ca
 elif sys.argv[1] == 'resume-e9':
     sys.argv = [repo + '/scripts/resume_tb21_e9.py']
     runpy.run_path(sys.argv[0], run_name='__main__')
+elif sys.argv[1] == 'hkuds-e9':
+    sys.argv = [repo + '/scripts/launch_hkuds_upskill_tb21.py']
+    runpy.run_path(sys.argv[0], run_name='__main__')
 elif sys.argv[1] in ('resume-e7', 'l2-e7'):
     import fcntl, subprocess, time
     from pathlib import Path
@@ -122,7 +125,7 @@ else:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7', 'l2-e7',
+    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7', 'l2-e7', 'hkuds-e9',
                                          'recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache', 'reset-e8'])
     args = parser.parse_args()
     desktop = Path.home() / 'Desktop'

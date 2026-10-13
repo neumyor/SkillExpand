@@ -13,6 +13,9 @@ ROOT = Path('/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012')
 OUT = ROOT / 'outputs/E9_agentbrew_tb21_evo89_test89'
 REG = REPO / 'runs/tb21-e9-agentbrew-evo89-test89-20261012'
 
+if (REG / 'official_revision.json').exists():
+    raise SystemExit('E9 now uses the HKUDS ACP revision; old batch-notes resume is disabled')
+
 
 def write(path, data):
     temporary = path.with_suffix('.tmp')
