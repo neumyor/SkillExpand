@@ -50,6 +50,9 @@ else:
         TBENCH_TENCENT_ENV_FILE='/dev/null', E2B_VALIDATE_API_KEY='false',
         TB21_PIPELINE_CACHE='1', TB21_PIPELINE_CACHE_VERSION='pipeline-uv095-py3139-v6',
         PYTHONPATH=str(ROOT / 'src'), OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
+    amendment = REG / 'budget_reset_20261013.json'
+    if amendment.exists():
+        env['TB21_AUTHORIZED_INFRA_EXTRA_ATTEMPTS'] = '2'
     with (REPO / 'runs/.tb21-worker-reservations.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         prior = json.loads((REG / 'status.json').read_text())

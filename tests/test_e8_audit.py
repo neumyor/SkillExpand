@@ -11,6 +11,21 @@ spec.loader.exec_module(audit)
 
 
 class E8AuditTests(unittest.TestCase):
+    def test_user_reset_epoch_requires_explicit_authorization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            authorization = root / 'authorization.json'
+            authorization.write_text(json.dumps({'user_authorized': True, 'experiment': 'E8'}))
+            intent = dict(original_result='old', previous_executions=0, execution_limit=2,
+                          remaining_after_reservation=1, budget_epoch='user-reset-20261013',
+                          authorization_file=str(authorization))
+            (root / 'recovery_intent.json').write_text(json.dumps(intent))
+            original = [dict(task='a', trial='a__1', reward=None, result='old')]
+            recovery = [dict(task='a', trial='a__1', reward=1, result=str(root / 'result.json'))]
+            self.assertEqual(audit.merge_recovery(original, recovery)[0]['reward'], 1)
+            authorization.write_text(json.dumps({'user_authorized': False, 'experiment': 'E8'}))
+            with self.assertRaises(ValueError):
+                audit.merge_recovery(original, recovery)
     def test_recovery_is_unique_and_preserves_accepted_originals(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

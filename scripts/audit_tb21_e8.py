@@ -96,10 +96,18 @@ def merge_recovery(original, recovery):
         if row['reward'] is not None:
             intent_path = Path(row['result']).parent / 'recovery_intent.json'
             intent = json.loads(intent_path.read_text())
+            reset = intent.get('budget_epoch') == 'user-reset-20261013'
+            authorized = False
+            if reset:
+                auth = json.loads(Path(intent['authorization_file']).read_text())
+                authorized = (auth.get('user_authorized') is True and auth.get('experiment') == 'E8'
+                              and intent.get('previous_executions') in (0, 1)
+                              and intent.get('remaining_after_reservation') == 1 - intent['previous_executions'])
             if (Path(intent['original_result']).resolve() != Path(prior['result']).resolve()
-                    or intent.get('previous_executions') != 1
                     or intent.get('execution_limit') != 2
-                    or intent.get('remaining_after_reservation') != 0):
+                    or (not reset and (intent.get('previous_executions') != 1
+                                       or intent.get('remaining_after_reservation') != 0))
+                    or (reset and not authorized)):
                 raise ValueError('Recovery has no valid cumulative budget reservation')
             by_trial[row['trial']] = dict(row, historical_result=prior['result'],
                                            recovery=True)
@@ -111,11 +119,11 @@ def main():
     parser.add_argument('--job', type=Path, required=True)
     parser.add_argument('--baseline', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--recovery', type=Path)
+    parser.add_argument('--recovery', type=Path, action='append')
     args = parser.parse_args()
     current, baseline = panel(args.job, True), panel(args.baseline)
-    if args.recovery:
-        current = merge_recovery(current, panel(args.recovery, True))
+    for recovery in args.recovery or []:
+        current = merge_recovery(current, panel(recovery, True))
     by_task = defaultdict(dict)
     for name, rows in [('E8', current), ('E2', baseline)]:
         for task in sorted({row['task'] for row in rows}):

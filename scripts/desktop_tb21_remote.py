@@ -20,7 +20,21 @@ os.environ.update(env)
 repo = '/data2/liyishan/SkillExpand-tb21/SkillExpand'
 os.chdir(repo)
 sys.path[:0] = [repo + '/src', repo + '/scripts']
-if sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache'):
+if sys.argv[1] == 'reset-e8':
+    import subprocess
+    from pathlib import Path
+    adapter = '/data2/liyishan/tb21-tencent-skill/python'
+    os.environ['PYTHONPATH'] = ':'.join([repo + '/src', repo + '/scripts', adapter,
+                                      '/data2/liyishan/tbench2-openclaw-min/framework/python'])
+    os.environ['OPENAI_API_KEY'] = env['TB21_METHOD_API_KEY']
+    os.environ['HARBOR_E2B_FS_USER'] = 'root'
+    log = Path(repo) / 'runs/tb21-e8-deepseek-max-1m-20261012/budget-reset-20261013.log'
+    with log.open('a') as stream:
+        child = subprocess.Popen(['/data2/liyishan/tbench2-openclaw-min/.venv/bin/python',
+            repo + '/scripts/reset_tb21_e8_missing.py'], stdin=subprocess.DEVNULL,
+            stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+    print(json.dumps({'e8_reset_driver': child.pid}))
+elif sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache'):
     adapter = '/data2/liyishan/tb21-tencent-skill/python'
     os.environ['PYTHONPATH'] = ':'.join([repo + '/src', repo + '/scripts', adapter,
                                       '/data2/liyishan/tbench2-openclaw-min/framework/python'])
@@ -104,7 +118,7 @@ else:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7',
-                                         'recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache'])
+                                         'recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache', 'reset-e8'])
     args = parser.parse_args()
     desktop = Path.home() / 'Desktop'
     qwen, method = load(desktop / '.env'), load(desktop / '.env_deepseek')
