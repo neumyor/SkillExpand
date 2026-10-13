@@ -74,10 +74,21 @@ and teacher request usage are retained in the final report.
 Independent smoke supervisor 3213048 and driver 3213049 were verified alive.
 fix-git baseline: true verifier reward 1, tests_executed, no exception.
 Brew and category Curate both produced all three ACP files via Write tools.
-Ralph round 1 completed and smoke entered Serve. Formal 89-task execution
-has not yet been verified. Shared launch reservation was 80 (E7 16 + E9 64).
+Ralph round 1, Serve and Vanilla all completed with true verifier reward 1.
+Smoke audit complete=true, teacher test calls=0; Serve had 2848 chars of
+category guidance. Teacher HTTP requests confirmed deepseek-v4-flash-0731,
+reasoning_effort=max, max_tokens=65536, top_p=.95, top_k=20, thinking=true.
+The smoke used the first runner version; all four outcomes have executed
+verifier evidence. Formal execution uses the expanded configuration contract
+and missing-Ralph acceptance guard.
+Formal driver 3272315 entered baseline, 89-task contract and 64 submitted
+task requests verified. Shared launch reservation was 80 (E7 16 + E9 64).
 Later process identity and status must be re-read; these PIDs are launch evidence.
 
 The existing tb2-1 heartbeat was updated in place to use this official revision;
 old batch_notes instructions are superseded. E7/E8 and stopped E5 controls
 were preserved.
+
+Registration official_checkpoint.json records the official output, source,
+current phase, smoke results and verified supervisor/driver identities.
+Commit a6f798e was pushed via HTTP/1.1 to codex/tb21-progressive-relay-recovery.
