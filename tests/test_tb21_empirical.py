@@ -50,6 +50,19 @@ def test_setup_failure_zero_is_not_a_verifier_score(tmp_path):
         summary.validate_trial(path, 'fix-git')
 
 
+def test_c4_nested_build_dependency_failure_is_not_a_model_zero(tmp_path):
+    path = trial(tmp_path, 0)
+    raw = summary.read(path)
+    raw['task_name'] = 'reshard-c4-data'
+    summary.write(path, raw)
+    (tmp_path / 'verifier/test-stdout.txt').write_text(
+        'test session starts\n1 failed in 23s\n'
+        'Failed to resolve requirements from `build-system.requires`\n'
+        'hatchling was not found in the cache')
+    with pytest.raises(ValueError, match='verifier_build_dependency_unavailable'):
+        summary.validate_trial(path, 'reshard-c4-data')
+
+
 @pytest.mark.parametrize('reward', [0, 1])
 def test_agent_timeout_with_real_verifier_reward_is_valid(tmp_path, reward):
     path = trial(tmp_path)

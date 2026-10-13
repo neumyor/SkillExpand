@@ -11,7 +11,7 @@ import tarfile
 import time
 from pathlib import Path
 
-from tencent_task_verifier_cache import CACHE, ROOT, REQUIREMENTS, prepare, verifier_env
+from tencent_task_verifier_cache import CACHE, ROOT, REQUIREMENTS, prepare, verifier_env, command_env
 from tencent_pipeline_cache import CHUNK_BYTES, write_json
 from prepare_pipeline_cache import upload_file_chunks, prepare_python_archive
 
@@ -267,6 +267,14 @@ async def validate(name, version):
             report['fixture_stdout'] = result.stdout + result.stderr
             if result.return_code:
                 raise RuntimeError('Fresh same-image C4 cache lookup failed')
+            await env.exec('mkdir -p /tmp/c4-build-probe/probe && touch /tmp/c4-build-probe/probe/__init__.py', user='root')
+            await env._sandbox.files.write('/tmp/c4-build-probe/pyproject.toml',
+                '[project]\nname="probe"\nversion="0.1.0"\n[build-system]\nrequires=["hatchling"]\nbuild-backend="hatchling.build"\n', user='root')
+            result = await env.exec(f'{ROOT}/bin/uv sync --project /tmp/c4-build-probe',
+                user='root', env=command_env(env, '/tests/test.sh > /logs/verifier/test-stdout.txt', {}), timeout_sec=180)
+            report['build_probe_stdout'] = result.stdout + result.stderr
+            if result.return_code:
+                raise RuntimeError('C4 nested build dependency preparation failed')
         from harbor.verifier.verifier import Verifier
         env._task_verifier_cache_ready = True
         verifier = Verifier(task=task, trial_paths=env.trial_paths, environment=env)

@@ -39,6 +39,10 @@ def validate_trial(result_path, task_name, *, activation=False, model='qwen3.6-f
     log = stdout.read_text() if stdout.is_file() else ''
     if 'test session starts' not in log or not re.search(r'\b[1-9]\d* (?:passed|failed)\b', log):
         raise ValueError('missing_verifier_test_outcome')
+    if (task_name == 'reshard-c4-data' and reward == 0
+            and "Failed to resolve requirements from `build-system.requires`" in log
+            and 'was not found in the cache' in log):
+        raise ValueError('verifier_build_dependency_unavailable')
     trajectory = result_path.parent / 'agent/trajectory.json'
     if not trajectory.is_file() or not read(trajectory):
         raise ValueError('missing_trajectory')

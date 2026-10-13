@@ -28,6 +28,7 @@ class TaskCacheTests(unittest.IsolatedAsyncioTestCase):
         c4 = cache.command_env(environment, '/tests/test.sh > /logs/verifier/test-stdout.txt', original)
         self.assertEqual(c4['HF_HUB_OFFLINE'], '1')
         self.assertEqual(c4['HF_DATASETS_OFFLINE'], '1')
+        self.assertEqual(c4['UV_OFFLINE'], '0')
 
     async def test_no_configured_cache_means_no_hook_work(self):
         with patch.dict(os.environ, {'TB21_TASK_VERIFIER_CACHES': '{}'}):

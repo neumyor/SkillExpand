@@ -44,7 +44,7 @@ Root: `/data2/liyishan/tbench2-openclaw-min/cache/task-verifiers`.
 | mteb-retrieve | repair-20261013-v2 | passed; injection 744s, original tests 76s |
 | torch-tensor-parallelism | repair-20261013-v2 | passed; injection 603s, original tests 109s |
 | pytorch-model-recovery | repair-20261013-v2 | passed; injection 467s, original tests 76s |
-| reshard-c4-data | repair-20261013-v4 | passed; injection 138s, offline fixture and original tests 25s |
+| reshard-c4-data | repair-20261013-v4 | passed; latest injection 129s, offline fixture, hatchling build probe and original tests 30s |
 
 Engineering runs have no agent solution. Their rewards are not benchmark
 scores. Only manifest.status=ready can be enabled. Failed v1/v2 preparations
@@ -72,8 +72,25 @@ argument; it references the same Arrow files without modifying the loader or
 verifier. Version v3 stays unpublished and retains its failure evidence.
 Version v4 passed in a fresh task image: the original call loaded all 356,318
 rows with HF_HUB_OFFLINE=1 and HF_DATASETS_OFFLINE=1, then the unmodified
-verifier executed actual pytest outcomes. The cache is ready. E7 C4 requests
-002 were launched for 73-1/2/3 within the original remaining budgets.
+verifier executed actual pytest outcomes. E7 C4 requests 002 were launched
+for 73-1/2/3 within the original remaining budgets.
+
+Request 002 of 73-2 exposed another dependency boundary: the original test
+runs `uv sync` and `uv run` in the agent-authored project. That project's
+build backend was hatchling, outside the fixed verifier bundle. Forced
+UV_OFFLINE=1 prevented its installation, even though pytest reported one
+failure. The raw reward remains preserved, but strict validation rejects it
+as verifier_build_dependency_unavailable; it is not an accepted model zero.
+C4 verifier commands now retain offline Hugging Face data while allowing
+uv to resolve additional project build dependencies through the configured
+package mirror (UV_OFFLINE=0). Fixed verifier dependencies remain cached.
+A fresh same-image validation passed the original offline 356,318-row lookup,
+an isolated hatchling project build, and the unmodified verifier. Other task
+bundles retain UV_OFFLINE=1. This is not a fully offline project-build cache.
+
+Request 002 of 73-3 is a real reward zero: data generation and compression
+completed, then the original assertion found 331 root-directory entries
+against a maximum of 30. Accepted scored slots are not rerun.
 
 ## Recovery incident and budgets
 
@@ -90,6 +107,11 @@ each recovery_intent.json, result, trajectory and sandbox deletion record.
 The factory fix was verified without dispatching a trial.
 
 E8 strict coverage remains 254/267: 197 successes, 57 failures, 13 missing.
+The missing trials comprise eight without reliable pytest outcomes, four
+VerifierTimeoutError and one RemoteProtocolError: mteb-retrieve (2),
+pytorch-model-recovery (2), qemu-alpine-ssh (3), qemu-startup (3),
+torch-tensor-parallelism (3). Four AgentTimeoutError trials with real verifier
+evidence remain accepted; agent timeout alone is not a missing-score reason.
 Its merged recovery audit is in registration/recovery_audit_20261013.
 Original results and reports remain separate from the recovery report.
 
@@ -103,8 +125,17 @@ selection, activation, body and verifier evidence must all pass before L2.
 E7 51-2 request 002 recovered a real reward of 1 with two passing original
 tests, valid Qwen trajectory, selected Skill activation/body and ready cache
 evidence (injection 459 seconds). Strict coverage advanced to 263/267.
-The initial full gate still fails on the three C4 slots and 77-3; workers are
-released and L2 stays locked. Do not rerun accepted 51-2.
+Request 002 of 73-1 also recovered reward 1 (one original test passed in
+58 seconds). Request 002 of 73-3 passed the source gate with reward 0.
+After rejecting 73-2's build dependency failure, strict coverage is 265/267:
+117 successes, 148 failures, missing 73-2 and 77-3. Request 003 of 73-2 was
+launched only after the hatchling probe passed, using its last remaining
+request. The full gate remains incomplete and L2 stays locked. Do not rerun
+accepted 51-2, 73-1 or 73-3.
+
+After the driver exits, run scripts/refresh_e7_verifier_recovery.py to preserve
+the rejected slot record, revalidate all accepted sources and refresh the
+partial gate. It takes driver.pid and dispatches no benchmark requests.
 
 Recompute `runs/verifier_recovery_budget_20261013.json` using
 scripts/audit_tb21_recovery_budget.py. Retained recovery reservations count
@@ -118,6 +149,12 @@ remote adapter/config tests passed, including cancellation cleanup. A real
 Harbor factory check selected TencentSandboxTerminus2 without agent execution.
 Three Skill mounting/activation tests and two focused cumulative-budget tests
 also passed remotely.
+The latest focused cache and empirical scoring checks passed all 18 tests,
+including rejection of the nested C4 build dependency failure. Local pytest
+uses PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 because an unrelated installed
+langsmith plugin requires a different pydantic version.
+The five focused local E8/config tests and one remaining-budget check passed;
+15 remote empirical/E8 tests and six deployed cache/config tests passed.
 The six disposable same-image DNS/apt/uv probes passed. Cache manifests and
 validation.json provide the separate dependency/test evidence above.
 

@@ -51,6 +51,9 @@ def command_env(environment, command, env):
         value = verifier_env(env)
         if environment.environment_name == 'reshard-c4-data':
             value.update(HF_DATASETS_OFFLINE='1', HF_HUB_OFFLINE='1')
+            # Agent-authored projects may require build backends beyond the
+            # fixed verifier dependencies; resolve them through package mirrors.
+            value['UV_OFFLINE'] = '0'
         return value
     return env
 

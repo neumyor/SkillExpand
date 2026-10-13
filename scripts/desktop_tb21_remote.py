@@ -20,7 +20,7 @@ os.environ.update(env)
 repo = '/data2/liyishan/SkillExpand-tb21/SkillExpand'
 os.chdir(repo)
 sys.path[:0] = [repo + '/src', repo + '/scripts']
-if sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache'):
+if sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache'):
     adapter = '/data2/liyishan/tb21-tencent-skill/python'
     os.environ['PYTHONPATH'] = ':'.join([repo + '/src', repo + '/scripts', adapter,
                                       '/data2/liyishan/tbench2-openclaw-min/framework/python'])
@@ -29,10 +29,14 @@ if sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache'):
                    '--credential-pid', str(os.getpid())]
         if env.get('TB21_RECOVERY_SLOTS'):
             command += ['--slots', *env['TB21_RECOVERY_SLOTS'].split(',')]
-    else:
+    elif sys.argv[1] == 'prepare-c4-cache':
         command = ['/data2/liyishan/tbench2-openclaw-min/.venv/bin/python',
                    adapter + '/prepare_task_verifier_cache.py', '--credential-pid', str(os.getpid()),
                    '--version', env.get('TB21_C4_CACHE_VERSION', 'repair-20261013-v4'), '--resume-assembly', 'reshard-c4-data']
+    else:
+        command = ['/data2/liyishan/tbench2-openclaw-min/.venv/bin/python',
+                   adapter + '/prepare_task_verifier_cache.py', '--credential-pid', str(os.getpid()),
+                   '--version', 'repair-20261013-v4', '--validate-only', 'reshard-c4-data']
     os.execvpe(command[0], command, os.environ)
 elif sys.argv[1] == 'resume-e9':
     sys.argv = [repo + '/scripts/resume_tb21_e9.py']
@@ -100,7 +104,7 @@ else:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7',
-                                         'recover-e7-verifiers', 'prepare-c4-cache'])
+                                         'recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache'])
     args = parser.parse_args()
     desktop = Path.home() / 'Desktop'
     qwen, method = load(desktop / '.env'), load(desktop / '.env_deepseek')
