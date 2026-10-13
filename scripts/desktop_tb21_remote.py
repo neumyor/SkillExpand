@@ -70,6 +70,7 @@ elif sys.argv[1] in ('resume-e7', 'l2-e7'):
         '--initial-only', '--initial-slots', '77-3']
     if sys.argv[1] == 'l2-e7':
         command = command[:-3] + ['--l2-only']
+        os.environ['TBENCH_RELAY_MAX_CONCURRENCY'] = '1'
     with (Path(repo) / 'runs/.tb21-worker-reservations.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         for proc in Path('/proc').iterdir():

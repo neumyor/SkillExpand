@@ -1,5 +1,20 @@
 # TB2.1 Qwen + DeepSeek Skill Library
 
+## 2026-10-13 19:37 Asia/Shanghai checkpoint
+
+E7 has two completed L2 batch journals. Offline source-context replay has
+advanced beyond the former cache identity failure. The latest driver stopped
+on provider project-wide RPM HTTP 429. The next L2-only launch limits each
+owned relay to one in-flight request while retaining the 16-worker reservation,
+existing correction ledgers, requests and journals. This reduces bursts but
+does not establish a provider RPM guarantee.
+
+E9 is executing Ralph: 20 candidate-ready, 13 validating, three validated and
+16 tasks with one recorded round at inspection. All three formerly missing
+initial task attempts now have genuine verifier reward 0 and tests-executed
+evidence. Nine blocked units reference pending exact teacher relay attempts;
+they must not be duplicated. Frozen memory, test and vanilla remain pending.
+
 ## L2 Replay Compatibility Repair, 2026-10-13
 
 The first L2 batch produced a journal, but replay loaded the base execution
