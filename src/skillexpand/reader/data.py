@@ -363,6 +363,27 @@ class Reader:
                     "reward": mapping(mapping(result.get("verifier_result")).get("rewards")).get("reward"),
                     "accepted": accepted_paths.get(result_path.parent.name) == result_path,
                 }
+        e10 = self.root / "tb21-e10-qwen-bare-262144-20261014/full_config.json"
+        if e10.exists():
+            config = mapping(self.optional(e10, {}))
+            job = Path(config.get("jobs_dir", "")) / config.get("job_name", "")
+            rows = sources.setdefault(str(job), {})
+            audit = mapping(self.optional(e10.parent / "execution_audit.json", {}))
+            audited = {row["trial"]: row for row in sequence(audit.get("rows"))
+                       if isinstance(row, dict) and row.get("result")}
+            paths = {p.parent.name: p for p in job.glob("*/result.json")}
+            paths.update({name: Path(row["result"]) for name, row in audited.items()})
+            attempts = {}
+            for name, path in sorted(paths.items()):
+                result = mapping(self.optional(path, {}, "result"))
+                task = result.get("task_name", name.split("__")[0])
+                attempts[task] = attempts.get(task, 0) + 1
+                trajectory = path.parent / "agent/trajectory.json"
+                row = audited.get(name, {})
+                rows[str(trajectory)] = {"task_id": task, "task_name": task,
+                    "attempt_index": attempts[task], "trajectory_path": str(trajectory),
+                    "result_path": str(path), "source_model": "qwen3.6-flash-distill",
+                    "reward": row.get("reward"), "accepted": row.get("reward") in (0, 1)}
         for key, rows in sources.items():
             values = list(rows.values())
             models = sorted({str(v.get("source_model", "")) for v in values})
@@ -371,6 +392,8 @@ class Reader:
                      else "Qwen 原始来源") + f" · {Path(key).name}"
             if Path(key).name == "tb21_e8_deepseek_max_1m_raw_20261012":
                 label = "E8 · DeepSeek max / 1M 无 Skill"
+            if Path(key).name == "tb21_e10_qwen_bare_262144_20261014":
+                label = "E10 · Qwen 262144 无 Skill"
             run = Run(key, label, Path(key), {}, {}, raw=values, raw_model=model)
             for row in values:
                 tid = str(row.get("task_id", "?"))

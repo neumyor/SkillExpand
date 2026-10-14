@@ -157,6 +157,23 @@ def test_result_partial_json_stays_unknown(tmp_path):
     assert d["reward"] is None and "暂不可读" in d["result_error"]
 
 
+def test_e10_bare_index_uses_audited_reward_and_preserves_unknown(tmp_path):
+    registration = tmp_path / "tb21-e10-qwen-bare-262144-20261014"
+    job = tmp_path / "jobs/tb21_e10_qwen_bare_262144_20261014"
+    write(registration / "full_config.json", {"jobs_dir": str(job.parent), "job_name": job.name})
+    for name in ["task__a", "task__b"]:
+        write(job / name / "result.json", {"task_name": "task",
+              "verifier_result": {"rewards": {"reward": 0}}})
+        write(job / name / "agent/trajectory.json", {"steps": []})
+    write(registration / "execution_audit.json", {"rows": [
+        {"trial": "task__a", "result": str(job / "task__a/result.json"), "reward": 1}]})
+    reader = Reader(tmp_path)
+    run = reader.runs[str(job)]
+    assert "E10" in run.label
+    assert [row["reward"] for row in run.raw] == [1, None]
+    assert [row["accepted"] for row in run.raw] == [True, False]
+
+
 def test_gradio_callbacks_keep_task_trace_card_and_compare_consistent(tmp_path):
     import pytest
     pytest.importorskip("gradio")
