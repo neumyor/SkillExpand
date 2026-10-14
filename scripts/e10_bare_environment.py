@@ -17,6 +17,21 @@ def verifier_env(command, env=None):
             'GIT_SSH_COMMAND': 'ssh -o BatchMode=yes -o ConnectTimeout=10'}
 
 
+async def ensure_model_python(environment):
+    result = await environment.exec(
+        'command -v python3 >/dev/null 2>&1 || '
+        '(DEBIAN_FRONTEND=noninteractive apt-get update && '
+        'DEBIAN_FRONTEND=noninteractive apt-get install -y python3-minimal)',
+        user='root', timeout_sec=300)
+    if result.return_code != 0:
+        raise RuntimeError('E10 model transport Python bootstrap failed')
+    result = await environment.exec(
+        "python3 -c 'import json, urllib.request, ssl, socket; print(\"model-python-ready\")'",
+        user='root', timeout_sec=30)
+    if result.return_code != 0:
+        raise RuntimeError('E10 model transport Python validation failed')
+
+
 class E10BareEnvironment(TencentSnapshotE2BEnvironment):
     async def start(self, force_build):
         await super().start(force_build)
@@ -33,6 +48,7 @@ class E10BareEnvironment(TencentSnapshotE2BEnvironment):
 
 class E10BareTerminus(TencentSandboxTerminus2):
     async def setup(self, environment):
+        await ensure_model_python(environment)
         await super().setup(environment)
         (self.logs_dir / 'effective_agent_config.json').write_text(json.dumps({
             'max_input_tokens': self._tencent_model_info['max_input_tokens'],
