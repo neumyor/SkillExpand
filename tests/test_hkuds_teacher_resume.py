@@ -2,7 +2,10 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+import sys
 
 source = Path(__file__).with_name('run_hkuds_upskill_tb21.py')
 if not source.exists():
@@ -10,6 +13,7 @@ if not source.exists():
 spec = importlib.util.spec_from_file_location('runner', source)
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
+complete_stream = runner.complete_stream
 
 class RelayError(RuntimeError):
     pass
@@ -20,6 +24,18 @@ def save(path, value):
 
 
 class TeacherResumeTest(unittest.TestCase):
+    def test_stream_accepts_null_optional_choices_and_tool_calls(self):
+        events = [{'choices': None}, {'choices': [{'delta': None}]},
+                  {'choices': [{'delta': {'content': 'done', 'tool_calls': None},
+                                'finish_reason': 'stop'}]}]
+        module = SimpleNamespace(iter_sse_events=lambda chunks: iter(events))
+        transport = SimpleNamespace(stream=lambda payload: iter(()))
+        with patch.dict(sys.modules, {'skillexpand.runtime.llm_relay': module}):
+            message, _, finish = complete_stream(transport, {})
+        self.assertEqual(message['content'], 'done')
+        self.assertEqual(message['tool_calls'], [])
+        self.assertEqual(finish, 'stop')
+
     def test_cached_extra_write_is_ignored_without_another_model_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

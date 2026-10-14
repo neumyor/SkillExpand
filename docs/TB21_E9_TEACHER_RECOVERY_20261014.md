@@ -83,3 +83,13 @@ remain failures. Brew records per-unit errors and completes other eligible units
 before its completeness check, so one failure no longer cancels queued work.
 No teacher budget or baseline retry allowance changes. Four focused tests pass,
 including extra-Write cached replay without another model request.
+
+After removing that gate, Brew reached 61/87 ACPs and exited with 26 missing.
+Seventeen missing units have relay buffering 503/timeouts; nine retain generation
+or parsing failures. No unit has exhausted eight slots. The next recovery limits
+the relay to one stream because buffering failures persisted at four streams.
+Original transport requests stay recorded and consume their slots; generation
+failures remain excluded from recovery markers. Optional null choices/delta/
+tool_calls fields now parse as empty, with a focused regression test, but past
+TypeError records are not automatically reclassified or resampled. Five focused
+tests pass. Curate is still blocked until eligible ACP coverage is complete.

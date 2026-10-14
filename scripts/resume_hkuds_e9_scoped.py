@@ -102,7 +102,7 @@ else:
                    TBENCH_LLM_KEY=env['TB21_EXECUTOR_API_KEY'],
                    OPENAI_API_KEY=env['TB21_EXECUTOR_API_KEY'], HARBOR_E2B_FS_USER='root',
                    OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
-                   TBENCH_RELAY_MAX_CONCURRENCY='4')
+                   TBENCH_RELAY_MAX_CONCURRENCY='1')
         stamp = str(time.time_ns())
         if '--resume-existing' in sys.argv and '--brew-unstarted-only' not in sys.argv:
             for path in (OUT / 'run').glob('**/http-*.json'):
@@ -128,9 +128,9 @@ else:
               'prior_status': read(OUT / 'run/status.json'), 'total_reserved': reserved + 64,
               'active_reservations': active, 'contract_preserved': True,
               'execution_fix': 'verifier stdin closed; original scripts and accepted results preserved',
-              'teacher_threads': 16, 'teacher_relay_concurrency': 4,
+              'teacher_threads': 16, 'teacher_relay_concurrency': 1,
               'brew_unstarted_only': '--brew-unstarted-only' in sys.argv,
-              'transport_reason': 'Upstream 503 request buffering capacity exhausted at 16 concurrent streams'})
+              'transport_reason': 'Upstream buffering 503 persists at four streams; serialize remaining transport slots'})
         with (OUT / 'supervisor.log').open('a') as log:
             worker_command = [sys.executable, __file__, '--worker']
             if '--brew-unstarted-only' in sys.argv:

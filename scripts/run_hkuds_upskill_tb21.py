@@ -47,12 +47,12 @@ def complete_stream(transport, payload):
     for event in iter_sse_events(transport.stream(payload)):
         if event.get('usage'):
             usage = event['usage']
-        for choice in event.get('choices', []):
-            delta = choice.get('delta', {})
+        for choice in event.get('choices') or []:
+            delta = choice.get('delta') or {}
             content += delta.get('content') or ''
             reasoning += delta.get('reasoning_content') or ''
             finish = choice.get('finish_reason') or finish
-            for call in delta.get('tool_calls', []):
+            for call in delta.get('tool_calls') or []:
                 row = calls.setdefault(call['index'], {'id': '', 'type': 'function',
                     'function': {'name': '', 'arguments': ''}})
                 row['id'] = call.get('id') or row['id']
