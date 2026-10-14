@@ -18,7 +18,9 @@ def raw(tmp_path, model, attempt, *, reward=1, exception=None, steps=2):
     aligned.write(directory / "result.json", {"task_name": "task", "exception_info": exception,
         "config": {"agent": {"model_name": "openai/" + model}},
         "verifier_result": {"rewards": {"reward": reward}}})
-    aligned.write(directory / "agent/trajectory.json", {"steps": [{"message": f"observation {i}"} for i in range(steps)]})
+    aligned.write(directory / "agent/trajectory.json", {"steps": [
+        {"message": "model narration", "tool_calls": [{"function_name": "bash", "arguments": {"keystrokes": "ls"}}],
+         "observation": {"results": [{"content": f"observation {i}"}]}} for i in range(steps)]})
     (directory / 'verifier').mkdir(exist_ok=True)
     (directory / 'verifier/reward.txt').write_text(str(reward))
     (directory / 'verifier/test-stdout.txt').write_text('test session starts\n1 passed in 1s')

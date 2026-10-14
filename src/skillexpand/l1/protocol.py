@@ -56,9 +56,11 @@ def evidence(task, trials, guidance=None, adapter=None):
                 continue
             item = (adapter.evidence_event(event) if adapter else
                     {'text': str(event['observation']), 'effect': 'observed',
-                     'method': True})
+                     'method': event.get('method', True)})
+            if event.get('source'):
+                item['origin'] = event['source']
             ref = f"t{t['index']}:{event['ref']}"
-            parts = item['text'].split('\n\n')
+            parts = [item['text']] if event.get('source') else item['text'].split('\n\n')
             for i, text in enumerate(parts):
                 result[ref if len(parts) == 1 else f'{ref}/p{i+1}'] = {
                     **item, 'source': 'observation', 'text': text,
@@ -185,4 +187,29 @@ def projection(card):
     value = {k: card[k] for k in ('card_id', 'task', 'execution', 'evidence', 'claims', 'claim_status')}
     if 'source_context' in card:
         value['source_context'] = card['source_context']
+    if card.get('memory_format') == 'terminalbench-tools-v1':
+        value = copy.deepcopy(value)
+        budget = 23000
+        selected = []
+        omitted_chars = 0
+        cited = {ref for claim in value['claims'] for ref in claim.get('evidence_refs', [])}
+        rows = sorted(value['evidence'], key=lambda row: row['id'] not in cited)
+        for row in rows:
+            original_chars = len(row['observation'])
+            truncated_chars = 0
+            if len(row['observation']) > 2000:
+                truncated_chars = len(row['observation']) - 2000
+                row['observation'] = row['observation'][:1000] + '\n[... omitted ...]\n' + row['observation'][-1000:]
+                row['observation_truncated'] = True
+            size = len(json.dumps(row, ensure_ascii=False))
+            if size <= budget:
+                selected.append(row)
+                budget -= size
+                omitted_chars += truncated_chars
+            else:
+                omitted_chars += original_chars
+        value['omitted_evidence'] = len(value['evidence']) - len(selected)
+        value['omitted_observation_chars'] = omitted_chars
+        value['evidence'] = selected
+        value['memory_format'] = card['memory_format']
     return value

@@ -260,26 +260,17 @@ def execute_experience(spec: ExperienceSpec) -> Dict[str, Any]:
             trials = []
             for item in payload.get('trials', []):
                 trajectory = item.get('trajectory_path') or item.get('trial_dir')
-                events = []
+                from skillexpand.benchmarks.atif import load_events
                 trajectory_file = Path(trajectory) if trajectory else None
-                if trajectory_file and trajectory_file.is_file():
-                    try:
-                        trace = json.loads(trajectory_file.read_text())
-                        for index, step in enumerate(trace.get('steps', []), 1):
-                            text = step.get('message') or step.get('observation') or ''
-                            if text:
-                                events.append({'ref': f'e{index}', 'action': 'TerminalBatch',
-                                               'observation': str(text),
-                                               'environment': {'success': item.get('reward') == 1}})
-                    except (OSError, ValueError, TypeError):
-                        pass
+                if trajectory_file and trajectory_file.is_dir():
+                    trajectory_file = trajectory_file / 'agent/trajectory.json'
+                events, parse_status = load_events(trajectory_file) if trajectory_file else ([], {'status': 'missing'})
                 reward = item.get('reward') == 1
                 trials.append({'index': int(item.get('attempt_index', len(trials) + 1)),
                                'phase': 'autonomous', 'status': 'completed', 'success': reward,
                                'termination': item.get('status', 'verifier'),
-                               'trajectory': trajectory, 'events': events or [{'ref': 'e1',
-                               'action': 'TerminalBatch', 'observation': 'No trajectory steps recorded.',
-                               'environment': {'success': reward}}]})
+                               'trajectory': trajectory, 'events': events,
+                               'trajectory_parse': parse_status})
             rewards = tuple(bool(t['success']) for t in trials)
             solved = any(rewards)
             evidence = P.evidence(task, trials, adapter=__import__('skillexpand.l1.adapters', fromlist=['resolve']).resolve(cfg))

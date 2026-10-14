@@ -607,7 +607,7 @@ def matching_steps(steps: list, query: str = "") -> list[int]:
 
 
 def evidence_step(evidence: dict, steps: list) -> int | None:
-    explicit = evidence.get("step_id", mapping(evidence.get("source")).get("step_id"))
+    explicit = evidence.get("step_id", mapping(evidence.get("origin", evidence.get("source"))).get("step_id"))
     if explicit is not None:
         return next((i for i, s in enumerate(steps) if str(s.get("step_id")) == str(explicit)), None)
     # Evidence event numbers are not ATIF step IDs. Only a unique content match is safe.
