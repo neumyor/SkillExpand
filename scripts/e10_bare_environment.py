@@ -10,6 +10,13 @@ def verifier_command(command):
     return command + ' < /dev/null' if re.match(r'^/tests/test\.sh(?:\s|$)', command) else command
 
 
+def verifier_env(command, env=None):
+    if not re.match(r'^/tests/test\.sh(?:\s|$)', command):
+        return env
+    return {**(env or {}), 'GIT_TERMINAL_PROMPT': '0',
+            'GIT_SSH_COMMAND': 'ssh -o BatchMode=yes -o ConnectTimeout=10'}
+
+
 class E10BareEnvironment(TencentSnapshotE2BEnvironment):
     async def start(self, force_build):
         await super().start(force_build)
@@ -20,6 +27,7 @@ class E10BareEnvironment(TencentSnapshotE2BEnvironment):
             'mirror': 'https://mirrors.tencentyun.com', 'configured_paths': paths}) + '\n')
 
     async def exec(self, command, **kwargs):
+        kwargs['env'] = verifier_env(command, kwargs.get('env'))
         return await super().exec(verifier_command(command), **kwargs)
 
 
