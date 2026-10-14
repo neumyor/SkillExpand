@@ -21,6 +21,7 @@ from skillexpand.runtime.llm_relay import relay_from_env
 from skillexpand.runtime.progressive import select_and_load
 from skillexpand.benchmarks.terminalbench import harbor_rollout
 from skillexpand.benchmarks import task_skill as TS
+from skillexpand.skill_package import materialize_skill, entrypoint_content
 from run_tb21_empirical import CANARIES, SelectorHost, active_worker_reservation, failure_class, total_worker_limit
 from summarize_tb21_empirical import read, write, validate_trial
 
@@ -263,8 +264,7 @@ def run_slot(root, cfg, skills, tasks, transport, task, attempt, model, selector
             write(directory / "selection.json", selection)
             name = "install-windows-3-11" if record["task_name"] == "install-windows-3.11" else record["task_name"]
             mounted_source = directory / "skills" / name / "SKILL.md"
-            mounted_source.parent.mkdir(parents=True, exist_ok=True)
-            mounted_source.write_text(skill.body)
+            materialize_skill(skill, mounted_source.parent, package=skill.package_mode)
             rollout, runtime = harbor_rollout(cfg, task, skill, 1, directory, evolution_round=1)
             write(directory / "rollout.json", {"rollout": rollout, "runtime": runtime})
             if len(rollout["trials"]) != 1:
@@ -273,7 +273,7 @@ def run_slot(root, cfg, skills, tasks, transport, task, attempt, model, selector
             _, reward, trajectory = validate_trial(trial["result_path"], record["task_name"], activation=True, model=model)
             activation = read(Path(trial["result_path"]).parent / "agent/skill_activation.json")
             mounted = Path(activation["source_path"])
-            if not mounted.is_relative_to(directory) or mounted.read_text() != skill.body:
+            if not mounted.is_relative_to(directory) or mounted.read_text() != entrypoint_content(skill, package=skill.package_mode):
                 raise ValueError("Skill activation body/path mismatch")
             record.update(status="valid", reward=reward, result_path=trial["result_path"],
                           trajectory_path=trajectory, selection=selection, skill_file=str(mounted))

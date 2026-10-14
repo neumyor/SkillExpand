@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from skillexpand import schema as S
+from skillexpand.skill_package import materialize_skill
+
 spec = importlib.util.spec_from_file_location('tb21_empirical_summary',
     Path(__file__).resolve().parents[1] / 'scripts/summarize_tb21_empirical.py')
 summary = importlib.util.module_from_spec(spec)
@@ -120,15 +123,19 @@ def test_skill_execution_requires_activation_and_exact_task_identity(tmp_path):
         summary.validate_trial(path, 'other-task', activation=True)
 
 
-def test_summary_checks_mounted_body_and_verifier_instead_of_trusting_record(tmp_path):
-    skill = {'skill_id': 'repair', 'version': 1, 'description': 'repair git', 'body': 'Inspect then repair.'}
+@pytest.mark.parametrize('package', [False, True])
+def test_summary_checks_mounted_body_and_verifier_instead_of_trusting_record(tmp_path, package):
+    skill_obj = S.Skill('repair', 'family', 1, 'Repair', 'repair git', 'Inspect then repair.',
+                       resources={'references/note.txt': 'Evidence'} if package else {},
+                       package_mode=package)
+    skill = S.to_dict(skill_obj)
     summary.write(tmp_path / 'library.json', [skill])
     summary.write(tmp_path / 'manifest.json', {'tasks': 1, 'task_names': ['fix-git']})
     request = tmp_path / 'slots/00-1/requests/001'
     request.mkdir(parents=True)
     path = trial(request, 1)
-    mounted = request / 'SKILL.md'
-    mounted.write_text(skill['body'])
+    mounted = materialize_skill(skill_obj, request, package=package)
+    expected_entrypoint = mounted.read_text()
     summary.write(request / 'agent/skill_activation.json',
                   {'load_stage': 'after_selection', 'source_path': str(mounted)})
     record = {'status': 'valid', 'task_id': 0, 'attempt_index': 1, 'task_name': 'fix-git',
@@ -138,11 +145,16 @@ def test_summary_checks_mounted_body_and_verifier_instead_of_trusting_record(tmp
             'load_stage': 'after_selection', 'catalog': [{'skill_id': 'repair', 'description': 'repair git'}]}}
     summary.write(tmp_path / 'slots/00-1/record.json', record)
     assert summary.summarize(tmp_path)['empirical']['valid_attempts'] == 1
+    if package:
+        resource = request / 'references/note.txt'
+        resource.write_text('Changed')
+        assert summary.summarize(tmp_path)['rejected_slots'][0]['error'] == 'mounted_skill_resource_mismatch'
+        resource.write_text('Evidence')
     mounted.write_text('Different Skill')
     report = summary.summarize(tmp_path)
     assert report['empirical']['valid_attempts'] == 0
     assert report['rejected_slots'][0]['error'] == 'mounted_skill_body_mismatch'
-    mounted.write_text(skill['body'])
+    mounted.write_text(expected_entrypoint)
     record['reward'] = 0
     summary.write(tmp_path / 'slots/00-1/record.json', record)
     assert summary.summarize(tmp_path)['rejected_slots'][0]['error'] == 'result_record_mismatch'

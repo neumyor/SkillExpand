@@ -36,6 +36,7 @@ methodology can be unit-tested without the ALFWorld stack or an LLM.
 import hashlib
 import json
 import sys
+from pathlib import PurePosixPath
 from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -211,7 +212,12 @@ def _resolve_forward(tp: Any, owner: Any) -> Any:
 def to_dict(obj: Any) -> Any:
     """Recursively convert dataclasses / tuples into JSON-safe containers."""
     if is_dataclass(obj) and not isinstance(obj, type):
-        return {f.name: to_dict(getattr(obj, f.name)) for f in fields(obj)}
+        result = {f.name: to_dict(getattr(obj, f.name)) for f in fields(obj)}
+        # Optional package defaults must preserve pre-package Skill identities.
+        if isinstance(obj, Skill) and not obj.resources and not obj.package_mode:
+            result.pop('resources', None)
+            result.pop('package_mode', None)
+        return result
     if isinstance(obj, (list, tuple)):
         return [to_dict(x) for x in obj]
     if isinstance(obj, dict):
@@ -295,10 +301,9 @@ class Provenance:
 class Skill:
     """A promoted, reusable knowledge artefact.
 
-    ``body`` is the *only* field an executor ever sees.  ``name`` and
-    ``description`` exist for retrieval, ``family_id`` for evaluation-reference
-    mapping.  Keeping that separation explicit is what lets the paper test
-    routing independently of skill quality.
+    Legacy executors see only ``body``. Opt-in packages include a rendered
+    entrypoint and supporting ``resources``. ``description`` still controls
+    retrieval and ``family_id`` controls evaluation-reference mapping.
     """
 
     skill_id: str
@@ -308,10 +313,24 @@ class Skill:
     description: str
     body: str
     provenance: Provenance = field(default_factory=Provenance)
+    # Optional package files. Legacy skills keep the historical body-only path.
+    resources: Dict[str, str] = field(default_factory=dict)
+    package_mode: bool = False
 
     def __post_init__(self):
         if not isinstance(self.description,str) or not self.description.strip():
             raise ValueError('Skill description is required for routing')
+        if not isinstance(self.resources, dict):
+            raise TypeError('Skill resources must be a mapping of relative paths to text')
+        for path, content in self.resources.items():
+            parts = PurePosixPath(path).parts if isinstance(path, str) else ()
+            if (not isinstance(path, str) or not parts or PurePosixPath(path).is_absolute()
+                    or '..' in parts or str(PurePosixPath(path)) != path or '\x00' in path):
+                raise ValueError(f'invalid Skill resource path: {path!r}')
+            if parts[0] == 'SKILL.md' or not isinstance(content, str):
+                raise ValueError(f'invalid Skill resource: {path!r}')
+            if any(str(parent) in self.resources for parent in PurePosixPath(path).parents):
+                raise ValueError(f'Skill resource conflicts with a parent file: {path!r}')
 
     @property
     def key(self) -> str:

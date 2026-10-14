@@ -869,6 +869,25 @@ class SerialL2Tests(unittest.TestCase):
             self.assertEqual(len(self.executed) - before, 1)
             self.assertEqual(result.score_before, result.score_after)
 
+    def test_packages_cannot_reuse_body_only_scores(self):
+        driver = self.prepared()
+        with patch.object(PL, "run_generic", side_effect=self.fake_units):
+            routes = R.FrozenRoutes(
+                self.cfg, driver.plan, driver.initial, self.root / "routes", "val"
+            ).run()
+            cache = V.ScoreCache(self.root / "scores.jsonl")
+            scorer = V.FixedSkillScorer(self.cfg, cache, routes)
+            base = driver.initial[0]
+            scorer.score(base, [2], "panel")
+            packaged = replace(base, version=1, package_mode=True,
+                               resources={"references/note.txt": "Additional help"})
+            before = len(self.executed)
+            predicted = V.PredictedSkillScorer(self.cfg, routes, cache)
+            for evaluator in (scorer, predicted):
+                with self.assertRaisesRegex(ValueError, "resource-aware Harbor"):
+                    evaluator.score(packaged, [2], "panel")
+            self.assertEqual(len(self.executed), before)
+
     def test_real_fixed_executor_uses_one_attempt_without_selector_or_guidance(self):
         driver = self.prepared()
         skill = driver.initial[0]

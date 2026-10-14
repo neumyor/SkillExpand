@@ -16,6 +16,7 @@ from skillexpand.benchmarks.terminalbench import harbor_rollout
 from skillexpand.l2.loop import RunLock
 from skillexpand.runtime.llm_relay import relay_from_env
 from skillexpand.runtime.progressive import select_and_load
+from skillexpand.skill_package import materialize_skill, entrypoint_content
 from summarize_tb21_empirical import read, write, validate_trial, execution_settings, metrics, summarize
 
 
@@ -340,8 +341,7 @@ def execute_slot(cfg, tasks, skills, root, transport, task, attempt):
             # Harbor's skill mount normalizes this one task directory name.
             skill_directory = 'install-windows-3-11' if task_name == 'install-windows-3.11' else task_name
             skill_file = request_dir / 'skills' / skill_directory / 'SKILL.md'
-            skill_file.parent.mkdir(parents=True, exist_ok=True)
-            skill_file.write_text(skill.body)
+            materialize_skill(skill, skill_file.parent, package=skill.package_mode)
             rollout, runtime = harbor_rollout(cfg, task, skill, 1, request_dir)
             write(request_dir / 'rollout.json', {'rollout': rollout, 'runtime': runtime})
             if len(rollout['trials']) != 1:
@@ -352,7 +352,7 @@ def execute_slot(cfg, tasks, skills, root, transport, task, attempt):
             activation = read(Path(trial['result_path']).parent / 'agent/skill_activation.json')
             if Path(activation['source_path']).resolve() != skill_file.resolve():
                 raise ValueError('mounted_skill_path_mismatch')
-            if skill_file.read_text() != skill.body:
+            if skill_file.read_text() != entrypoint_content(skill, package=skill.package_mode):
                 raise ValueError('mounted_skill_body_mismatch')
             row.update(status='valid', reward=reward, selection=selection, skill_file=str(skill_file),
                 result_path=trial['result_path'], trajectory_path=trajectory, runtime=runtime)

@@ -219,6 +219,9 @@ class FixedSkillScorer:
         role=S.ROLE_EVAL,
         mode=S.MODE_CONSOLIDATED_DIRECT,
     ):
+        if skill.package_mode:
+            raise ValueError('Skill packages require resource-aware Harbor evaluation; '
+                             'FixedSkillScorer executes only the body')
         task_ids = tuple(sorted(task_ids))
         if len(set(task_ids)) != len(task_ids) or not set(task_ids) <= set(
             self.routes.groups[skill.skill_id]
@@ -582,6 +585,9 @@ class PredictedSkillScorer:
                     time.sleep(2 ** attempt)
 
     def score(self, skill, task_ids, panel_key):
+        if skill.package_mode:
+            raise ValueError('Skill packages require resource-aware Harbor evaluation; '
+                             'PredictedSkillScorer reviews only the body')
         task_ids = tuple(sorted(int(t) for t in task_ids))
         if not task_ids or not set(task_ids) <= set(self.routes.groups[skill.skill_id]):
             raise ValueError("Predicted tasks must belong to the frozen Skill route group")

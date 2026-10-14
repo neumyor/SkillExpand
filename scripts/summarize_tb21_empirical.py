@@ -5,6 +5,9 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from skillexpand import schema as S
+from skillexpand.skill_package import entrypoint_content
+
 
 def read(path):
     return json.loads(Path(path).read_text())
@@ -120,8 +123,13 @@ def summarize(root):
                 model=manifest.get('model', 'qwen3.6-flash-distill'))
             activated = read(Path(row['result_path']).parent / 'agent/skill_activation.json')
             mounted = Path(activated['source_path'])
-            if mounted.resolve() != Path(row['skill_file']).resolve() or mounted.read_text() != skill['body']:
+            package = S.from_dict(S.Skill, skill) if skill.get('package_mode') else None
+            expected = entrypoint_content(package, package=True) if package else skill['body']
+            if mounted.resolve() != Path(row['skill_file']).resolve() or mounted.read_text() != expected:
                 raise ValueError('mounted_skill_body_mismatch')
+            if package and any((mounted.parent / path).read_text() != content
+                               for path, content in package.resources.items()):
+                raise ValueError('mounted_skill_resource_mismatch')
             if reward != row['reward'] or trajectory != row['trajectory_path']:
                 raise ValueError('result_record_mismatch')
             rows.append(row)

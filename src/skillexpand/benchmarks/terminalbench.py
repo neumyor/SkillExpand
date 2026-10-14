@@ -12,6 +12,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from .base import BaseEnv
+from skillexpand.skill_package import materialize_skill
 
 
 def load_tasks(cfg):
@@ -63,9 +64,7 @@ def harbor_rollout(cfg, task_id, skill, attempts, out_dir, evolution_round=0):
     task_name = task['env_kwargs']['task_name']
     skill_root = out_dir / 'skills'
     if skill and skill.body.strip():
-        skill_path = skill_root / task_name / 'SKILL.md'
-        skill_path.parent.mkdir(parents=True, exist_ok=True)
-        skill_path.write_text(skill.body, encoding='utf-8')
+        materialize_skill(skill, skill_root / task_name, package=skill.package_mode)
     run_id = f'skillexpand_r{evolution_round}_task{task_id}_{os.getpid()}'
     jobs_dir = out_dir / 'jobs'
     env = os.environ.copy()
