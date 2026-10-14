@@ -28,6 +28,8 @@ if '--worker' in sys.argv:
                '--source', str(REPO / 'sources/HKUDS-UpSkill'), '--root', str(OUT / 'run'),
                '--eval-config', str(BASE / 'configs/agentbrew_tb21_evo89_test89_eval.yaml'),
                '--student-workers', '64', '--teacher-workers', '16']
+    if '--brew-unstarted-only' in sys.argv:
+        command.append('--brew-unstarted-only')
     with (OUT / 'driver.log').open('a') as log:
         child = subprocess.Popen(command, cwd=BASE, stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -62,6 +64,19 @@ else:
         reserved, active = active_worker_reservation(REPO / 'runs', REG)
         if reserved + 64 > 250:
             raise SystemExit('Shared worker capacity unavailable')
+        if '--brew-unstarted-only' in sys.argv:
+            untouched = []
+            for path in (OUT / 'run/baseline').glob('*/rollout.json'):
+                trial = read(path)
+                unit_root = OUT / 'run/brew' / path.parent.name
+                if (not trial.get('terminal_failure') and not trial.get('infra')
+                        and trial.get('reward') in (0, 1)
+                        and trial.get('verifier_evidence', {}).get('status') == 'tests_executed'
+                        and not (unit_root / 'acp.json').exists()
+                        and not any(unit_root.glob('http-*.json'))):
+                    untouched.append(path.parent.name)
+            if not untouched:
+                raise SystemExit('No untouched eligible Brew unit remains')
         unit = OUT / 'run/baseline/configure-git-webserver'
         amendment = {'unit': str(unit), 'authorized_by': 'user_explicit_20261014',
                      'base_attempts': 2, 'extra_attempts': 1, 'total_attempts': 3,
@@ -89,7 +104,7 @@ else:
                    OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
                    TBENCH_RELAY_MAX_CONCURRENCY='4')
         stamp = str(time.time_ns())
-        if '--resume-existing' in sys.argv:
+        if '--resume-existing' in sys.argv and '--brew-unstarted-only' not in sys.argv:
             for path in (OUT / 'run').glob('**/http-*.json'):
                 evidence = read(path)
                 if evidence.get('status') not in ('pending', 'transport_failed'):
@@ -114,9 +129,13 @@ else:
               'active_reservations': active, 'contract_preserved': True,
               'execution_fix': 'verifier stdin closed; original scripts and accepted results preserved',
               'teacher_threads': 16, 'teacher_relay_concurrency': 4,
+              'brew_unstarted_only': '--brew-unstarted-only' in sys.argv,
               'transport_reason': 'Upstream 503 request buffering capacity exhausted at 16 concurrent streams'})
         with (OUT / 'supervisor.log').open('a') as log:
-            child = subprocess.Popen([sys.executable, __file__, '--worker'], env=env, cwd=BASE,
+            worker_command = [sys.executable, __file__, '--worker']
+            if '--brew-unstarted-only' in sys.argv:
+                worker_command.append('--brew-unstarted-only')
+            child = subprocess.Popen(worker_command, env=env, cwd=BASE,
                                      stdin=subprocess.DEVNULL, stdout=log,
                                      stderr=subprocess.STDOUT, start_new_session=True)
         write(OUT / 'supervisor_identity.json', process_identity(child.pid))

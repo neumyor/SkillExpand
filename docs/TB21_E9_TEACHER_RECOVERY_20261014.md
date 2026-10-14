@@ -56,3 +56,18 @@ unknown. headless-terminal/http-00.json is teacher_failed/TypeError with no
 marker. These generation failures are unresolved and must not be automatically
 resampled or silently reclassified as infrastructure. Curate, Ralph, Serve and
 Vanilla have no results yet. No unit has been granted a ninth teacher request.
+
+At 2026-10-14 08:00 UTC the supervisor and driver were both dead, with
+35 complete ACPs, 45 started units and no remaining reservation. The recorded
+failure was an actual extra Write path, not path normalization: cached responses
+requested /app/solve.py, /app/solve_task.py, /app/verify.py and /app/check_env.sh.
+These remain rejected. Another unit, llm-inference-batching-scheduler, has an
+incomplete-stream ValueError. No generation-failure recovery marker is allowed.
+
+The --brew-unstarted-only mode advances only eligible units with neither an ACP
+nor any original http-NN.json. It excludes all previously attempted units, does
+not create recovery markers, and uses the same eight-turn ceiling. It records
+its scope, individual failures and missing ACPs, then exits before Curate even
+if its selected units finish. The first scoped selection contains 42 untouched
+units. Existing generation failures and the two student missing scores still
+block complete acceptance. Three focused recovery/scope tests pass.

@@ -20,6 +20,19 @@ def save(path, value):
 
 
 class TeacherResumeTest(unittest.TestCase):
+    def test_unstarted_scope_excludes_every_existing_request_and_completed_acp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for task, filename in [('pending', 'http-00.json'), ('failed', 'http-02.json'),
+                                   ('done', 'acp.json')]:
+                directory = root / 'brew' / task
+                directory.mkdir(parents=True)
+                (directory / filename).write_text('{}')
+            (root / 'brew' / 'prepared').mkdir()
+            (root / 'brew' / 'prepared' / 'prompt.txt').write_text('original')
+            self.assertEqual(runner.unstarted_brew_tasks(root,
+                ['pending', 'failed', 'done', 'prepared', 'untouched']), ['prepared', 'untouched'])
+
     def test_failed_slot_is_preserved_and_only_remaining_slots_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

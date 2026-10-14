@@ -167,6 +167,12 @@ def complete_audit(report):
             and 'missing' not in report['ralph_status'].values())
 
 
+def unstarted_brew_tasks(root, eligible):
+    return [task for task in eligible
+            if not (root / 'brew' / task / 'acp.json').exists()
+            and not any((root / 'brew' / task).glob('http-*.json'))]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', type=Path, required=True)
@@ -175,6 +181,7 @@ def main():
     parser.add_argument('--student-workers', type=int, default=64)
     parser.add_argument('--teacher-workers', type=int, default=16)
     parser.add_argument('--smoke', action='store_true')
+    parser.add_argument('--brew-unstarted-only', action='store_true')
     args = parser.parse_args()
     from tbench_eval.agentbrew.adapter import RolloutAdapter
     from tbench_eval.agentbrew.adapter import read_eval_contract
@@ -257,6 +264,30 @@ def main():
                 prompt = prompt.replace('(deepseek-v4-pro)', '(deepseek-v4-flash-0731)').replace('(deepseek-v4-flash)', '(qwen3.6-flash-distill)')
                 return teacher.run(args.root / 'brew' / task, prompt)
             phase('brew')
+            if args.brew_unstarted_only:
+                selected = unstarted_brew_tasks(args.root, eligible)
+                save(args.root / 'brew_unstarted_scope.json', {
+                    'selected': selected, 'eligible': eligible,
+                    'existing_request_units_excluded': [t for t in eligible if t not in selected],
+                    'budget_resets': 0, 'teacher_turn_limit': 8,
+                    'reason': 'Advance untouched units while retaining failed original requests'})
+                errors = {}
+                def bounded_draft(task):
+                    try:
+                        return draft(task)
+                    except Exception as exc:
+                        errors[task] = {'error_type': type(exc).__name__}
+                        return None
+                parallel(selected, args.teacher_workers, bounded_draft)
+                missing = [t for t in eligible if not (args.root / 'brew' / t / 'acp.json').exists()]
+                save(args.root / 'brew_unstarted_result.json', {
+                    'selected': selected, 'errors': errors, 'missing': missing,
+                    'complete_acps': len(eligible) - len(missing), 'budget_resets': 0,
+                    'curate_started': False})
+                save(args.root / 'status.json', {'status': 'needs_attention',
+                    'phase': 'brew_incomplete' if missing else 'brew_scope_finished',
+                    'workers': 0, 'missing_acps': missing})
+                return
             acps = parallel(eligible, args.teacher_workers, draft)
             phase('curate')
             cats = sorted({categories[t] for t in eligible})
