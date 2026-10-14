@@ -86,7 +86,8 @@ else:
         env.update(PYTHONPATH=':'.join([str(BASE / 'src'), str(REPO / 'src')]),
                    TBENCH_LLM_KEY=env['TB21_EXECUTOR_API_KEY'],
                    OPENAI_API_KEY=env['TB21_EXECUTOR_API_KEY'], HARBOR_E2B_FS_USER='root',
-                   OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
+                   OMP_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1',
+                   TBENCH_RELAY_MAX_CONCURRENCY='4')
         stamp = str(time.time_ns())
         if '--resume-existing' in sys.argv:
             for path in (OUT / 'run').glob('**/http-*.json'):
@@ -111,7 +112,9 @@ else:
         write(OUT / f'scoped_resume-{stamp}.json', {'amendment': amendment,
               'prior_status': read(OUT / 'run/status.json'), 'total_reserved': reserved + 64,
               'active_reservations': active, 'contract_preserved': True,
-              'execution_fix': 'verifier stdin closed; original scripts and accepted results preserved'})
+              'execution_fix': 'verifier stdin closed; original scripts and accepted results preserved',
+              'teacher_threads': 16, 'teacher_relay_concurrency': 4,
+              'transport_reason': 'Upstream 503 request buffering capacity exhausted at 16 concurrent streams'})
         with (OUT / 'supervisor.log').open('a') as log:
             child = subprocess.Popen([sys.executable, __file__, '--worker'], env=env, cwd=BASE,
                                      stdin=subprocess.DEVNULL, stdout=log,

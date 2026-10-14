@@ -38,3 +38,21 @@ No extra student attempt is authorized for either missing unit. Only baseline
 configure-git-webserver retains its explicit third-attempt amendment.
 Automation remains active; completed E7/E8/Final panels are not rerun and E5
 remains user-stopped.
+
+At 2026-10-14 07:00 UTC, the HTTP/1.1 recovery had produced 27 complete
+Brew ACPs out of 87 eligible baseline units. The preceding driver stopped on
+upstream HTTP 503, "Request buffering capacity is temporarily exhausted".
+The scoped launcher now sets TBENCH_RELAY_MAX_CONCURRENCY=4 while retaining
+16 teacher threads, 64 student workers and the 64-worker reservation. Both
+new supervisor and driver strong identities were verified alive; the live
+driver environment confirms relay concurrency 4. This limits transport load
+without changing prompts, model parameters or the original eight-turn budget.
+
+Only RelayError transport_failed records and original pending records qualify
+for recovery markers. circuit-fibsqrt/http-02.json has error_type=ValueError
+and no marker; its stream did not finish with stop/tool_calls. The finish reason
+and token usage were not preserved by the original failure recorder and remain
+unknown. headless-terminal/http-00.json is teacher_failed/TypeError with no
+marker. These generation failures are unresolved and must not be automatically
+resampled or silently reclassified as infrastructure. Curate, Ralph, Serve and
+Vanilla have no results yet. No unit has been granted a ninth teacher request.
