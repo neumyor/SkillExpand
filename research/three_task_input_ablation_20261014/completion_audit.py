@@ -348,9 +348,10 @@ class CompletionAudit:
         if recovery:
             row['infrastructure_recovery'] = {'reason': recovery['reason'],
                 'source_artifact_lost': recovery.get('source_artifact_lost', False), 'no_retry': True}
-            if recovery.get('record_recovered') and (record.get('status') != 'unresolved' or record.get('reward') is not None):
+            if recovery.get('record_recovered') and not recovery.get('record_reconstructed_from_official') and (record.get('status') != 'unresolved' or record.get('reward') is not None):
                 self.error(slot/'record.json', 'infrastructure_reconstructed_record_claims_reward_or_validity')
-        if record.get('status') not in ('valid', 'unresolved') or record.get('no_retry') is not True:
+        no_retry_missing_recovery = 'no_retry' not in record and recovery and recovery.get('no_retry') is True
+        if record.get('status') not in ('valid', 'unresolved') or record.get('no_retry') is not True and not no_retry_missing_recovery:
             self.error(slot/'record.json', 'invalid_slot_status_or_no_retry_marker')
         frozen = self.root/'tasks'/task/'frozen'
         protocol, executor = read(frozen/'protocol.json'), read(frozen/'executor.json')
@@ -369,6 +370,7 @@ class CompletionAudit:
         if len(jobs) > 1:
             self.error(slot/'jobs', 'more_than_one_official_trial_or_retry')
         configs = sorted((slot/'jobs').glob('*/config.json'))
+        single_shot_config_proved = False
         if len(configs) > 1:
             self.error(slot/'jobs', 'more_than_one_harbor_job')
         for config_path in configs:
@@ -377,6 +379,8 @@ class CompletionAudit:
                 continue
             if config.get('n_attempts') != 1 or config.get('orchestrator', {}).get('retry', {}).get('max_retries') != 0:
                 self.error(config_path, 'harbor_attempts_or_retry_policy_drift')
+            else:
+                single_shot_config_proved = len(configs) == 1 and len(jobs) == 1
             if config.get('orchestrator', {}).get('n_concurrent_trials') != 1:
                 self.error(config_path, 'per_slot_harbor_concurrency_drift')
             datasets = config.get('datasets') or []
@@ -461,17 +465,18 @@ class CompletionAudit:
                                     'observation_present': bool(step.get('observation')),
                                     'classification': 'resource_path_referenced_not_proof_of_execution'})
                 row['resource_usage_evidence'] = references
-                if not (recovery and recovery.get('record_recovered') and 'resource_usage_evidence' not in record):
+                if not (recovery and (recovery.get('record_recovered') or no_retry_missing_recovery) and 'resource_usage_evidence' not in record):
                     self.same(slot/'record.json', record.get('resource_usage_evidence', []), references, 'resource_usage_evidence_drift')
                 for label, filename in [('provider_request_records', 'raw_model_requests.jsonl'), ('provider_response_records', 'raw_model_responses.jsonl')]:
                     p = result_path.parent/'agent'/filename
-                    row[label] = sum(1 for _ in p.open()) if p.exists() else None
+                    row[label] = sum(1 for _ in p.open('rb')) if p.exists() else None
                     if label in record:
                         self.same(slot/'record.json', record[label], row[label], label+'_drift')
                 responses = result_path.parent/'agent/raw_model_responses.jsonl'
                 models, statuses, request_attempts = Counter(), Counter(), Counter()
+                malformed_responses = 0
                 if responses.exists():
-                    for line in responses.open():
+                    for line in responses.read_bytes().splitlines():
                         try:
                             response = json.loads(line)
                             if response.get('model'):
@@ -479,19 +484,42 @@ class CompletionAudit:
                             statuses[str(response.get('http_status'))] += 1
                             request_attempts[str(response.get('request_id'))] += 1
                         except ValueError:
-                            self.error(responses, 'invalid_provider_response_jsonl')
+                            malformed_responses += 1
+                            if responses in self.recovered_paths:
+                                self.source_limit(responses, 'documented_provider_response_jsonl_truncated_response_identity_and_provider_metrics_unknown')
+                            else:
+                                self.error(responses, 'invalid_provider_response_jsonl')
                 row['response_models'] = dict(models)
                 row['provider_http_status_counts'] = dict(statuses)
-                row['provider_request_ids_with_multiple_attempts'] = sum(n > 1 for n in request_attempts.values())
+                row['provider_response_metadata_complete'] = responses.exists() and malformed_responses == 0
+                row['malformed_provider_response_lines'] = malformed_responses
+                observed_retries = sum(n > 1 for n in request_attempts.values())
+                row['provider_request_ids_with_multiple_attempts'] = observed_retries if row['provider_response_metadata_complete'] else None
+                if malformed_responses:
+                    row['provider_metadata_limit'] = 'model/status counts reflect only readable lines; provider metrics and response identities are incomplete; intact trajectory metrics retain their separate source'
+                    row['observed_provider_retry_ids_lower_bound'] = observed_retries
             else:
                 trace = {'steps': []}
         else:
             trace = {'steps': []}
             row['outcome_issues'].append('no_official_result')
+            if recovery:
+                self.source_limit(slot, 'official_result_missing_reward_unknown')
             if record.get('status') == 'valid':
                 self.error(slot/'record.json', 'claimed_valid_without_official_result')
+        if no_retry_missing_recovery:
+            if single_shot_config_proved:
+                row['no_retry_evidence'] = 'documented_wrapper_finalization_interruption_and_single_shot_actual_harbor_config'
+            else:
+                self.error(slot/'record.json', 'missing_no_retry_without_independent_single_shot_proof')
         row['valid'] = record.get('status') == 'valid' and row.get('official_evidence_valid') is True and row['fresh_unique']
         row['valid'] = row['valid'] and not any(e['path'].startswith(row['path']+'/') for e in self.errors)
+        if recovery and recovery.get('record_reconstructed_from_official') and record.get('status') == 'valid':
+            if not single_shot_config_proved or trial_input is None or not row['valid']:
+                self.error(slot/'record.json', 'reconstructed_valid_wrapper_lacks_complete_official_evidence_chain')
+                row['valid'] = False
+            else:
+                row['reconstructed_valid_from_existing_official_artifacts'] = True
         if not row['valid']:
             row['reward'] = None
         if development:
@@ -687,7 +715,7 @@ class CompletionAudit:
             if identity not in self.excluded and len(entries) == 1:
                 slot = self.root/entries[0]['slot']
                 recovered = self.recoveries.get(slot, {})
-                if (slot/'record.json').exists() and ledger.get(identity) != entries[0]['slot'] and not recovered.get('record_recovered'):
+                if (slot/'record.json').exists() and ledger.get(identity) != entries[0]['slot'] and not recovered:
                     self.error(self.root/'identity_ledger.json', 'identity_ledger_missing_or_mismatched_slot')
         for identity, slot in ledger.items():
             if not any(e['slot'] == slot for e in self.identities.get(identity, [])):

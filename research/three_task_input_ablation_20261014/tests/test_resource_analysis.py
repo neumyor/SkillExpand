@@ -88,6 +88,35 @@ class ResourceAnalysisTests(unittest.TestCase):
             self.assertIsNone(report["trials"][0]["reward"])
             self.assertFalse(report["trials"][0]["trace_available"])
 
+    def test_empty_and_truncated_inputs_recover_complete_steps_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "trace.json"
+            p.write_text("")
+            data, health = M.read_json_artifact(p, recover_steps=True)
+            self.assertIsNone(data)
+            self.assertEqual(health["status"], "empty")
+            completed = step("cat checks/example.py")
+            p.write_text('{"agent":{"name":"test"},"steps":[' + json.dumps(completed) + ',{"step_id":8,"message":"incomplete')
+            data, health = M.read_json_artifact(p, recover_steps=True)
+            self.assertEqual(data["steps"], [completed])
+            self.assertEqual(health["status"], "partial_steps_recovered")
+            self.assertEqual(health["complete_steps_recovered"], 1)
+
+    def test_corrupt_record_uses_local_slot_trace_without_inventing_reward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trial = root / "tasks" / "example" / "arms" / "A" / "candidate-001" / "dev" / "01"
+            trace_dir = trial / "jobs" / "job" / "task" / "agent"
+            trace_dir.mkdir(parents=True)
+            (trial / "record.json").write_text("")
+            (trace_dir / "trajectory.json").write_text(json.dumps({"steps": [step("python checks/example.py")]}))
+            (trial.parent.parent / "skill.json").write_text(json.dumps({"resources": {"checks/example.py": ""}}))
+            row = M.analyze_experiment(root)["trials"][0]
+            self.assertEqual(row["status"], "unknown")
+            self.assertIsNone(row["reward"])
+            self.assertEqual(row["resource_analysis"]["events"][0]["classification"], "invocation")
+            self.assertEqual(row["record_artifact"]["status"], "empty")
+
 
 if __name__ == "__main__":
     unittest.main()

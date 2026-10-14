@@ -16,14 +16,43 @@ final trials for the selected candidate. The maximum is 81 executor trials and
 | `completion_audit.py` | Independently audit a delivered archive using native prompt/proposal replay, official outcomes and full resource bytes |
 | `resource_analysis.py` | Inspect saved resource reads, copies, invocation evidence and failure observations |
 | `report.py` | Render the original runner's result summary |
+| `recover_infrastructure.py` | Preserve damaged bytes and recover consumed-slot wrappers offline after confirming related processes have exited; retain unresolved outcomes where official evidence is incomplete |
+| `resume_launch.py`, `resume_start.py`, `resume_monitor.py` | Continue unfinished arms through the unchanged frozen driver, preserve existing reservations and monitor the continuation PIDs |
+| `final_report.py` | Render final results only after the independent completion audit reports both passed and protocol complete |
 
 The original run directory is
 `/data2/liyishan/SkillExpand-tb21/SkillExpand/runs/three-task-input-ablation-20261014`.
-At publication the run is incomplete: disk exhaustion caused interrupted writers
-and some empty artifacts. The offline auditor understands documented
-infrastructure recovery markers, retains lost-source limitations and gives no
-official score to reconstructed unresolved records. The actual recovery helper
-and completion of the live run are not part of this publication.
+The fixed protocol is complete: 63/81 executor slots and all 12 generation slots
+were consumed. The independent remote completion audit passed with 51 valid
+trials, 45 official successes and 12 unresolved trials. Disk exhaustion caused
+interrupted writers and some empty or truncated artifacts. This publication
+includes the offline recovery and continuation helpers, plus the
+[final report](final_report.md) and [resource analysis](resource_analysis.md).
+The runtime records remain in the complete run archive. Recovery preserves
+damaged original bytes and never repeats or replaces consumed executor or
+generation slots. It can reconstruct a valid wrapper only from a complete,
+independently audited official evidence chain; otherwise the outcome remains
+unresolved with no reward credit. Continuation preserves the frozen code,
+inputs, model settings and existing slot budgets.
+
+A completed protocol does not imply complete reward, token or timing
+measurements. The 12 unresolved rewards remain unknown, including one final
+log B runtime failure. All losses, failed/invalid proposals and interrupted
+generations remain in the reports; consumed calls were never replaced.
+`final_report.py` refuses to render before the completion audit passes and
+reports protocol complete.
+
+| Task | Baseline | A final | B final |
+| --- | --- | --- | --- |
+| cancel-async-tasks | ? 0 ? 0 ? | 1 1 1 1 1 | 1 0 0 0 1 |
+| multi-source-data-merger | 1 ? ? 1 ? | 1 1 1 1 1 | 1 1 1 1 1 |
+| log-summary-date-ranges | 1 1 1 ? 1 | 1 1 1 1 1 | 1 ? 1 1 1 |
+
+`?` means unresolved, not zero. Both arms used the same sanitized seed.
+This joint information ablation cannot isolate leakage or establish blind
+new-task generalization. Exact requests, SSE, official outcomes, mounted skills,
+input lineage and recovery originals referenced by the reports live in the
+separate complete archive; they are not part of this source publication.
 
 To audit a separately delivered archive without executing tasks:
 

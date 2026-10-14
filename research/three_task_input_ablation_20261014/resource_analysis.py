@@ -230,6 +230,70 @@ def observed_failure_steps(trace):
     return failures
 
 
+def read_json_artifact(path, recover_steps=False):
+    """Return data plus explicit damage metadata; never invent missing records.
+
+    For truncated agent trajectories only, recover complete step objects in the
+    original top-level steps array. The partial final step is discarded.
+    """
+    path = Path(path)
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeError) as exc:
+        return None, {"status": "unreadable", "error_type": type(exc).__name__}
+    if not text.strip():
+        return None, {"status": "empty", "bytes": path.stat().st_size}
+    try:
+        return json.loads(text), {"status": "complete"}
+    except ValueError as exc:
+        issue = {"status": "invalid_json", "error_type": type(exc).__name__,
+                 "error_character": getattr(exc, "pos", None), "bytes": path.stat().st_size}
+    if not recover_steps:
+        return None, issue
+    decoder = json.JSONDecoder()
+    index = 0
+    steps = []
+    try:
+        index = len(text) - len(text.lstrip())
+        if text[index] != "{":
+            return None, issue
+        index += 1
+        while True:
+            while text[index].isspace() or text[index] == ",":
+                index += 1
+            key, index = decoder.raw_decode(text, index)
+            while text[index].isspace():
+                index += 1
+            if text[index] != ":":
+                return None, issue
+            index += 1
+            while text[index].isspace():
+                index += 1
+            if key != "steps":
+                _, index = decoder.raw_decode(text, index)
+                continue
+            if text[index] != "[":
+                return None, issue
+            index += 1
+            while True:
+                while text[index].isspace() or text[index] == ",":
+                    index += 1
+                if text[index] == "]":
+                    break
+                value, index = decoder.raw_decode(text, index)
+                if not isinstance(value, dict):
+                    break
+                steps.append(value)
+            break
+    except (ValueError, IndexError):
+        pass
+    if steps:
+        return {"steps": steps}, {**issue, "status": "partial_steps_recovered",
+                                 "complete_steps_recovered": len(steps),
+                                 "partial_final_step_discarded": True}
+    return None, issue
+
+
 def analyze_experiment(root):
     """Collect available fixed-slot records, without opening evaluator output."""
     root = Path(root)
@@ -238,48 +302,91 @@ def analyze_experiment(root):
     for task_root in sorted((root / "tasks").iterdir()):
         if not task_root.is_dir():
             continue
-        slots = sorted((task_root / "baseline").glob("*/record.json"))
+        slots = sorted(p for p in (task_root / "baseline").glob("*") if p.is_dir())
         for arm in ("A", "B"):
             arm_root = task_root / "arms" / arm
-            slots.extend(sorted(arm_root.glob("candidate-*/dev/*/record.json")))
-            slots.extend(sorted(arm_root.glob("final/*/record.json")))
+            slots.extend(sorted(p for p in arm_root.glob("candidate-*/dev/*") if p.is_dir()))
+            slots.extend(sorted(p for p in arm_root.glob("final/*") if p.is_dir()))
             for status_path in sorted(arm_root.glob("candidate-*/generation_status.json")):
-                status = json.loads(status_path.read_text())
+                status, status_health = read_json_artifact(status_path)
+                status = status or {}
+                package, package_health = read_json_artifact(status_path.parent / "skill.json")
                 generations.append({"slot": str(status_path.parent.relative_to(root)),
-                                    "status": status.get("status"),
+                                    "status": status.get("status", "unknown"),
                                     "error_type": status.get("error_type"),
-                                    "no_retry": status.get("no_retry")})
-        for record_path in slots:
-            directory = record_path.parent
-            record = json.loads(record_path.read_text())
+                                    "no_retry": status.get("no_retry"),
+                                    "status_artifact": status_health,
+                                    "package_artifact": package_health,
+                                    "resources": list((package or {}).get("resources", {}))})
+        for directory in slots:
+            record, record_health = read_json_artifact(directory / "record.json")
+            record = record or {}
             trace_path = Path(record.get("trajectory_path") or "__missing__")
             permitted = trace_path.name == "trajectory.json" and trace_path.parent.name == "agent"
-            trace = json.loads(trace_path.read_text()) if permitted and trace_path.exists() else None
-            trial_input = json.loads((directory / "input.json").read_text()) if (directory / "input.json").exists() else {}
-            skill = trial_input.get("skill") or {}
+            # Synced records retain remote paths. Prefer the agent trace located
+            # inside this exact slot; never resolve arbitrary external artifacts.
+            local_traces = sorted(directory.glob("jobs/*/*/agent/trajectory.json"))
+            if len(local_traces) == 1:
+                trace_path = local_traces[0]
+            elif permitted and trace_path.exists() and directory in trace_path.parents:
+                pass
+            else:
+                trace_path = directory / "agent" / "trajectory.json"
+            trace, trace_health = read_json_artifact(trace_path, recover_steps=True)
+            trial_input, input_health = read_json_artifact(directory / "input.json")
+            trial_input = trial_input or {}
+            skill = trial_input.get("skill")
+            skill_source = "trial_input"
+            if skill is None:
+                if "baseline" in directory.relative_to(task_root).parts:
+                    package_path = task_root / "frozen" / "seed.json"
+                elif "dev" in directory.relative_to(task_root).parts:
+                    package_path = directory.parent.parent / "skill.json"
+                else:
+                    package_path = directory.parent / "skill.json"
+                skill, _ = read_json_artifact(package_path)
+                skill_source = "fixed_slot_package_fallback"
+            skill = skill or {}
             resources = skill.get("resources", {})
-            row = {"slot": str(directory.relative_to(root)), "status": record.get("status"),
+            row = {"slot": str(directory.relative_to(root)), "status": record.get("status", "unknown"),
                    "reward": record.get("reward") if record.get("status") == "valid" else None,
                    "error_type": record.get("error_type"), "artifact_error_type": record.get("artifact_error_type"),
                    "trace_available": trace is not None, "resources": list(resources),
+                   "record_artifact": record_health, "trace_artifact": trace_health,
+                   "input_artifact": input_health, "skill_source": skill_source,
+                   "trace_path": str(trace_path),
                    "failure_steps": observed_failure_steps(trace) if trace is not None else [],
                    "resource_analysis": analyze_resource_use(trace, resources) if trace is not None else None}
             rows.append(row)
     return {"model_calls": 0, "hidden_evaluation_data_read": False,
+            "source_snapshot": str(root),
             "generation_statuses": generations, "trials": rows,
-            "interpretation": "Recorded rewards describe outcomes only. Tool error markers and resource invocations do not establish causes. Baseline/A/B contrasts require completed comparable slots; no-change and unresolved generation slots remain explicit."}
+            "interpretation": "INTERIM available-artifact snapshot only. Missing, zero-byte or truncated records remain unknown; complete step objects recovered from truncated agent trajectories provide partial evidence only. Recorded rewards describe outcomes only. Tool error markers and resource invocations do not establish causes. Baseline/A/B contrasts require completed comparable slots; no-change and unresolved generation slots remain explicit."}
 
 
 def render_markdown(report):
     lines = ["# Offline resource and failure-step evidence", "",
-             report["interpretation"], "", "## Generation status", ""]
+             report["interpretation"], "", "## Available evidence summary", ""]
+    baselines = [r for r in report["trials"] if "/baseline/" in r["slot"]]
+    lines.append(f"Baseline slots observed: {len(baselines)}; packaged resource lists empty: {sum(not r['resources'] for r in baselines)}. Empty resources do not imply successful task behavior.")
+    for generation in report["generation_statuses"]:
+        trials = [r for r in report["trials"] if r["slot"].startswith(generation["slot"] + "/dev/")]
+        if not generation.get("resources"):
+            continue
+        events = [e for r in trials for e in (r.get("resource_analysis") or {}).get("events", [])]
+        counts = {kind: sum(e["classification"] == kind for e in events) for kind in ("read", "copy", "invocation", "reference")}
+        linked = sum(e.get("observed_result_present", False) for e in events if e["classification"] == "invocation")
+        damaged = sum(r.get("trace_artifact", {}).get("status") != "complete" for r in trials)
+        lines.append(f"- `{generation['slot']}` resources {', '.join(generation['resources'])}: submitted reads {counts['read']}, copies {counts['copy']}, invocations {counts['invocation']}, references {counts['reference']}; invocations with linked same-step results {linked}; incomplete traces {damaged}/{len(trials)}. These establish agent command evidence, not successful resource execution or a causal improvement.")
+    lines.extend(["", "## Generation status", ""])
     for row in report["generation_statuses"]:
-        lines.append(f"- `{row['slot']}`: {row['status']}" + (f" ({row['error_type']})" if row['error_type'] else ""))
+        lines.append(f"- `{row['slot']}`: {row['status']}" + (f" ({row['error_type']})" if row['error_type'] else "") + f"; resources {', '.join(row.get('resources', [])) or 'none recorded'}.")
     if not report["generation_statuses"]:
         lines.append("No generation status artifacts available.")
     for row in report["trials"]:
         lines.extend(["", f"## {row['slot']}", "",
                       f"Recorded status: {row['status']}; reward: {row['reward']}; agent trace available: {row['trace_available']}.", ""])
+        lines.append(f"Record artifact: {row.get('record_artifact', {}).get('status')}; trace artifact: {row.get('trace_artifact', {}).get('status')}; recovered complete steps: {row.get('trace_artifact', {}).get('complete_steps_recovered', 'not needed or unavailable')}.")
         if row["resource_analysis"]:
             for event in row["resource_analysis"]["events"]:
                 lines.append(f"- Step {event.get('step_id')} (index {event['step_index']}): {event['classification']}; resource `{event.get('resource', 'omitted')}`; observed result {event.get('observed_result_present', False)}; error signal {event.get('observed_error_signal', False)}; outcome unknown.")

@@ -8,13 +8,13 @@ the regular experiment entry points in `scripts/`.
 | Directory | Purpose | Recorded status at publication |
 | --- | --- | --- |
 | [generic_skill_evo_20261014](generic_skill_evo_20261014/README.md) | Native package generation, development execution, acceptance and artifact audit for the original single-task experiment | Completed; the archived report records a fresh 5/5 acceptance batch and the preceding failures |
-| [three_task_input_ablation_20261014](three_task_input_ablation_20261014/README.md) | Fixed baseline/A/B protocol, historical-input filtering, completion audit and resource-use analysis | Incomplete; remote disk exhaustion interrupted artifact writes |
+| [three_task_input_ablation_20261014](three_task_input_ablation_20261014/README.md) | Fixed baseline/A/B protocol, historical-input filtering, completion audit and resource-use analysis | Fixed protocol complete; 63 executions, 12 generation slots; 51 valid outcomes and 12 unresolved outcomes retained |
 
 These are source snapshots. Frozen inputs, source histories, generated packages,
 SSE streams, Harbor jobs, binding snapshots and credentials remain in the separate
 run archives. Audit documents describe the reviewed archive at their recorded
 stage; copying those documents does not establish that a new run passed an audit.
-The three-task experiment has no final outcome in this publication.
+The three-task final report preserves all source losses and unresolved outcomes.
 
 The source snapshots retain the original cluster paths and execution settings.
 Run them from a prepared run directory with its matching frozen native source,
