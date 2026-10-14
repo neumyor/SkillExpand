@@ -105,12 +105,27 @@ class ACPTeacher:
                     'chat_template_kwargs': {'preserve_thinking': True}}
             if path.exists():
                 evidence = json.loads(path.read_text())
-                if evidence['request'] != body or evidence['status'] != 'completed':
+                if evidence['request'] != body:
                     raise ValueError('Teacher attempt changed or incomplete; no automatic resampling')
+                if evidence['status'] != 'completed':
+                    recovery = path.with_name('recovery-' + path.name)
+                    if (not recovery.exists()
+                            or json.loads(recovery.read_text()).get('request') != body
+                            or json.loads(recovery.read_text()).get('spent_tool_turn') != turn
+                            or evidence['status'] not in ('pending', 'transport_failed')):
+                        raise ValueError('Teacher attempt changed or incomplete; no automatic resampling')
+                    # Failed transport still consumes its original tool-turn slot.
+                    continue
                 message = evidence['response']
             else:
                 self.save(path, {'status': 'pending', 'request': body})
-                message, usage, finish = complete_stream(self.transport, body)
+                try:
+                    message, usage, finish = complete_stream(self.transport, body)
+                except Exception as exc:
+                    self.save(path, {'status': 'transport_failed', 'request': body,
+                                    'error_type': type(exc).__name__,
+                                    'usage': None, 'outcome_unknown': True})
+                    raise
                 self.save(path, {'status': 'completed', 'request': body,
                                 'response': message, 'usage': usage, 'finish_reason': finish})
             messages.append(message)
@@ -165,6 +180,11 @@ def main():
     from tbench_eval.agentbrew.adapter import read_eval_contract
     from tbench_eval.agentbrew.storage import digest, read, run_lock, save, text_hash
     from skillexpand.runtime.llm_relay import TencentSandboxTransport
+    # E9 teacher streams share envd connections; avoid the observed HTTP/2 TLS failure.
+    from functools import partial
+    import e2b.sandbox_async.main as e2b_async_main
+    from e2b.api.client_async import get_envd_transport
+    e2b_async_main.get_transport = partial(get_envd_transport, http2=False)
     adapter = RolloutAdapter(args.eval_config, 2, rollout_backend='tb21-tencent',
         harness_path='/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012/sources/tb21-tencent-harness/python',
         task_failure_policy='terminal')
