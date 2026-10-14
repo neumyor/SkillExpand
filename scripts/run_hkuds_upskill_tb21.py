@@ -134,9 +134,10 @@ class ACPTeacher:
                     raise ValueError('Unsupported teacher tool')
                 arguments = json.loads(call['function']['arguments'])
                 target = arguments['file_path']
-                if target not in FILES or not isinstance(arguments['content'], str):
-                    raise ValueError('Teacher wrote outside the three ACP paths')
-                files[FILES[target]] = arguments['content']
+                if not isinstance(arguments['content'], str):
+                    raise ValueError('Teacher Write content must be a string')
+                if target in FILES:
+                    files[FILES[target]] = arguments['content']
                 messages.append({'role': 'tool', 'tool_call_id': call['id'],
                                  'content': 'File written successfully.'})
             if not message['tool_calls']:
@@ -288,7 +289,23 @@ def main():
                     'phase': 'brew_incomplete' if missing else 'brew_scope_finished',
                     'workers': 0, 'missing_acps': missing})
                 return
-            acps = parallel(eligible, args.teacher_workers, draft)
+            brew_errors = {}
+            def draft_retaining_errors(task):
+                try:
+                    return draft(task)
+                except Exception as exc:
+                    brew_errors[task] = {'error_type': type(exc).__name__,
+                                         'error': str(exc)[:1000]}
+                    return None
+            acps = parallel(eligible, args.teacher_workers, draft_retaining_errors)
+            missing_acps = [task for task, acp in acps.items() if acp is None]
+            save(args.root / 'brew_status.json', {'complete_acps': len(eligible) - len(missing_acps),
+                'missing': missing_acps, 'errors': brew_errors, 'budget_resets': 0,
+                'extra_write_policy': 'preserve calls; extract only ACP files'})
+            if missing_acps:
+                save(args.root / 'status.json', {'status': 'needs_attention',
+                    'phase': 'brew_incomplete', 'workers': 0, 'missing_acps': missing_acps})
+                return
             phase('curate')
             cats = sorted({categories[t] for t in eligible})
             def curate(cat):

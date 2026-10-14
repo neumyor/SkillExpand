@@ -20,6 +20,37 @@ def save(path, value):
 
 
 class TeacherResumeTest(unittest.TestCase):
+    def test_cached_extra_write_is_ignored_without_another_model_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            teacher = runner.ACPTeacher(None, 'deepseek-v4-flash-0731', save)
+            original_stream = runner.complete_stream
+            calls = []
+            def completed(transport, body):
+                calls.append(body)
+                paths = ['/app/solve.py', *runner.FILES]
+                return {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'id': str(i), 'function': {'name': 'Write', 'arguments': json.dumps({
+                        'file_path': path, 'content': 'x' * 150})}}
+                    for i, path in enumerate(paths)]}, {}, 'tool_calls'
+            runner.complete_stream = completed
+            try:
+                def finish(transport, body):
+                    if len(calls):
+                        return {'role': 'assistant', 'content': 'done', 'tool_calls': []}, {}, 'stop'
+                    return completed(transport, body)
+                runner.complete_stream = finish
+                acp = teacher.run(root, 'prompt')
+                self.assertEqual(set(acp), set(runner.FILES.values()))
+                self.assertFalse((root / 'solve.py').exists())
+                first = (root / 'http-00.json').read_bytes()
+                (root / 'acp.json').unlink()
+                runner.complete_stream = lambda *args: self.fail('cached responses must replay')
+                self.assertEqual(teacher.run(root, 'prompt'), acp)
+                self.assertEqual((root / 'http-00.json').read_bytes(), first)
+            finally:
+                runner.complete_stream = original_stream
+
     def test_unstarted_scope_excludes_every_existing_request_and_completed_acp(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

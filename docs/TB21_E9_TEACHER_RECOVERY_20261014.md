@@ -71,3 +71,15 @@ its scope, individual failures and missing ACPs, then exits before Curate even
 if its selected units finish. The first scoped selection contains 42 untouched
 units. Existing generation failures and the two student missing scores still
 block complete acceptance. Three focused recovery/scope tests pass.
+
+The user subsequently authorized removal of the extra-Write failure gate.
+Official Brew requests three ACP files but its extractor ignores other files;
+the adapter's previous hard failure was stricter than that upstream behavior.
+Extra Write calls now stay in the original HTTP response and tool history while
+only the three ACP paths are collected. Cached completed responses replay with
+the same tool acknowledgement, preserving later request identity. Extra files
+are not mounted into student guidance. Invalid content and incomplete ACPs still
+remain failures. Brew records per-unit errors and completes other eligible units
+before its completeness check, so one failure no longer cancels queued work.
+No teacher budget or baseline retry allowance changes. Four focused tests pass,
+including extra-Write cached replay without another model request.
