@@ -20,9 +20,12 @@ def index(reader, root, label=None):
     contract = mapping(reader.optional(base / "contract.json", {}))
     method = mapping(contract.get("method"))
     label = label or f"AgentBrew · {base.parent.name}"
-    for phase in ["vanilla", "initial", "ralph-r01", "ralph-r02", "ralph-r03", "serve"]:
-        if phase in {"serve", "vanilla"}:
+    for phase in ["baseline", "vanilla", "initial", "ralph-r01", "ralph-r02", "ralph-r03", "serve"]:
+        if phase == "baseline":
+            units = sorted((base / phase).glob("*/request.json"))
+        elif phase in {"serve", "vanilla"}:
             units = sorted((base / phase).glob("rep*/*/request.json"))
+            units += sorted((base / phase).glob("*/request.json"))
         else:
             suffix = "initial" if phase == "initial" else "ralph/" + phase.split("-")[1]
             units = sorted((base / "brew").glob(f"*/{suffix}/request.json"))
@@ -31,17 +34,21 @@ def index(reader, root, label=None):
         key = f"{base}#{phase}"
         run = Run(key, f"{label} · {phase}", base,
                   {"format": "agentbrew", "stage": phase, "contract": contract,
-                   "executor_model": mapping(method.get("student")).get("model", ""),
+                   "executor_model": mapping(method.get("student")).get("model") or
+                                     (contract.get("student") if isinstance(contract.get("student"), str) else ""),
                    "method_model": mapping(method.get("teacher")).get("model", "")},
-                  mapping(reader.optional(base / "phases" / f"{phase}.json", {})))
+                  mapping(reader.optional(base / "phases" / f"{phase}.json",
+                                          reader.optional(base / "status.json", {}))))
         for path in units:
             request = mapping(reader.optional(path, {}))
             name = request.get("task") or path.parent.name
             run.tasks[name] = {"name": name, "text": ""}
             adopted = mapping(reader.optional(path.parent / "rollout.json", {}))
             # The progress ledger is authoritative when a recovery replaces rollout.json.
+            replicate_dir = path.parent.parent.name
+            replicate = int(replicate_dir[3:]) if replicate_dir.startswith("rep") and replicate_dir[3:].isdigit() else 0
             for record in sequence(reader.optional(base / phase / "progress.json", [])):
-                if record.get("task") == name and record.get("replicate", 0) == int(path.parent.parent.name.removeprefix("rep") or 0):
+                if record.get("task") == name and record.get("replicate", 0) == replicate:
                     adopted = record
             slot = str(path)
             run.slots[slot] = {"task_id": name, "status": "valid", "reward": None,

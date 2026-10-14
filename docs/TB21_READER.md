@@ -70,15 +70,20 @@ SSH 转发可用 Ctrl-C 停止；转发与服务器阅读器的生命周期相�
 ## 定向验证
 
 ```bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src ../reader-runtime/venv/bin/python -m pytest tests/test_reader.py -q
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src ../reader-runtime/venv/bin/python -m pytest tests/test_reader.py tests/test_reader_agentbrew.py -q
 ```
 
 覆盖 ATIF 内容、HTML 转义、缓存刷新、不完整文件、重试与槽位采用、reward/timeout、
 178 张来源卡身份、冻结版本、L2 来源、同题异 ID，以及 E1 旧恢复目录引用。
-# AgentBrew 数据源
+## AgentBrew 数据源
 
-在数据根目录的 `external_roots.json` 中填写额外产物目录的 JSON 字符串数组。
-阅读器支持 AgentBrew `run/contract.json`、vanilla、initial、ralph-r01/r02/r03 和 serve，
+在数据根目录的 `external_roots.json` 中填写额外产物目录的 JSON 数组。
+元素可以是路径字符串，也可以是包含 `path` 和 `label` 的对象。
+阅读器还读取 `runs/*/manifest.json` 的 `output_root`；若同目录 `status.json`
+指向不同的 `output_root`，原实验和重跑实验分别保留，并使用不同名称。
+阅读器支持 AgentBrew `run/contract.json`、baseline、vanilla、initial、ralph-r01/r02/r03 和 serve，
+其中 ACP baseline 使用 `baseline/<task>/request.json`，serve/vanilla 兼容带或不带 rep 目录的布局。
+阶段仅在已有请求产物时出现；运行中生成新产物后点击刷新重新索引。
 通过 progress / rollout 明确标识采用的 physical trial，真实评分读取 Harbor result。
 “Skill / 记忆版本”展示 AgentBrew note 的历史 generation、note version 和冻结 manifest，
 执行正文取 request.retrieval.rendered_system，候选与验证记录在记忆卡和演化页阅读。

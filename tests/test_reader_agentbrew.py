@@ -56,3 +56,28 @@ def test_agentbrew_phases_retries_notes_and_frozen(tmp_path):
     assert batch['acceptance']['curator']['action'] == 'reject'
     assert batch['acceptance']['validation']['reward'] == 0
     assert batch['outcome'] == 'ralph_exhausted'
+
+
+def test_acp_rerun_discovery_keeps_original(tmp_path):
+    old = tmp_path / 'old'
+    new = tmp_path / 'E9_hkuds_upskill_acp'
+    write(tmp_path / 'runs/e9/manifest.json', {'stage': 'E9', 'output_root': str(old)})
+    write(tmp_path / 'runs/e9/status.json', {'output_root': str(new)})
+    write(old / 'run/contract.json', {})
+    write(old / 'run/brew/000-task/initial/request.json', {'task': 'task'})
+    write(new / 'run/contract.json', {'student': 'model', 'phases': ['baseline']})
+    write(new / 'run/status.json', {'phase': 'baseline', 'status': 'running'})
+    unit = new / 'run/baseline/task'
+    write(unit / 'request.json', {'task': 'task', 'retrieval': {'rendered_system': ''}})
+    path = unit / 'physical_01/jobs/job/trial/agent/trajectory.json'
+    write(path, {'steps': [{'source': 'user', 'message': 'task'}]})
+    write(unit / 'rollout.json', {'trajectory_path': str(path)})
+    reader = Reader(tmp_path / 'runs')
+    runs = list(reader.runs.values())
+    assert any(r.label == 'E9 · AgentBrew · initial' for r in runs)
+    rerun = next(r for r in runs if r.manifest.get('stage') == 'baseline')
+    assert 'E9_hkuds_upskill_acp' in rerun.label
+    assert rerun.status['status'] == 'running'
+    assert reader.roles(rerun)['executor'] == 'model'
+    traces = reader.traces(rerun.key, 'task')
+    assert len(traces) == 1 and traces[0].accepted

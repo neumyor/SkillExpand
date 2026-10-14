@@ -227,6 +227,11 @@ class Reader:
             external = manifest.get("output_root")
             if external and (Path(external) / "run/contract.json").exists():
                 agentbrew.index(self, Path(external), f"{manifest.get('stage', path.parent.name)} · AgentBrew")
+            status = mapping(self.optional(path.parent / "status.json", {}))
+            current = status.get("output_root")
+            if current and current != external and (Path(current) / "run/contract.json").exists():
+                agentbrew.index(self, Path(current),
+                                f"{manifest.get('stage', path.parent.name)} · {Path(current).name}")
 
     def _index(self, run: Run):
         table = sequence(self.optional(run.path / "tasks.json", []))
