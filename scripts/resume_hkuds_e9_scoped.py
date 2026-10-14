@@ -93,6 +93,9 @@ else:
                 evidence = read(path)
                 if evidence.get('status') not in ('pending', 'transport_failed'):
                     continue
+                if (evidence.get('status') == 'transport_failed'
+                        and evidence.get('error_type') != 'RelayError'):
+                    continue
                 turn = int(path.stem.split('-')[-1])
                 if not 0 <= turn < 8:
                     raise SystemExit('Teacher request exceeds preserved eight-turn budget')

@@ -122,7 +122,7 @@ class ACPTeacher:
                 try:
                     message, usage, finish = complete_stream(self.transport, body)
                 except Exception as exc:
-                    self.save(path, {'status': 'transport_failed', 'request': body,
+                    self.save(path, {'status': 'transport_failed' if type(exc).__name__ == 'RelayError' else 'teacher_failed', 'request': body,
                                     'error_type': type(exc).__name__,
                                     'usage': None, 'outcome_unknown': True})
                     raise

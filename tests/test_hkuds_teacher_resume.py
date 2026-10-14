@@ -11,6 +11,9 @@ spec = importlib.util.spec_from_file_location('runner', source)
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
+class RelayError(RuntimeError):
+    pass
+
 
 def save(path, value):
     path.write_text(json.dumps(value))
@@ -25,7 +28,7 @@ class TeacherResumeTest(unittest.TestCase):
             def stream(transport, body):
                 calls.append(body)
                 if len(calls) == 1:
-                    raise RuntimeError('connection interrupted')
+                    raise RelayError('connection interrupted')
                 message = {'role': 'assistant', 'content': '', 'tool_calls': [
                     {'id': str(i), 'type': 'function', 'function': {'name': 'Write',
                      'arguments': json.dumps({'file_path': path, 'content': 'x' * 150})}}
