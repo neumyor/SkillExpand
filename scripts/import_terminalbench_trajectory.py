@@ -15,17 +15,8 @@ import hashlib
 
 
 def _events(traj):
-    events=[]
-    for step in traj.get('steps', []):
-        msg = step.get('message') or step.get('observation') or ''
-        if not msg:
-            continue
-        events.append({'ref': f'e{len(events)+1}', 'action': 'TerminalBatch',
-                       'observation': str(msg), 'environment': {'success': False}})
-    if not events:
-        events=[{'ref':'e1','action':'TerminalBatch','observation':'No trajectory steps recorded.',
-                 'environment': {'success': False}}]
-    return events
+    from skillexpand.benchmarks.atif import events
+    return events(traj)
 
 def freeze(path, value):
     path=Path(path); path.parent.mkdir(parents=True, exist_ok=True)
@@ -42,7 +33,10 @@ def main():
     args=ap.parse_args()
     trial=args.trial_dir.resolve(); root=args.run_dir.resolve(); root.mkdir(parents=True, exist_ok=True)
     result=json.loads((trial/'result.json').read_text())
-    traj=json.loads((trial/'agent'/'trajectory.json').read_text())
+    try:
+        traj=json.loads((trial/'agent'/'trajectory.json').read_text())
+    except (OSError, ValueError):
+        traj={}
     reward=bool(result.get('reward', result.get('success',
                     (result.get('verifier_result') or {}).get('rewards', {}).get('reward', 0))))
     instruction='Repair the repository according to the task files and make the provided verifier pass.'
@@ -64,9 +58,11 @@ def main():
     proposal=FamilyProposal(family,'fix-git repository repair','TerminalBench repository repair tasks',('git repair','verifier pass'))
     fa=FamilyAssignment(0,family,'direct','Single-task smoke family.')
     clusters=FamilyPlan('terminalbench','forced_choice_assignment',{0:family},{family:{'name':'fix-git repository repair','definition':proposal.definition,'trigger_conditions':list(proposal.trigger_conditions),'task_ids':[0]}},(tag,),(proposal,),(fa,))
-    events=_events(traj)
+    from skillexpand.benchmarks.atif import load_events
+    events, parse_status = load_events(trial/'agent'/'trajectory.json')
     trial_record={'index':1,'phase':'autonomous','status':'completed','success':reward,'termination':'verifier',
-                  'trajectory':str(trial/'agent'/'trajectory.json'),'events':events}
+                  'trajectory':str(trial/'agent'/'trajectory.json'),'events':events,
+                  'trajectory_parse': parse_status}
     evidence=P.evidence(instruction,[trial_record])
     synthesis={'status':'valid','claims':[]}
     card=L.card(0,instruction,[trial_record],synthesis,'external_harbor',

@@ -116,6 +116,7 @@ def card(task_id, task, trials, synthesis, guidance_source, audit_id, count,
     """Assemble one card from execution records; the model supplies claims only."""
     completed = [t for t in trials if t['status'] == 'completed']
     available = evidence or {}
+    lossless = benchmark == 'terminalbench'
     cited = {ref for claim in synthesis.get('claims', []) for ref in claim['evidence_refs']}
     # Keep diverse executed methods, rejection, and terminal feedback even without claims.
     for trial in completed:
@@ -127,10 +128,11 @@ def card(task_id, task, trials, synthesis, guidance_source, audit_id, count,
             cited.add(rows[-1][0])
     observations = [
         {'id': ref, 'trial': item['trial'], 'phase': item['phase'],
-         'action': item['action'], 'observation': item['text'][:400],
-         'observation_truncated': len(item['text']) > 400,
+         'action': item['action'], 'observation': item['text'] if lossless else item['text'][:400],
+         'observation_truncated': not lossless and len(item['text']) > 400,
+         **({'origin': item['origin']} if 'origin' in item else {}),
          'effect': item['effect'], 'method': item['method']}
-        for ref, item in available.items() if ref in cited and item.get('source') == 'observation'
+        for ref, item in available.items() if (lossless or ref in cited) and item.get('source') == 'observation'
     ]
     result = {
         'schema_version': 5, 'card_id': card_id or audit_id,
@@ -144,6 +146,10 @@ def card(task_id, task, trials, synthesis, guidance_source, audit_id, count,
         'claims': [{'id': f'C{i+1}', **claim} for i, claim in enumerate(synthesis.get('claims', []))],
         'claim_status': synthesis.get('status', 'invalid'), 'audit_id': audit_id,
     }
+    if lossless:
+        result['memory_format'] = 'terminalbench-tools-v1'
+        result['trajectory_parse'] = [{'trial': t['index'], **t.get('trajectory_parse', {'status': 'unknown'})}
+                                      for t in completed]
     result['token_count'] = count(json.dumps(result, ensure_ascii=False))
     result['over_target'] = result['token_count'] > target
     result['over_budget'] = result['token_count'] > limit

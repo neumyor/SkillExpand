@@ -213,7 +213,7 @@ class TerminalBenchAdapter(Adapter):
 
     def evidence_event(self, event):
         return {'text': str(event.get('observation', '')), 'effect': event.get('effect', 'observed'),
-                'method': True}
+                'method': event.get('method', True)}
 
 
 _REGISTRY = {'searchqa': SearchQAAdapter, 'alfworld': AlfworldAdapter,

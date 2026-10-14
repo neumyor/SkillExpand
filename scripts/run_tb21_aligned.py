@@ -64,16 +64,14 @@ def source_rows(source, tasks, model, accepted_qwen=False):
 
 
 def raw_trial(row, index):
-    steps = read(row["trajectory_path"]).get("steps", [])
-    events = [{"ref": f"e{i+1}", "action": "TerminalBatch",
-               "observation": str(step.get("message") or step.get("observation") or ""),
-               "environment": {"success": False}} for i, step in enumerate(steps)
-              if step.get("message") or step.get("observation")]
+    from skillexpand.benchmarks.atif import load_events
+    events, parse_status = load_events(row['trajectory_path'])
     return {"index": index, "phase": "autonomous", "status": "completed",
             "success": row["reward"] == 1, "verifier_reward": row["reward"],
             "termination": row.get("exception_type") or "verifier",
             "source_model": row["source_model"], "source_attempt_index": row["attempt_index"],
-            "trajectory": row["trajectory_path"], "result_path": row["result_path"], "events": events}
+            "trajectory": row["trajectory_path"], "result_path": row["result_path"],
+            "trajectory_parse": parse_status, "events": events}
 
 
 def experience(task, instruction, trials, family="terminalbench.general", skill=None, selection=None, *, grouped=False):
@@ -110,11 +108,15 @@ def source_payloads(task, instruction, rows):
         if len(selected) != 3:
             raise ValueError("Missing source/task attempts")
         trials = [raw_trial(r, i) for i, r in enumerate(selected, 1)]
-        evidence = experience(task, instruction, trials).experience_card["evidence"]
-        sources.append({"source_model": model, "trials": selected, "evidence": evidence[:4]})
+        view = P.projection(experience(task, instruction, trials).experience_card)
+        evidence = view['evidence']
+        sources.append({"source_model": model, "trials": selected, "evidence": evidence[:4],
+                        "omitted_evidence": view.get('omitted_evidence', 0) + max(0, len(evidence) - 4),
+                        "omitted_observation_chars": view.get('omitted_observation_chars', 0)})
     # Balance evidence by the shorter source; do not substitute the other source.
     limit = min(len(s["evidence"]) for s in sources)
     for source in sources:
+        source['omitted_evidence'] += len(source['evidence']) - limit
         source["evidence"] = source["evidence"][:limit]
     return sources
 
