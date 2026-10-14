@@ -102,6 +102,8 @@ async def run_job(
     fail_fast: bool = False,
 ) -> int:
     config = JobConfig.model_validate(yaml.safe_load(config_path.read_text()))
+    for agent in config.agents:
+        agent.kwargs.update(record_terminal_session=False, record_terminal_output=False)
     job = Job(config)
     from tencent_task_verifier_cache import on_verification_started as task_cache_hook
     job.on_verification_started(task_cache_hook)

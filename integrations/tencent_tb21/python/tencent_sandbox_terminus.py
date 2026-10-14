@@ -289,6 +289,7 @@ class TencentSandboxTerminus2(Terminus2):
         self._tencent_api_base = api_base
         self._tencent_model_info = model_info or {}
         self._tencent_llm_call_kwargs = llm_call_kwargs or {}
+        kwargs.update(record_terminal_session=False, record_terminal_output=False)
         super().__init__(
             *args,
             api_base=api_base,
