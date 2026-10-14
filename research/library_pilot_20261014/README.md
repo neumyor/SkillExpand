@@ -1,5 +1,11 @@
 # Shared library pilot
 
+Completed: 62 executor slots and six generation calls, with remote and local
+saved-artifact audits passing. Baseline has 14 successes in 21 slots; final has
+18 successes, two valid failures and one environment initialization unresolved.
+Both independent regression comparisons pass. See [final_report.md](final_report.md)
+for the measured results, full-input evidence and interpretation limits.
+
 This runner evaluates the unmodified E6 p003/p004/p006 seed as a complete library,
 then evolves up to two complete-library candidates from actual selected
 development executions. Every trial presents all three skill_id/description
@@ -38,8 +44,8 @@ regression report without model or evaluator calls.
 
 Runtime records are stored separately in
 `/data2/liyishan/SkillExpand-tb21/SkillExpand/runs/library-pilot-20261014-262144`.
-This source directory does not include credentials, histories or measured
-results. New runs require their own prepared directory and frozen inputs.
+This source directory contains a result report, but no credentials or raw
+histories. New runs require their own prepared directory and frozen inputs.
 
 Focused offline checks:
 
