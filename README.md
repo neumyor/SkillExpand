@@ -118,3 +118,6 @@ executor prompt and sibling Skill bodies are not loaded.
 The 89-task closed-set experiments have separate launch, empirical evaluation,
 and historical recovery scripts. See [the TB2.1 code map](docs/TB21_CODE_MAP.md)
 for current entry points and experiment definitions.
+
+Native Skill package research runners, historical-input ablation tests and
+offline artifact/resource auditors are indexed in [research/README.md](research/README.md).

@@ -1,0 +1,11 @@
+# Per-run inputs, results and dependency snapshots live in runs/, not source control.
+*/code/
+*/frozen/
+*/tasks/
+*/binding_snapshots/
+*/development/
+*/acceptance/
+*/final_skill/
+*/*.json
+*/*.sse
+*/infrastructure_originals/
