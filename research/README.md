@@ -9,6 +9,7 @@ the regular experiment entry points in `scripts/`.
 | --- | --- | --- |
 | [generic_skill_evo_20261014](generic_skill_evo_20261014/README.md) | Native package generation, development execution, acceptance and artifact audit for the original single-task experiment | Completed; the archived report records a fresh 5/5 acceptance batch and the preceding failures |
 | [three_task_input_ablation_20261014](three_task_input_ablation_20261014/README.md) | Fixed baseline/A/B protocol, historical-input filtering, completion audit and resource-use analysis | Fixed protocol complete; 63 executions, 12 generation slots; 51 valid outcomes and 12 unresolved outcomes retained |
+| [library_pilot_20261014](library_pilot_20261014/README.md) | Shared three-skill library evolution with actual model routing, five development tasks and two independent regression tasks | Running; 262144 shared executor context, full legal evolution observations, 62 planned executions within the 66 cap |
 
 These are source snapshots. Frozen inputs, source histories, generated packages,
 SSE streams, Harbor jobs, binding snapshots and credentials remain in the separate
