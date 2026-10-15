@@ -5,6 +5,8 @@ its body in a second step, so the library itself is never injected wholesale.
 """
 from dataclasses import asdict
 from typing import Any, Iterable
+import json
+from pathlib import PurePosixPath
 
 from skillexpand import schema as S
 from skillexpand.evaluation.selector import SkillSelector
@@ -16,6 +18,27 @@ def catalog(skills: Iterable[S.Skill]) -> list[dict[str, str]]:
         {"skill_id": skill.skill_id, "description": skill.description}
         for skill in sorted(skills, key=lambda item: item.skill_id)
     ]
+
+
+def autonomous_catalog_instruction(skills: Iterable[S.Skill],
+                                   root: str = "/opt/openclaw-skills") -> str:
+    """Expose routing metadata and file locations without loading any contents."""
+    rows = catalog(skills)
+    if not rows:
+        raise ValueError("Empty autonomous Skill library")
+    for row in rows:
+        identifier = row['skill_id']
+        if PurePosixPath(identifier).name != identifier or identifier in ('.', '..'):
+            raise ValueError("Skill ID must be a directory name")
+    return (
+        "\n\nAvailable Skill catalog (id and description only):\n"
+        + json.dumps(rows, ensure_ascii=False)
+        + f"\nEach Skill's body is at {root}/<skill_id>/SKILL.md. "
+        "Use the existing terminal commands to read it; resources are relative to that file. "
+        "You decide whether and when to read any Skill or resource. You may read none, "
+        "one or multiple Skills, including another Skill later during execution. "
+        "Catalog visibility does not mean the Skill contents have been read."
+    )
 
 
 def select_and_load(host: Any, task_text: str,

@@ -12,6 +12,48 @@ REASON_PROPOSED = "proposed"
 REASON_NO_OPERATIONS = "invalid_proposal"
 REASON_NO_CHANGE = "no_effective_change"
 
+PACKAGE_OUTPUT_SCHEMA = {
+    "anyOf": [
+        {"type": "object", "additionalProperties": False,
+         "properties": {"body": {"type": "string", "minLength": 1},
+                        "resources": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "rationale": {"type": "string", "minLength": 1}},
+         "required": ["body", "resources", "rationale"]},
+        {"type": "object", "additionalProperties": False,
+         "properties": {"no_change": {"type": "boolean", "const": True},
+                        "reason": {"type": "string", "minLength": 1}},
+         "required": ["no_change", "reason"]},
+    ]
+}
+
+
+def validate_package_output(value):
+    """Validate the exact package response shape without supplying missing content.
+
+    Resource path safety remains enforced by the canonical ``Skill`` constructor.
+    This function is also usable on saved responses without a model call.
+    """
+    if not isinstance(value, dict):
+        raise ValueError("Package response must be an object")
+    required = {"no_change", "reason"} if value.get("no_change") is True else {"body", "resources", "rationale"}
+    missing, unexpected = required - set(value), set(value) - required
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append("missing fields: " + ", ".join(sorted(missing)))
+        if unexpected:
+            details.append("unexpected fields: " + ", ".join(sorted(unexpected)))
+        raise ValueError("Invalid package response; " + "; ".join(details))
+    text_fields = ("reason",) if value.get("no_change") is True else ("body", "rationale")
+    for key in text_fields:
+        if not isinstance(value[key], str) or not value[key].strip():
+            raise ValueError("Package response requires nonempty text: " + key)
+    if "resources" in value and (not isinstance(value["resources"], dict)
+            or any(not isinstance(path, str) or not isinstance(content, str)
+                   for path, content in value["resources"].items())):
+        raise ValueError("Package resources must map relative paths to text")
+    return value
+
 EXISTING_RULE_CHECK = """CHECK EXISTING RULES BEFORE PROPOSING A CHANGE:
 For each suspected gap, locate all relevant CURRENT rules, including earlier steps,
 conditions, exceptions and fallbacks. Determine what CURRENT already instructs in the
@@ -150,7 +192,16 @@ class SkillEditor:
             'Return JSON only: {"body":"complete revised Skill", "resources":'
             '{"relative/path":"UTF-8 text"}, "rationale":"evidence-supported difference"}. '
             'Resources may be empty. Or return {"no_change":true,"reason":"..."}. '
-            "Do not return routing, model or evaluation settings.\n" + EXISTING_RULE_CHECK
+            "These are mutually exclusive response shapes. A revision has exactly body, resources "
+            "and rationale; do not add no_change:false. A no-change response has exactly "
+            "no_change:true and a nonempty reason. Never omit resources (use {} when no files "
+            "are needed) or invent a rationale merely to fill a required field. Preserve literal "
+            "resource contents as JSON strings; escape newlines, quotes and backslashes with "
+            "JSON syntax. Do not double-encode the JSON object. Before responding, check that "
+            "the output matches exactly one shape and every required field is present. "
+            "Do not return routing, model or evaluation settings.\n"
+            "OUTPUT JSON SCHEMA:\n" + json.dumps(PACKAGE_OUTPUT_SCHEMA, sort_keys=True)
+            + "\n" + EXISTING_RULE_CHECK
         )
         payload = {
             "current_skill": {"key": base_skill.key, "description": base_skill.description,
@@ -167,14 +218,9 @@ class SkillEditor:
         raw = self.editor_host.llm(prompt, replace_newline=False)
         size = sum(len(message.content) for message in prompt)
         try:
-            value = _extract_json(raw)
+            value = validate_package_output(_extract_json(raw))
             if value.get("no_change") is True:
                 return EditOutcome(None, base_skill.body, REASON_NO_CHANGE, raw, prompt_chars=size)
-            if set(value) != {"body", "resources", "rationale"}:
-                raise ValueError("Package proposal requires body, resources and rationale")
-            if not all(isinstance(value[key], str) and value[key].strip()
-                       for key in ("body", "rationale")):
-                raise ValueError("Missing package body or rationale")
             skill = S.Skill(base_skill.skill_id, base_skill.family_id, base_skill.version + 1,
                             base_skill.name, base_skill.description, value["body"],
                             S.Provenance(rationale=value["rationale"],
