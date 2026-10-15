@@ -19,7 +19,7 @@ def autonomous_query_tail(manifest):
         raise ValueError('Autonomous query must reference the complete mounted library')
     if {row['skill_id'] for row in manifest['catalog']} != set(manifest['skill_ids']):
         raise ValueError('Autonomous catalog and mounted library differ')
-    return f'你可以读取 {root} 下的 skill。'
+    return manifest.get('user_query_tail', f'你可以读取 {root} 下的 skill。')
 
 
 def initial_query_template(template, manifest):

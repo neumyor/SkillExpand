@@ -1,0 +1,17 @@
+{
+  "status": "complete_gate_failed",
+  "development_executions": 4,
+  "acceptance_slots": 5,
+  "total_slots": 9,
+  "remaining_slots": 0,
+  "selected_prompt": "v2",
+  "acceptance_reading_order_passes": 1,
+  "acceptance_reading_order_failures": 3,
+  "acceptance_environment_unresolved": 1,
+  "reading_gate_passed": false,
+  "e11_start_allowed": false,
+  "e10_complete_archive_verified": false,
+  "initial_generator": "canonical mechanism passed; substantive content limitations retained",
+  "codex_local_configuration": "gpt-6.1-sol/high",
+  "codex_root_model_independently_verified": false
+}

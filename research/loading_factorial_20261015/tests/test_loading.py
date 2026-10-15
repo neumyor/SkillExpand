@@ -115,6 +115,8 @@ def test_autonomous_hint_is_at_final_user_query_tail_for_complete_library(tmp_pa
         assert (tmp_path / 'skills' / skill.skill_id / 'SKILL.md').is_file()
         assert '/opt/openclaw-skills/' + skill.skill_id + '/SKILL.md' in manifest['files']
     assert runtime.initial_query_template(template, {**manifest, 'mode': 'single'}) == template
+    custom = {**manifest, 'user_query_tail': 'Read a relevant Skill before task commands.'}
+    assert runtime.initial_query_template(template, custom).endswith(custom['user_query_tail'])
     with pytest.raises(ValueError, match='catalog and mounted library differ'):
         runtime.autonomous_query_tail({**manifest, 'catalog': manifest['catalog'][:-1]})
     files = dict(manifest['files'])
