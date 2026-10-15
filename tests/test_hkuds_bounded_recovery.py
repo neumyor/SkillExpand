@@ -18,6 +18,34 @@ def save(path, value):
 
 
 class BoundedRecoveryTest(unittest.TestCase):
+    def test_post_length_resume_snapshots_failure_without_authorizing_future_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original = {'authorization': 'user_approved_plan_20261015',
+                'teacher_turn_limit': 8, 'budget_resets': 0,
+                'teacher_tasks': ['regex-chess'], 'teacher_failures': {},
+                'baseline_extra_dispatches': {}, 'stop_on_first_failure': True}
+            save(root / 'recovery_amendment_20261015.json', original)
+            ten = {**original, 'authorization': 'user_approved_ten_turn_resume_20261015',
+                   'teacher_turn_limit': 10, 'previous_teacher_turn_limit': 8,
+                   'previous_amendment': original}
+            save(root / recovery.TEN_TURN_AMENDMENT, ten)
+            unit = root / 'brew/regex-chess'
+            for turn in range(3):
+                save(unit / f'http-{turn:02d}.json', {'request': {}, 'status': 'teacher_failed',
+                    'diagnostics': {'finish_reason': 'length'}})
+            before = {p: p.read_bytes() for p in root.glob('**/*.json')}
+            amendment = recovery.create_length_continuation(root, save)
+            recovery.mark_task(root, 'regex-chess', save)
+            self.assertTrue(recovery.allow_failed_record(unit, unit / 'http-02.json', {}, 2))
+            for path, raw in before.items():
+                self.assertEqual(path.read_bytes(), raw)
+            self.assertEqual(amendment['teacher_turn_limit'], 10)
+            save(unit / 'http-03.json', {'request': {}, 'status': 'teacher_failed'})
+            recovery.mark_task(root, 'regex-chess', save)
+            self.assertFalse(recovery.allow_failed_record(unit, unit / 'http-03.json', {}, 3))
+            self.assertFalse((unit / 'recovery-http-03.json').exists())
+
     def test_length_is_teacher_reward_zero_without_changing_raw_or_student_score(self):
         for field in ({'finish_reason': 'length'}, {'diagnostics': {'finish_reason': 'length'}}):
             record = {'status': 'teacher_failed', **field}

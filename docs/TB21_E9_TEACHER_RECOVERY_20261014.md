@@ -104,3 +104,12 @@ unknown reward. This teacher score is separate from student verifier scoring;
 it does not create an ACP, unblock completeness checks, authorize another
 request, or reset the cumulative ten-request budget. The stopped regex-chess
 http-02 request is covered retrospectively; no restart is implied.
+
+The user subsequently explicitly requested E9 continue. The independent
+`recovery_after_length_amendment_20261015.json` snapshots existing failures,
+including regex-chess/http-02, and preserves the prior ten-turn amendment.
+Desktop action `hkuds-e9-after-length` invokes `--continue-after-length` with
+its own durable `after_length_recovery_launch_20261015.json`. It retains the
+cumulative ten-request limit, original student budget, serial teacher stream,
+shared capacity/process checks, and stop on any new failure. No prior launch
+record is removed or overwritten.

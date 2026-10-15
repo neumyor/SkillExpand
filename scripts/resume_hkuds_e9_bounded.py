@@ -6,7 +6,8 @@ from pathlib import Path
 import subprocess
 import sys
 
-from hkuds_e9_recovery import REPO, BASE, create_amendment, create_ten_turn_amendment
+from hkuds_e9_recovery import (REPO, BASE, create_amendment, create_ten_turn_amendment,
+                               create_length_continuation)
 
 OUT = BASE / 'outputs/E9_hkuds_upskill_acp_evo89_test89_20261013'
 REG = REPO / 'runs/tb21-e9-agentbrew-evo89-test89-20261012'
@@ -29,8 +30,10 @@ def registration(status, phase, **extra):
 
 
 def main():
-    ten_turn = '--ten-turn-recovery' in sys.argv
-    revision = 'ten_turn_recovery_20261015' if ten_turn else 'bounded_recovery_20261015'
+    after_length = '--continue-after-length' in sys.argv
+    ten_turn = '--ten-turn-recovery' in sys.argv or after_length
+    revision = ('after_length_recovery_20261015' if after_length else
+                'ten_turn_recovery_20261015' if ten_turn else 'bounded_recovery_20261015')
     if '--worker' in sys.argv:
         try:
             with (OUT / (revision + '.log')).open('a') as log:
@@ -84,16 +87,20 @@ def main():
         # No marker or amendment is created until the zero-model preflight succeeds.
         subprocess.run(command('--recovery-preflight'), cwd=BASE, env=env, check=True)
         create_amendment(OUT / 'run', save)
-        launch_path = OUT / ('ten_turn_recovery_launch_20261015.json' if ten_turn
-                             else 'bounded_recovery_launch_20261015.json')
+        launch_path = OUT / (revision.replace('_20261015', '_launch_20261015') + '.json')
         if launch_path.exists():
             raise SystemExit('Bounded recovery already dispatched; inspect failure before any restart')
-        if ten_turn:
+        if after_length:
+            if not (OUT / 'ten_turn_recovery_launch_20261015.json').exists():
+                raise SystemExit('Post-length continuation requires the ten-turn launch')
+            create_length_continuation(OUT / 'run', save)
+        elif ten_turn:
             if not (OUT / 'bounded_recovery_launch_20261015.json').exists():
                 raise SystemExit('Ten-turn continuation requires the original recovery launch')
             create_ten_turn_amendment(OUT / 'run', save)
         save(launch_path, {
-            'authorization': ('user_approved_ten_turn_resume_20261015' if ten_turn
+            'authorization': ('user_continue_e9_after_length_20261015' if after_length else
+                              'user_approved_ten_turn_resume_20261015' if ten_turn
                               else 'user_approved_plan_20261015'), 'reserved': reserved + 64,
             'teacher_turn_limit': 10 if ten_turn else 8,
             'active_reservations': active, 'budget_resets': 0})
@@ -102,7 +109,8 @@ def main():
                 save(OUT / ('before-' + revision + '-' + name), read(OUT / name))
         with (OUT / 'supervisor.log').open('a') as log:
             child = subprocess.Popen([sys.executable, __file__, '--worker',
-                *(['--ten-turn-recovery'] if ten_turn else [])], cwd=BASE,
+                *(['--continue-after-length'] if after_length else
+                  ['--ten-turn-recovery'] if ten_turn else [])], cwd=BASE,
                 env=env, stdin=subprocess.DEVNULL, stdout=log,
                 stderr=subprocess.STDOUT, start_new_session=True)
         save(OUT / 'supervisor_identity.json', process_identity(child.pid))

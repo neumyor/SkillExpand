@@ -10,6 +10,7 @@ MISSING_BASELINE = ('reshard-c4-data', 'feal-differential-cryptanalysis')
 PATH_FIELDS = {'raw_result_path', 'trajectory_path', 'source_physical_result_path',
                'physical_dir', 'log_path'}
 TEN_TURN_AMENDMENT = 'recovery_ten_turn_amendment_20261015.json'
+LENGTH_CONTINUATION = 'recovery_after_length_amendment_20261015.json'
 LENGTH_REWARD_POLICY = {
     'authorization': 'user_finish_reason_length_reward_zero_20261015',
     'scope': 'E9 teacher requests',
@@ -43,7 +44,42 @@ def active_amendment(root):
             or value.get('previous_amendment') != original
             or value.get('stop_on_first_failure') is not True):
         raise ValueError('Ten-turn recovery amendment differs')
+    continuation = root / LENGTH_CONTINUATION
+    if continuation.exists():
+        resumed = json.loads(continuation.read_text())
+        if (resumed.get('authorization') != 'user_continue_e9_after_length_20261015'
+                or resumed.get('previous_amendment') != value
+                or resumed.get('teacher_turn_limit') != 10
+                or resumed.get('budget_resets') != 0
+                or resumed.get('teacher_tasks') != value['teacher_tasks']
+                or resumed.get('baseline_extra_dispatches') != value['baseline_extra_dispatches']
+                or resumed.get('stop_on_first_failure') is not True):
+            raise ValueError('Post-length continuation amendment differs')
+        return continuation, resumed
     return path, value
+
+
+def create_length_continuation(root, save):
+    if (root / LENGTH_CONTINUATION).exists():
+        return active_amendment(root)[1]
+    previous_path, previous = active_amendment(root)
+    if previous_path.name != TEN_TURN_AMENDMENT:
+        raise ValueError('Post-length continuation requires the ten-turn amendment')
+    path = root / 'brew/regex-chess/http-02.json'
+    if teacher_request_score(json.loads(path.read_text()))['reward_basis'] != 'finish_reason_length':
+        raise ValueError('Expected the inspected regex-chess length failure')
+    failures = {}
+    for task in previous['teacher_tasks']:
+        records = sorted((root / 'brew' / task).glob('http-*.json'))
+        if len(records) > 10 or [p.name for p in records] != [f'http-{i:02d}.json' for i in range(len(records))]:
+            raise ValueError('Teacher history exceeds the cumulative ten-turn budget')
+        failures[task] = {p.name: json.loads(p.read_text()) for p in records
+                         if json.loads(p.read_text())['status'] != 'completed'}
+    value = {**previous, 'authorization': 'user_continue_e9_after_length_20261015',
+             'previous_amendment': previous, 'teacher_failures': failures,
+             'reason': 'User explicitly requested E9 continue after length was scored zero'}
+    save(root / LENGTH_CONTINUATION, value)
+    return active_amendment(root)[1]
 
 
 def teacher_turn_limit(root):
@@ -166,7 +202,8 @@ def allow_failed_record(unit, path, body, turn):
     amendment, value = active_amendment(root)
     record = value.get('teacher_failures', {}).get(unit.name, {}).get(path.name)
     return (value.get('authorization') in {'user_approved_plan_20261015',
-                                          'user_approved_ten_turn_resume_20261015'}
+                                          'user_approved_ten_turn_resume_20261015',
+                                          'user_continue_e9_after_length_20261015'}
             and 0 <= turn < value['teacher_turn_limit']
             and saved.get('amendment') == str(amendment)
             and record == json.loads(path.read_text()))
