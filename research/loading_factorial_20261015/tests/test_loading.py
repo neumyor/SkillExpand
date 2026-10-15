@@ -100,6 +100,29 @@ def test_single_mounts_only_native_choice(tmp_path, monkeypatch):
     assert list(manifest['files']) == ['/opt/openclaw-skills/p1/SKILL.md']
 
 
+@pytest.mark.parametrize('version', [1, 2])
+def test_autonomous_hint_is_at_final_user_query_tail_for_complete_library(tmp_path, version):
+    skills = [S.Skill('p' + str(i), 'f', version, 'name', 'description', 'SECRET_BODY' + str(i))
+              for i in range(3)]
+    manifest = runner.materialize(tmp_path, skills, 'autonomous', {'instruction': 'task'}, None)
+    template = '{instruction}\n\nCurrent terminal state:\n{terminal_state}\n'
+    query = runtime.initial_query_template(template, manifest).format(
+        instruction='task' + manifest['initial_suffix'], terminal_state='root:/app#')
+    tail = '你可以读取 /opt/openclaw-skills 下的 skill。'
+    assert query.endswith(tail) and query.index(tail) > query.index('root:/app#')
+    assert 'SECRET_BODY' not in query
+    for skill in skills:
+        assert (tmp_path / 'skills' / skill.skill_id / 'SKILL.md').is_file()
+        assert '/opt/openclaw-skills/' + skill.skill_id + '/SKILL.md' in manifest['files']
+    assert runtime.initial_query_template(template, {**manifest, 'mode': 'single'}) == template
+    with pytest.raises(ValueError, match='catalog and mounted library differ'):
+        runtime.autonomous_query_tail({**manifest, 'catalog': manifest['catalog'][:-1]})
+    files = dict(manifest['files'])
+    files.pop('/opt/openclaw-skills/p2/SKILL.md')
+    with pytest.raises(ValueError, match='complete mounted library'):
+        runtime.autonomous_query_tail({**manifest, 'files': files})
+
+
 def test_consumed_slot_cannot_be_replaced_and_out_of_schedule_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, 'ROOT', tmp_path)
     monkeypatch.setattr(runner.shutil, 'disk_usage', lambda p: SimpleNamespace(free=100 * 1024**3))
@@ -112,3 +135,25 @@ def test_consumed_slot_cannot_be_replaced_and_out_of_schedule_rejected(tmp_path,
     assert runner.reserve(row) == (slot, False)
     with pytest.raises(ValueError, match='Unallocated'):
         runner.reserve({**row, 'attempt': 2})
+
+
+def test_launch_forwards_tencent_environment_before_starting_worker(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, 'ROOT', tmp_path)
+    monkeypatch.setattr(runner, 'verify_freeze', lambda: None)
+    monkeypatch.setenv('TB21_EXECUTOR_API_KEY', 'test-key')
+    runner.write(tmp_path / 'manifest.json', {'stage': 'smoke', 'workers': 8})
+    captured = {}
+
+    def spawn(*args, **kwargs):
+        captured.update(kwargs['env'])
+        return SimpleNamespace(pid=123)
+
+    monkeypatch.setattr(runner.subprocess, 'Popen', spawn)
+    runner.launch()
+    assert captured['OPENAI_API_KEY'] == 'test-key'
+    assert captured['E2B_DOMAIN'] == 'ap-beijing.tencentags.com'
+    assert captured['TBENCH_E2B_RELAY_TEMPLATE'] == 'sdt-28lb4d9k'
+    assert captured['TBENCH_RELAY_PROVIDER_BASE'] == 'https://llm-center.modelbest.co/v1'
+    assert captured['TBENCH_TENCENT_ENV_FILE'] == '/dev/null'
+    assert captured['TMPDIR'] == str(tmp_path / 'tmp')
+    assert json.loads((tmp_path / 'dispatch.json').read_text())['no_restart'] is True

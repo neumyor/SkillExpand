@@ -90,6 +90,12 @@ def prepare(root, prior, source, stage, smoke_root=None):
         'codex_root_switch_verified': False, 'final_feedback_used': False,
         'provider': 'https://llm-center.modelbest.co/v1', 'executor_context': 262144,
         'cell_definitions': CELLS, 'formal_results_viewed_before_freeze': False}
+    if stage == 'formal':
+        manifest['protocol_revision'] = 'autonomous-user-query-tail-v2'
+        manifest['autonomous_user_query_tail'] = '你可以读取 /opt/openclaw-skills 下的 skill。'
+        manifest['pre_freeze_user_revision'] = {
+            'formal_slots_consumed': 0, 'existing_smoke_preserved': True,
+            'existing_smoke_validates_new_hint': False, 'additional_smoke': 0}
     write(root / 'manifest.json', manifest)
     paths = [p for p in root.glob('*.py')] + [root / 'protocol.md', root / 'manifest.json']
     paths += [p for p in (root / 'code').rglob('*') if p.is_file()]

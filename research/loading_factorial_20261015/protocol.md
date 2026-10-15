@@ -15,6 +15,15 @@ catalog and where/how to read files. No body/resource content is injected.
 The executor may read zero, one or multiple packages at any time using the
 existing terminal. There is no task-to-Skill map and no task-specific advice.
 
+User-authorized revision before formal freeze: append the optional sentence
+`你可以读取 /opt/openclaw-skills 下的 skill。` to the end of the actual first
+executor user query, after the terminal-state section, for both autonomous arms.
+The directory is the complete mounted library; validate every catalog entrypoint
+exists before execution and audit the exact tail in the raw provider request.
+Single arms retain their original instruction. Formal slots consumed at revision:
+zero. Preserve all eight original smoke slots unchanged; they do not validate
+this new sentence. No additional smoke is authorized or performed.
+
 Development smoke consists of exactly eight consumed slots: kv-store-grpc and
 headless-terminal, one per cell. No replacement or additional smoke is allowed.
 Smoke checks implementation paths, initial exposure and saved access evidence;

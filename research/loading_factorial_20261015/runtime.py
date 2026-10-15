@@ -12,6 +12,22 @@ import time
 MODULE_NAME = 'loading_factorial_runtime'
 
 
+def autonomous_query_tail(manifest):
+    root = Path('/opt/openclaw-skills')
+    mounted = {str(root / identifier / 'SKILL.md') for identifier in manifest['skill_ids']}
+    if not mounted or not mounted.issubset(manifest['files']):
+        raise ValueError('Autonomous query must reference the complete mounted library')
+    if {row['skill_id'] for row in manifest['catalog']} != set(manifest['skill_ids']):
+        raise ValueError('Autonomous catalog and mounted library differ')
+    return f'你可以读取 {root} 下的 skill。'
+
+
+def initial_query_template(template, manifest):
+    if manifest['mode'] != 'autonomous':
+        return template
+    return template.rstrip() + '\n\n' + autonomous_query_tail(manifest)
+
+
 def build_config(template, root, slot, task, skill_root, mode):
     if mode not in ('single', 'autonomous'):
         raise ValueError('Unknown loading mode')
@@ -72,6 +88,7 @@ def _load():
             self.loading_mode = loading_mode
             self.manifest = json.loads(Path(loading_manifest).read_text())
             super().__init__(*args, **kwargs)
+            self._prompt_template = initial_query_template(self._prompt_template, self.manifest)
 
         async def _build_skills_section(self, environment):
             # Native discovery reads files internally; expose only frozen routing metadata.
@@ -88,6 +105,18 @@ def _load():
 
         async def run(self, instruction, environment, context):
             root = Path(__file__).resolve().parent
+            if self.loading_mode == 'autonomous':
+                paths = ['/opt/openclaw-skills'] + [
+                    '/opt/openclaw-skills/' + identifier + '/SKILL.md'
+                    for identifier in self.manifest['skill_ids']]
+                command = ' && '.join(('test -d ' if index == 0 else 'test -f ') + shlex.quote(path)
+                                      for index, path in enumerate(paths))
+                checked = await environment.exec(command, user='root')
+                if checked.return_code:
+                    raise RuntimeError('Autonomous query library paths do not exist')
+                (self.logs_dir / 'loading_query_paths.json').write_text(json.dumps({
+                    'root': paths[0], 'entrypoints': paths[1:], 'all_exist': True,
+                    'user_query_tail': autonomous_query_tail(self.manifest)}))
             watcher = (root / 'watch_files.py').read_bytes()
             await environment._sandbox.files.write('/tmp/loading-watch.py', watcher, user='root')
             result = await environment.exec(

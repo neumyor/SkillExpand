@@ -412,6 +412,17 @@ class LoadingAudit:
             text = "\n".join(message.get("content", "") for message in messages if isinstance(message.get("content"), str))
             if manifest["initial_suffix"] not in text:
                 self.error(path, "initial_model_request_missing_exact_loading_instruction")
+            tail = self.manifest.get('autonomous_user_query_tail')
+            if manifest['mode'] == 'autonomous' and tail:
+                users = [message for message in messages if message.get('role') == 'user']
+                if not users or not users[0].get('content', '').endswith(tail):
+                    self.error(path, 'autonomous_hint_not_at_first_user_query_tail')
+                mounted_paths = self.optional(agent / 'loading_query_paths.json', required=valid)
+                expected_paths = ['/opt/openclaw-skills/' + identifier + '/SKILL.md'
+                                  for identifier in manifest['skill_ids']]
+                self.same(agent / 'loading_query_paths.json', mounted_paths,
+                          {'root': '/opt/openclaw-skills', 'entrypoints': expected_paths,
+                           'all_exist': True, 'user_query_tail': tail}, 'autonomous_query_paths_drift')
             leaked = []
             for skill in library:
                 if skill["body"].strip() and skill["body"].strip() in text:
@@ -421,7 +432,8 @@ class LoadingAudit:
             if leaked:
                 self.error(path, "skill_contents_in_initial_model_request")
             row["initial_prompt"] = {"request_count": len(requests), "loading_suffix_observed": manifest["initial_suffix"] in text,
-                                     "full_body_or_resource_leaks": leaked}
+                                     "full_body_or_resource_leaks": leaked,
+                                     'autonomous_tail_required': tail if manifest['mode'] == 'autonomous' else None}
             for request in requests:
                 expected = {"model": self.template["agents"][0]["model_name"].removeprefix("openai/"),
                             "max_tokens": 65536, "top_p": .95, "top_k": 20, "enable_thinking": True}

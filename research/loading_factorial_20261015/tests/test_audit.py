@@ -206,3 +206,36 @@ def test_unknown_and_unequal_cell_counts_never_create_effect():
     assert audit.factorial_effects(cells)["interaction"] is None
     cells["old_single"] = [{"reward": None}]
     assert audit.factorial_effects(cells)["evolution_single"] is None
+
+
+@pytest.mark.parametrize('mutation', ['none', 'system_only', 'not_last', 'incomplete_mount'])
+def test_autonomous_revision_checks_actual_first_user_query_and_mounted_paths(saved, mutation):
+    root, _ = saved
+    tail = '你可以读取 /opt/openclaw-skills 下的 skill。'
+    value = audit.read(root / 'manifest.json')
+    value['autonomous_user_query_tail'] = tail
+    put(root / 'manifest.json', value)
+    for cell in ['old_autonomous', 'evolved_autonomous']:
+        slot = root / 'smoke/slots' / cell / 'dev/01'
+        agent = slot / 'jobs/run/dev__fresh/agent'
+        path = agent / 'raw_model_requests.jsonl'
+        request = json.loads(path.read_text())
+        if mutation == 'system_only':
+            request['messages'].insert(0, {'role': 'system', 'content': tail})
+        else:
+            request['messages'][0]['content'] += '\n\n' + tail
+            if mutation == 'not_last':
+                request['messages'][0]['content'] += '\nCurrent terminal state: root#'
+        path.write_text(json.dumps(request) + '\n')
+        manifest = audit.read(slot / 'load_manifest.json')
+        paths = ['/opt/openclaw-skills/' + identifier + '/SKILL.md' for identifier in manifest['skill_ids']]
+        put(agent / 'loading_query_paths.json', {'root': '/opt/openclaw-skills', 'entrypoints': paths,
+            'all_exist': mutation != 'incomplete_mount', 'user_query_tail': tail})
+    result = run(saved)
+    if mutation == 'none':
+        assert result['passed'], result['errors']
+    else:
+        assert not result['passed']
+        expected = ('autonomous_query_paths_drift' if mutation == 'incomplete_mount'
+                    else 'autonomous_hint_not_at_first_user_query_tail')
+        assert expected in {row['code'] for row in result['errors']}

@@ -251,6 +251,16 @@ def launch():
     env.update(XDG_CACHE_HOME=str(ROOT / 'cache'), PIP_CACHE_DIR=str(ROOT / 'cache/pip'),
                UV_CACHE_DIR=str(ROOT / 'cache/uv'), PYTHONPYCACHEPREFIX=str(ROOT / 'cache/pycache'),
                OPENAI_API_KEY=env['TB21_EXECUTOR_API_KEY'])
+    env.update(TBENCH_PERSIST_SANDBOXES='0', TBENCH_TENCENT_ENV_FILE='/dev/null',
+               E2B_DOMAIN='ap-beijing.tencentags.com', E2B_VALIDATE_API_KEY='false',
+               HARBOR_E2B_FS_USER='root', TB21_PACKAGE_DNS='183.60.83.19',
+               TBENCH_E2B_RELAY_TEMPLATE='sdt-28lb4d9k',
+               TBENCH_E2B_RELAY_USE_TEMPLATE_DEFAULT='1',
+               TBENCH_E2B_RELAY_METADATA_JSON='{"x-mounts":"[]"}',
+               TBENCH_RELAY_PROVIDER_BASE='https://llm-center.modelbest.co/v1',
+               EXPE_LLM_TIMEOUT_SECONDS='1800', TBENCH_E2B_START_CONCURRENCY='4',
+               TBENCH_E2B_RPC_CONCURRENCY='12', TB21_TOTAL_WORKER_LIMIT='250',
+               TB21_PIPELINE_CACHE='0', TB21_TASK_VERIFIER_CACHES='{}')
     with (ROOT / 'driver.log').open('a') as stream:
         process = subprocess.Popen([sys.executable, str(ROOT / 'runner.py'), '--worker'],
             stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT, env=env, start_new_session=True)
