@@ -1,0 +1,26 @@
+{
+  "allow_mechanism_smoke": true,
+  "generation_calls": 2,
+  "evidence_payload_identical": true,
+  "schema_persistence_reload_materialization": "passed_both_arms",
+  "new_frontmatter": "one_program_rendered_block_matches_internal_metadata",
+  "resources": "both_empty_no_artificial_script_required",
+  "body_chars": {"old": 2256, "new": 3977},
+  "supported_guidance": [
+    {"guidance": "inspect history and reflog before selecting a recovery commit", "raw_steps": [2, 3, 4]},
+    {"guidance": "inspect and resolve conflict then stage and complete merge", "raw_steps": [5, 6, 7]},
+    {"guidance": "verify status and resulting history before completion", "raw_steps": [8, 9]},
+    {"guidance": "pager and newline interactions can block subsequent commands", "raw_steps": [2, 3, 4, 5]}
+  ],
+  "material_difference": "New guide distinguishes demonstrated recovery from cautious alternatives, explains why checks matter, gives explicit failure/stop boundaries and cites raw steps; old guide is eight numbered rules without linked evidence.",
+  "limitations": [
+    "One historical task does not support cross-task generalization or causal claims.",
+    "New guide still uses numbered subsections; removing forced numbered output is not evidence that lists vanish.",
+    "Stash, cherry-pick and additional diff commands are marked unobserved cautious advice, not validated methods.",
+    "The statement that output ending with a colon is a pager is overbroad; the raw trace supports only the concrete pager encounter.",
+    "Some references point to original card narration; raw tool observations take precedence.",
+    "Empty generated resources validate the no-gratuitous-resource case, not live resource execution.",
+    "No manual modification of either generated artifact."
+  ],
+  "evaluation_intent": "Four bounded autonomous executions check save-load-use mechanism only; no score-driven iteration."
+}

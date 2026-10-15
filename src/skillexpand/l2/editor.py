@@ -226,7 +226,8 @@ class SkillEditor:
                             S.Provenance(rationale=value["rationale"],
                                          source_experience_ids=tuple(
                                              row["id"] for row in evidence.get("historical_evidence", []))),
-                            resources=value["resources"], package_mode=True)
+                            resources=value["resources"], package_mode=True,
+                            entrypoint_format=base_skill.entrypoint_format)
         except (ValueError, KeyError, TypeError):
             return EditOutcome(None, base_skill.body, REASON_NO_OPERATIONS, raw, prompt_chars=size)
         if (skill.body, skill.resources) == (base_skill.body, base_skill.resources):
@@ -426,6 +427,8 @@ class SkillEditor:
                     source_experience_ids=tuple(e.experience_id for e in experiences),
                     source_task_ids=tuple(e.task_id for e in experiences),
                 ),
+                resources=dict(base_skill.resources), package_mode=base_skill.package_mode,
+                entrypoint_format=base_skill.entrypoint_format,
             ),
             raw_llm_output=raw,
             meta_skill_version=self.meta_skill.version,
@@ -465,7 +468,9 @@ class SkillEditor:
                           base_skill.name, base_skill.description, body,
                           S.Provenance(rationale="Planner structured edit",
                                        source_experience_ids=tuple(e.experience_id for e in experiences),
-                                       source_task_ids=tuple(e.task_id for e in experiences))),
+                                       source_task_ids=tuple(e.task_id for e in experiences)),
+                          resources=dict(base_skill.resources), package_mode=base_skill.package_mode,
+                          entrypoint_format=base_skill.entrypoint_format),
             raw_llm_output="",
             meta_skill_version=self.meta_skill.version,
             proposed_from_experience_id=experiences[0].experience_id,

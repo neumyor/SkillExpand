@@ -217,6 +217,8 @@ def to_dict(obj: Any) -> Any:
         if isinstance(obj, Skill) and not obj.resources and not obj.package_mode:
             result.pop('resources', None)
             result.pop('package_mode', None)
+        if isinstance(obj, Skill) and obj.entrypoint_format == 'legacy':
+            result.pop('entrypoint_format', None)
         return result
     if isinstance(obj, (list, tuple)):
         return [to_dict(x) for x in obj]
@@ -316,8 +318,13 @@ class Skill:
     # Optional package files. Legacy skills keep the historical body-only path.
     resources: Dict[str, str] = field(default_factory=dict)
     package_mode: bool = False
+    entrypoint_format: str = 'legacy'
 
     def __post_init__(self):
+        if self.entrypoint_format not in ('legacy', 'frontmatter'):
+            raise ValueError('Unknown Skill entrypoint format')
+        if self.entrypoint_format == 'frontmatter' and not self.package_mode:
+            raise ValueError('Frontmatter entrypoint requires package mode')
         if not isinstance(self.description,str) or not self.description.strip():
             raise ValueError('Skill description is required for routing')
         if not isinstance(self.resources, dict):

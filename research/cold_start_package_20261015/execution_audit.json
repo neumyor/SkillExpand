@@ -1,0 +1,451 @@
+{
+  "status": "passed",
+  "generation_calls": 2,
+  "identical_evidence_payload": true,
+  "frozen_bindings": 323,
+  "reserved_slots": 4,
+  "actual_trials": 4,
+  "unique_sandbox_ids": 4,
+  "errors": [],
+  "pending": [],
+  "source_limits": [],
+  "arms": {
+    "old": {
+      "slots": 2,
+      "valid": 2,
+      "successes": 2,
+      "unresolved": 0,
+      "complete": true,
+      "success_rate": 1.0,
+      "success_rate_bounds": [
+        1.0,
+        1.0
+      ]
+    },
+    "new_initial": {
+      "slots": 2,
+      "valid": 2,
+      "successes": 2,
+      "unresolved": 0,
+      "complete": true,
+      "success_rate": 1.0,
+      "success_rate_bounds": [
+        1.0,
+        1.0
+      ]
+    }
+  },
+  "trials": [
+    {
+      "path": "mechanism_smoke/slots/old_autonomous/fix-git/01",
+      "cell": "old_autonomous",
+      "task": "fix-git",
+      "attempt": 1,
+      "library": "old",
+      "mode": "autonomous",
+      "reserved": true,
+      "finished": true,
+      "valid": true,
+      "reward": 1,
+      "tokens": {
+        "input": 32289,
+        "output": 2824,
+        "cached": 0,
+        "total": 35113
+      },
+      "actual_harbor_trials": 1,
+      "error_type": null,
+      "error": null,
+      "duration_seconds": 228.57013201713562,
+      "selected_skill_id": null,
+      "common_agent": {
+        "name": "terminus-2",
+        "import_path": "loading_factorial_runtime:LoadingTerminus",
+        "model_name": "openai/qwen3.6-flash-distill",
+        "override_timeout_sec": 7200.0,
+        "override_setup_timeout_sec": null,
+        "max_timeout_sec": null,
+        "kwargs": {
+          "api_base": "https://llm-center.modelbest.co/v1",
+          "interleaved_thinking": true,
+          "store_all_messages": true,
+          "trajectory_config": {
+            "raw_content": false,
+            "linear_history": false
+          },
+          "llm_call_kwargs": {
+            "top_p": 0.95,
+            "max_tokens": 65536,
+            "extra_body": {
+              "top_k": 20,
+              "enable_thinking": true,
+              "chat_template_kwargs": {
+                "preserve_thinking": true
+              }
+            }
+          },
+          "model_info": {
+            "max_input_tokens": 262144,
+            "max_output_tokens": 65536
+          },
+          "enable_summarize": true,
+          "proactive_summarization_threshold": 8000,
+          "skills_dir": "/opt/openclaw-skills",
+          "record_terminal_session": false,
+          "record_terminal_output": false
+        },
+        "env": {}
+      },
+      "sandbox_id": "inbfh3hmq7pf3uzqpjlwfh3bvw4fs66zvboxek2i",
+      "rounds": 9,
+      "tool_calls": 17,
+      "loading": {
+        "directory_visible": [
+          "terminalbench.terminalbench.fix-git"
+        ],
+        "actual_file_accesses": [],
+        "read_skill_ids": [],
+        "body_read_ids": [],
+        "resource_only_ids": [],
+        "joint_read_set": [],
+        "steps": [],
+        "attribution": "joint trajectory only; no per-skill success credit",
+        "access_counts": {},
+        "body_read_skill_ids": [],
+        "resource_read_skill_ids": [],
+        "resource_invocations": [],
+        "visibility_timestamp": 1792071679.1145418,
+        "terminal_observations": 9,
+        "temporal_access_evidence": []
+      },
+      "initial_prompt": {
+        "request_count": 8,
+        "loading_suffix_observed": true,
+        "full_body_or_resource_leaks": [],
+        "autonomous_tail_required": "你可以读取 /opt/openclaw-skills 下的 skill。"
+      }
+    },
+    {
+      "path": "mechanism_smoke/slots/evolved_autonomous/fix-git/01",
+      "cell": "evolved_autonomous",
+      "task": "fix-git",
+      "attempt": 1,
+      "library": "evolved",
+      "mode": "autonomous",
+      "reserved": true,
+      "finished": true,
+      "valid": true,
+      "reward": 1,
+      "tokens": {
+        "input": 64820,
+        "output": 3492,
+        "cached": 0,
+        "total": 68312
+      },
+      "actual_harbor_trials": 1,
+      "error_type": null,
+      "error": null,
+      "duration_seconds": 91.38321900367737,
+      "selected_skill_id": null,
+      "common_agent": {
+        "name": "terminus-2",
+        "import_path": "loading_factorial_runtime:LoadingTerminus",
+        "model_name": "openai/qwen3.6-flash-distill",
+        "override_timeout_sec": 7200.0,
+        "override_setup_timeout_sec": null,
+        "max_timeout_sec": null,
+        "kwargs": {
+          "api_base": "https://llm-center.modelbest.co/v1",
+          "interleaved_thinking": true,
+          "store_all_messages": true,
+          "trajectory_config": {
+            "raw_content": false,
+            "linear_history": false
+          },
+          "llm_call_kwargs": {
+            "top_p": 0.95,
+            "max_tokens": 65536,
+            "extra_body": {
+              "top_k": 20,
+              "enable_thinking": true,
+              "chat_template_kwargs": {
+                "preserve_thinking": true
+              }
+            }
+          },
+          "model_info": {
+            "max_input_tokens": 262144,
+            "max_output_tokens": 65536
+          },
+          "enable_summarize": true,
+          "proactive_summarization_threshold": 8000,
+          "skills_dir": "/opt/openclaw-skills",
+          "record_terminal_session": false,
+          "record_terminal_output": false
+        },
+        "env": {}
+      },
+      "sandbox_id": "rfxvyqwnuhg2fmldjkvg3ebie4gx2vnotn6ggfzb",
+      "rounds": 11,
+      "tool_calls": 25,
+      "loading": {
+        "directory_visible": [
+          "terminalbench.terminalbench.fix-git"
+        ],
+        "actual_file_accesses": [
+          {
+            "at": 1792071697.6070478,
+            "path": "/opt/openclaw-skills/terminalbench.terminalbench.fix-git/SKILL.md",
+            "kind": "access",
+            "mask": 1,
+            "skill_id": "terminalbench.terminalbench.fix-git",
+            "resource": "SKILL.md",
+            "evidence": "kernel_file_access_not_proof_of_model_consumption"
+          }
+        ],
+        "read_skill_ids": [
+          "terminalbench.terminalbench.fix-git"
+        ],
+        "body_read_ids": [
+          "terminalbench.terminalbench.fix-git"
+        ],
+        "resource_only_ids": [],
+        "joint_read_set": [
+          "terminalbench.terminalbench.fix-git"
+        ],
+        "steps": [
+          {
+            "step_index": 4,
+            "step_id": 5,
+            "timestamp": "2026-10-15T13:41:38.963672+00:00",
+            "path_references": [
+              {
+                "path": "/opt/openclaw-skills/terminalbench.terminalbench.fix-git/SKILL.md",
+                "skill_id": "terminalbench.terminalbench.fix-git",
+                "resource": "SKILL.md"
+              }
+            ],
+            "observed_contents": [
+              {
+                "path": "/opt/openclaw-skills/terminalbench.terminalbench.fix-git/SKILL.md",
+                "skill_id": "terminalbench.terminalbench.fix-git",
+                "resource": "SKILL.md",
+                "matching_lines": 5,
+                "evidence": "content_lines_in_terminal_observation"
+              }
+            ],
+            "subsequent_step_ids": [
+              6,
+              7,
+              8
+            ],
+            "resource_execution": "requires_manual_command_and_observation_review"
+          }
+        ],
+        "attribution": "joint trajectory only; no per-skill success credit",
+        "access_counts": {
+          "terminalbench.terminalbench.fix-git": 1
+        },
+        "body_read_skill_ids": [
+          "terminalbench.terminalbench.fix-git"
+        ],
+        "resource_read_skill_ids": [],
+        "resource_invocations": [],
+        "visibility_timestamp": 1792071674.4812458,
+        "terminal_observations": 11,
+        "temporal_access_evidence": [
+          {
+            "path": "/opt/openclaw-skills/terminalbench.terminalbench.fix-git/SKILL.md",
+            "at": 1792071697.6070478,
+            "following_observation_at": 1792071698.963473
+          }
+        ]
+      },
+      "initial_prompt": {
+        "request_count": 10,
+        "loading_suffix_observed": true,
+        "full_body_or_resource_leaks": [],
+        "autonomous_tail_required": "你可以读取 /opt/openclaw-skills 下的 skill。"
+      }
+    },
+    {
+      "path": "mechanism_smoke/slots/old_autonomous/fix-git/02",
+      "cell": "old_autonomous",
+      "task": "fix-git",
+      "attempt": 2,
+      "library": "old",
+      "mode": "autonomous",
+      "reserved": true,
+      "finished": true,
+      "valid": true,
+      "reward": 1,
+      "tokens": {
+        "input": 48901,
+        "output": 3106,
+        "cached": 0,
+        "total": 52007
+      },
+      "actual_harbor_trials": 1,
+      "error_type": null,
+      "error": null,
+      "duration_seconds": 75.2974545955658,
+      "selected_skill_id": null,
+      "common_agent": {
+        "name": "terminus-2",
+        "import_path": "loading_factorial_runtime:LoadingTerminus",
+        "model_name": "openai/qwen3.6-flash-distill",
+        "override_timeout_sec": 7200.0,
+        "override_setup_timeout_sec": null,
+        "max_timeout_sec": null,
+        "kwargs": {
+          "api_base": "https://llm-center.modelbest.co/v1",
+          "interleaved_thinking": true,
+          "store_all_messages": true,
+          "trajectory_config": {
+            "raw_content": false,
+            "linear_history": false
+          },
+          "llm_call_kwargs": {
+            "top_p": 0.95,
+            "max_tokens": 65536,
+            "extra_body": {
+              "top_k": 20,
+              "enable_thinking": true,
+              "chat_template_kwargs": {
+                "preserve_thinking": true
+              }
+            }
+          },
+          "model_info": {
+            "max_input_tokens": 262144,
+            "max_output_tokens": 65536
+          },
+          "enable_summarize": true,
+          "proactive_summarization_threshold": 8000,
+          "skills_dir": "/opt/openclaw-skills",
+          "record_terminal_session": false,
+          "record_terminal_output": false
+        },
+        "env": {}
+      },
+      "sandbox_id": "uz5mbn7tcbb7pyr3e2aqp4wsegwluqt7nwlorim7",
+      "rounds": 11,
+      "tool_calls": 22,
+      "loading": {
+        "directory_visible": [
+          "terminalbench.terminalbench.fix-git"
+        ],
+        "actual_file_accesses": [],
+        "read_skill_ids": [],
+        "body_read_ids": [],
+        "resource_only_ids": [],
+        "joint_read_set": [],
+        "steps": [],
+        "attribution": "joint trajectory only; no per-skill success credit",
+        "access_counts": {},
+        "body_read_skill_ids": [],
+        "resource_read_skill_ids": [],
+        "resource_invocations": [],
+        "visibility_timestamp": 1792071668.0936084,
+        "terminal_observations": 11,
+        "temporal_access_evidence": []
+      },
+      "initial_prompt": {
+        "request_count": 10,
+        "loading_suffix_observed": true,
+        "full_body_or_resource_leaks": [],
+        "autonomous_tail_required": "你可以读取 /opt/openclaw-skills 下的 skill。"
+      }
+    },
+    {
+      "path": "mechanism_smoke/slots/evolved_autonomous/fix-git/02",
+      "cell": "evolved_autonomous",
+      "task": "fix-git",
+      "attempt": 2,
+      "library": "evolved",
+      "mode": "autonomous",
+      "reserved": true,
+      "finished": true,
+      "valid": true,
+      "reward": 1,
+      "tokens": {
+        "input": 94774,
+        "output": 3751,
+        "cached": 0,
+        "total": 98525
+      },
+      "actual_harbor_trials": 1,
+      "error_type": null,
+      "error": null,
+      "duration_seconds": 371.58395171165466,
+      "selected_skill_id": null,
+      "common_agent": {
+        "name": "terminus-2",
+        "import_path": "loading_factorial_runtime:LoadingTerminus",
+        "model_name": "openai/qwen3.6-flash-distill",
+        "override_timeout_sec": 7200.0,
+        "override_setup_timeout_sec": null,
+        "max_timeout_sec": null,
+        "kwargs": {
+          "api_base": "https://llm-center.modelbest.co/v1",
+          "interleaved_thinking": true,
+          "store_all_messages": true,
+          "trajectory_config": {
+            "raw_content": false,
+            "linear_history": false
+          },
+          "llm_call_kwargs": {
+            "top_p": 0.95,
+            "max_tokens": 65536,
+            "extra_body": {
+              "top_k": 20,
+              "enable_thinking": true,
+              "chat_template_kwargs": {
+                "preserve_thinking": true
+              }
+            }
+          },
+          "model_info": {
+            "max_input_tokens": 262144,
+            "max_output_tokens": 65536
+          },
+          "enable_summarize": true,
+          "proactive_summarization_threshold": 8000,
+          "skills_dir": "/opt/openclaw-skills",
+          "record_terminal_session": false,
+          "record_terminal_output": false
+        },
+        "env": {}
+      },
+      "sandbox_id": "v2iidm3lmui2exir2qdivlta2j32txgv3wqvrgnq",
+      "rounds": 13,
+      "tool_calls": 23,
+      "loading": {
+        "directory_visible": [
+          "terminalbench.terminalbench.fix-git"
+        ],
+        "actual_file_accesses": [],
+        "read_skill_ids": [],
+        "body_read_ids": [],
+        "resource_only_ids": [],
+        "joint_read_set": [],
+        "steps": [],
+        "attribution": "joint trajectory only; no per-skill success credit",
+        "access_counts": {},
+        "body_read_skill_ids": [],
+        "resource_read_skill_ids": [],
+        "resource_invocations": [],
+        "visibility_timestamp": 1792071667.1059945,
+        "terminal_observations": 13,
+        "temporal_access_evidence": []
+      },
+      "initial_prompt": {
+        "request_count": 12,
+        "loading_suffix_observed": true,
+        "full_body_or_resource_leaks": [],
+        "autonomous_tail_required": "你可以读取 /opt/openclaw-skills 下的 skill。"
+      }
+    }
+  ],
+  "interpretation": "Mechanism smoke on the source task; no statistical or causal improvement claim."
+}
