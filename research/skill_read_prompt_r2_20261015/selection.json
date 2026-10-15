@@ -1,0 +1,7 @@
+{
+  "prompt": "v1",
+  "at": 1792074452.0963616,
+  "rule": "v1 early stop if 2/2; else v2; most reading-order passes, tie v1; no task scores",
+  "task_scores_used": false,
+  "text": "SKILL LOADING — REQUIRED FIRST RESPONSE. The complete Skill catalog above is available. Choose the most relevant Skill yourself. In your NEXT response, the commands array MUST contain exactly ONE command: cat /opt/openclaw-skills/<chosen_skill_id>/SKILL.md followed by a newline. Replace <chosen_skill_id> with an actual ID from the catalog. Set task_complete to false. Stop that response immediately after submitting this one read command. Do not include any other command, task inspection, task data read, or task modification in this response. Wait for the Skill body to be returned in the next user message. Only THEN, in a separate subsequent response, begin task operations. Do not merely plan to read; actually submit the read command now. You need not read the whole library. Later you may load more Skills or referenced resources as needed. This requirement overrides the earlier optional-reading wording."
+}
