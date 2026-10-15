@@ -151,7 +151,7 @@ def resume(python_runtime=False):
             TBENCH_TENCENT_ENV_FILE='/dev/null', TBENCH_E2B_START_CONCURRENCY='4',
             TBENCH_E2B_RPC_CONCURRENCY='12', PYTHONPATH=':'.join([str(launch.REPO / 'scripts'),
                 launch.ADAPTER, '/data2/liyishan/tbench2-openclaw-min/framework/python',
-                str(launch.REPO / 'src'), '/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012/src']))
+                str(launch.REPO / 'src'), str(launch.REPO / 'runs/agentbrew-tb21-evo89-test89-20261012/src')]))
         with (launch.REG / 'supervisor.log').open('a') as log:
             child = subprocess.Popen([launch.PYTHON, __file__, '--worker']
                 + (['--python-runtime-smoke'] if python_runtime else []), env=env,

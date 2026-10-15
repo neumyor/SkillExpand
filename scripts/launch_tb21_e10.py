@@ -134,7 +134,7 @@ def launch():
             TBENCH_E2B_RPC_CONCURRENCY='12',
             PYTHONPATH=':'.join([str(REPO / 'scripts'), ADAPTER,
                 '/data2/liyishan/tbench2-openclaw-min/framework/python',
-                str(REPO / 'src'), '/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012/src']))
+                str(REPO / 'src'), str(REPO / 'runs/agentbrew-tb21-evo89-test89-20261012/src')]))
         with (REG / 'supervisor.log').open('a') as log:
             child = subprocess.Popen([PYTHON, __file__, '--worker'], env=env,
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)

@@ -194,7 +194,7 @@ def main():
     from e2b.api.client_async import get_envd_transport
     e2b_async_main.get_transport = partial(get_envd_transport, http2=False)
     adapter = RolloutAdapter(args.eval_config, 2, rollout_backend='tb21-tencent',
-        harness_path='/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012/sources/tb21-tencent-harness/python',
+        harness_path='/data2/liyishan/SkillExpand-tb21/SkillExpand/runs/agentbrew-tb21-evo89-test89-20261012/sources/tb21-tencent-harness/python',
         task_failure_policy='terminal')
     prompts = upstream_prompts(args.source)
     task_root = Path(adapter.config.dataset.local_path)

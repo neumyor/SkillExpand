@@ -9,7 +9,7 @@ import shutil
 import time
 
 REPO = Path('/data2/liyishan/SkillExpand-tb21/SkillExpand')
-ROOT = Path('/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012')
+ROOT = Path('/data2/liyishan/SkillExpand-tb21/SkillExpand/runs/agentbrew-tb21-evo89-test89-20261012')
 OUT = ROOT / 'outputs/E9_agentbrew_tb21_evo89_test89'
 REG = REPO / 'runs/tb21-e9-agentbrew-evo89-test89-20261012'
 

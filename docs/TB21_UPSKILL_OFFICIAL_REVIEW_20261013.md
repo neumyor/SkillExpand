@@ -32,7 +32,7 @@ scripts with that reconstruction were incorrect.
 ## Independent E9 Revision
 
 Output on jinan40:
-/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012/outputs/E9_hkuds_upskill_acp_evo89_test89_20261013
+/data2/liyishan/SkillExpand-tb21/SkillExpand/runs/agentbrew-tb21-evo89-test89-20261012/outputs/E9_hkuds_upskill_acp_evo89_test89_20261013
 
 The old E9 evaluator was stopped with its recorded process identity and all
 artifacts remain intact. A new empty library and fresh baseline are used;

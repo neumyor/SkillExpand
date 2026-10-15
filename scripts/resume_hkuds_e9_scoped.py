@@ -8,7 +8,7 @@ import sys
 import time
 
 REPO = Path('/data2/liyishan/SkillExpand-tb21/SkillExpand')
-BASE = Path('/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012')
+BASE = REPO / 'runs/agentbrew-tb21-evo89-test89-20261012'
 OUT = BASE / 'outputs/E9_hkuds_upskill_acp_evo89_test89_20261013'
 REG = REPO / 'runs/tb21-e9-agentbrew-evo89-test89-20261012'
 sys.path[:0] = [str(REPO / 'src'), str(REPO / 'scripts'), str(BASE / 'src')]
