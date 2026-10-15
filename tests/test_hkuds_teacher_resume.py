@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 
 source = Path(__file__).with_name('run_hkuds_upskill_tb21.py')
 if not source.exists():
@@ -42,7 +43,7 @@ class TeacherResumeTest(unittest.TestCase):
             teacher = runner.ACPTeacher(None, 'deepseek-v4-flash-0731', save)
             original_stream = runner.complete_stream
             calls = []
-            def completed(transport, body):
+            def completed(transport, body, diagnostics=None):
                 calls.append(body)
                 paths = ['/app/solve.py', *runner.FILES]
                 return {'role': 'assistant', 'content': '', 'tool_calls': [
@@ -51,7 +52,7 @@ class TeacherResumeTest(unittest.TestCase):
                     for i, path in enumerate(paths)]}, {}, 'tool_calls'
             runner.complete_stream = completed
             try:
-                def finish(transport, body):
+                def finish(transport, body, diagnostics=None):
                     if len(calls):
                         return {'role': 'assistant', 'content': 'done', 'tool_calls': []}, {}, 'stop'
                     return completed(transport, body)
@@ -85,7 +86,7 @@ class TeacherResumeTest(unittest.TestCase):
             root = Path(tmp)
             calls = []
 
-            def stream(transport, body):
+            def stream(transport, body, diagnostics=None):
                 calls.append(body)
                 if len(calls) == 1:
                     raise RelayError('connection interrupted')
@@ -107,7 +108,7 @@ class TeacherResumeTest(unittest.TestCase):
             evidence = json.loads(original)
             save(root / 'recovery-http-00.json', {'request': evidence['request'], 'spent_tool_turn': 0})
 
-            def complete(transport, body):
+            def complete(transport, body, diagnostics=None):
                 if body['messages'][-1]['role'] == 'tool':
                     calls.append(body)
                     return {'role': 'assistant', 'content': 'done', 'tool_calls': []}, {}, 'stop'

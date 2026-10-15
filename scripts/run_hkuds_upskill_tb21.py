@@ -5,10 +5,13 @@ from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import sys
 import tomllib
+from hkuds_e9_recovery import (relocated, frozen_contract, install_adapter_paths,
+    mark_task, allow_failed_record, create_amendment, MISSING_BASELINE)
 
 UPSTREAM_REVISION = 'ed42b147411bde72620a9a61bc956693413b0607'
 FILES = {'/app/CLAUDE.md': 'CLAUDE.md',
@@ -41,23 +44,36 @@ def trace_text(path, steps, width):
                    if (message := step.get('message', '')))
 
 
-def complete_stream(transport, payload):
+def complete_stream(transport, payload, diagnostics=None):
     from skillexpand.runtime.llm_relay import iter_sse_events
     content, reasoning, calls, usage, finish = '', '', {}, None, None
-    for event in iter_sse_events(transport.stream(payload)):
+    def chunks():
+        for chunk in transport.stream(payload):
+            if diagnostics is not None:
+                diagnostics['raw'].write(chunk if isinstance(chunk, bytes) else chunk.encode())
+                diagnostics['raw'].flush()
+            yield chunk
+    for event in iter_sse_events(chunks()):
         if event.get('usage'):
             usage = event['usage']
+        if diagnostics is not None:
+            diagnostics['usage'] = usage
         for choice in event.get('choices') or []:
             delta = choice.get('delta') or {}
             content += delta.get('content') or ''
             reasoning += delta.get('reasoning_content') or ''
             finish = choice.get('finish_reason') or finish
+            if diagnostics is not None:
+                diagnostics.update(content=content, reasoning_content=reasoning,
+                                   tool_calls=list(calls.values()), finish_reason=finish)
             for call in delta.get('tool_calls') or []:
                 row = calls.setdefault(call['index'], {'id': '', 'type': 'function',
                     'function': {'name': '', 'arguments': ''}})
                 row['id'] = call.get('id') or row['id']
                 for field in ('name', 'arguments'):
-                    row['function'][field] += call.get('function', {}).get(field) or ''
+                    row['function'][field] += (call.get('function') or {}).get(field) or ''
+            if diagnostics is not None:
+                diagnostics['tool_calls'] = list(calls.values())
     message = {'role': 'assistant', 'content': content, 'tool_calls': list(calls.values())}
     if finish not in ('stop', 'tool_calls'):
         raise ValueError('Teacher stream did not complete within its output budget')
@@ -90,6 +106,9 @@ class ACPTeacher:
         if prompt_path.exists() and prompt_path.read_text() != prompt:
             raise ValueError('Teacher prompt changed')
         prompt_path.write_text(prompt)
+        records = sorted(root.glob('http-*.json'))
+        if len(records) > 8 or [p.name for p in records] != [f'http-{i:02d}.json' for i in range(len(records))]:
+            raise ValueError('Teacher request slots exceed or differ from the original eight-turn budget')
         messages = [{'role': 'user', 'content': prompt}]
         files = {}
         tools = [{'type': 'function', 'function': {'name': 'Write',
@@ -112,19 +131,27 @@ class ACPTeacher:
                     if (not recovery.exists()
                             or json.loads(recovery.read_text()).get('request') != body
                             or json.loads(recovery.read_text()).get('spent_tool_turn') != turn
-                            or evidence['status'] not in ('pending', 'transport_failed')):
+                            or (evidence['status'] not in ('pending', 'transport_failed')
+                                and not allow_failed_record(root, path, body, turn))
+                            or (evidence.get('error_type') not in (None, 'RelayError')
+                                and not allow_failed_record(root, path, body, turn))):
                         raise ValueError('Teacher attempt changed or incomplete; no automatic resampling')
                     # Failed transport still consumes its original tool-turn slot.
                     continue
                 message = evidence['response']
             else:
                 self.save(path, {'status': 'pending', 'request': body})
+                diagnostics = {'usage': None, 'finish_reason': None}
                 try:
-                    message, usage, finish = complete_stream(self.transport, body)
+                    with path.with_suffix('.sse').open('xb') as raw:
+                        diagnostics['raw'] = raw
+                        message, usage, finish = complete_stream(self.transport, body, diagnostics)
                 except Exception as exc:
                     self.save(path, {'status': 'transport_failed' if type(exc).__name__ == 'RelayError' else 'teacher_failed', 'request': body,
                                     'error_type': type(exc).__name__,
-                                    'usage': None, 'outcome_unknown': True})
+                                    'error': re.sub(r'(?i)(bearer\s+\S+|sk-[A-Za-z0-9_-]+)', '[REDACTED]', str(exc))[:8000],
+                                    'usage': diagnostics.get('usage'), 'outcome_unknown': True,
+                                    'diagnostics': {k: v for k, v in diagnostics.items() if k != 'raw'}})
                     raise
                 self.save(path, {'status': 'completed', 'request': body,
                                 'response': message, 'usage': usage, 'finish_reason': finish})
@@ -159,7 +186,7 @@ def true_reward(trial):
 
 
 def trajectory_path(trial):
-    return Path(trial['trajectory_path'])
+    return relocated(trial['trajectory_path'])
 
 
 def complete_audit(report):
@@ -183,6 +210,9 @@ def main():
     parser.add_argument('--teacher-workers', type=int, default=16)
     parser.add_argument('--smoke', action='store_true')
     parser.add_argument('--brew-unstarted-only', action='store_true')
+    parser.add_argument('--recovery-preflight', action='store_true')
+    parser.add_argument('--bounded-recovery', action='store_true')
+    parser.add_argument('--recovery-task')
     args = parser.parse_args()
     from tbench_eval.agentbrew.adapter import RolloutAdapter
     from tbench_eval.agentbrew.adapter import read_eval_contract
@@ -225,9 +255,16 @@ def main():
     with run_lock(args.root / 'owner'):
         args.root.mkdir(parents=True, exist_ok=True)
         path = args.root / 'contract.json'
-        if path.exists() and read(path) != contract:
-            raise ValueError('Official revision contract changed')
-        save(path, contract)
+        if path.exists():
+            contract = frozen_contract(contract, read(path))
+            install_adapter_paths(adapter, contract)
+        else:
+            save(path, contract)
+        if args.recovery_preflight or args.bounded_recovery:
+            from hkuds_e9_recovery import preflight
+            preflight(args.root, adapter, contract, prompts, task_root, save)
+            if args.recovery_preflight:
+                return
         def stop(signum, frame):
             adapter.cancel_all()
             raise KeyboardInterrupt
@@ -239,6 +276,8 @@ def main():
             request_timeout=1800)
         teacher = ACPTeacher(transport, contract['teacher'], save)
         def parallel(items, workers, operation):
+            if workers == 1:
+                return {item: operation(item) for item in items}
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 return dict(zip(items, pool.map(operation, items)))
         def phase(name):
@@ -265,6 +304,35 @@ def main():
                 prompt = prompt.replace('(deepseek-v4-pro)', '(deepseek-v4-flash-0731)').replace('(deepseek-v4-flash)', '(qwen3.6-flash-distill)')
                 return teacher.run(args.root / 'brew' / task, prompt)
             phase('brew')
+            if args.bounded_recovery:
+                amendment = create_amendment(args.root, save)
+                selected = amendment['teacher_tasks']
+                if args.recovery_task:
+                    if args.recovery_task not in selected:
+                        raise ValueError('Task outside authorized recovery')
+                    selected = [args.recovery_task]
+                for task in selected:
+                    if (args.root / 'brew' / task / 'acp.json').exists():
+                        draft(task)
+                        continue
+                    mark_task(args.root, task, save)
+                    phase('brew-recovery-' + task)
+                    draft(task)
+                if args.recovery_task:
+                    save(args.root / 'status.json', {'phase': 'recovery_task_complete',
+                        'task': args.recovery_task, 'status': 'needs_attention', 'workers': 0})
+                    return
+                from hkuds_e9_recovery import recover_baseline
+                for task in MISSING_BASELINE:
+                    request = read(args.root / 'baseline' / task / 'request.json')
+                    phase('baseline-recovery-' + task)
+                    baseline[task] = recover_baseline(args.root, task, adapter, request, save)
+                eligible = [t for t in tasks if true_reward(baseline[t]) is not None]
+                if len(eligible) != 89:
+                    raise ValueError('Recovery requires all 89 real baseline scores')
+                for task in MISSING_BASELINE:
+                    phase('brew-recovered-baseline-' + task)
+                    draft(task)
             if args.brew_unstarted_only:
                 selected = unstarted_brew_tasks(args.root, eligible)
                 save(args.root / 'brew_unstarted_scope.json', {
@@ -297,7 +365,8 @@ def main():
                     brew_errors[task] = {'error_type': type(exc).__name__,
                                          'error': str(exc)[:1000]}
                     return None
-            acps = parallel(eligible, args.teacher_workers, draft_retaining_errors)
+            acps = ({task: draft(task) for task in eligible} if args.bounded_recovery else
+                    parallel(eligible, args.teacher_workers, draft_retaining_errors))
             missing_acps = [task for task, acp in acps.items() if acp is None]
             save(args.root / 'brew_status.json', {'complete_acps': len(eligible) - len(missing_acps),
                 'missing': missing_acps, 'errors': brew_errors, 'budget_resets': 0,

@@ -24,6 +24,8 @@ def test_trace_projection_matches_upstream(tmp_path):
 
 def test_official_prompt_is_imported_and_template_extracted():
     source = Path(__file__).resolve().parents[1] / 'sources/HKUDS-UpSkill'
+    if not source.exists():
+        source = Path('/data2/liyishan/SkillExpand-tb21/SkillExpand/sources/HKUDS-UpSkill')
     prompts = upstream_prompts(source)
     spec = importlib.util.spec_from_file_location('upstream', source / 'scripts/run_brew.py')
     module = importlib.util.module_from_spec(spec)
@@ -37,7 +39,7 @@ def test_official_prompt_is_imported_and_template_extracted():
 def test_teacher_executes_three_writes_and_reuses_durable_result(tmp_path, monkeypatch):
     import run_hkuds_upskill_tb21 as runner
     count = []
-    def complete(transport, payload):
+    def complete(transport, payload, diagnostics=None):
         count.append(payload)
         if len(count) == 1:
             calls = [{'id': str(i), 'type': 'function', 'function': {'name': 'Write',

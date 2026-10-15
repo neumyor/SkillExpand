@@ -81,3 +81,27 @@ def test_acp_rerun_discovery_keeps_original(tmp_path):
     assert reader.roles(rerun)['executor'] == 'model'
     traces = reader.traces(rerun.key, 'task')
     assert len(traces) == 1 and traces[0].accepted
+
+
+def test_baseline_recovery_selection_preserves_original_missing(tmp_path):
+    root = tmp_path / 'E9'; base = root / 'run'
+    write(tmp_path / 'runs/external_roots.json', [str(root)])
+    write(base / 'contract.json', {'student': 'model'})
+    unit = base / 'baseline/task'
+    write(unit / 'request.json', {'task': 'task'})
+    original = {'terminal_failure': True, 'reward': 0}
+    write(unit / 'rollout.json', original)
+    selected = base / 'baseline-recovery-20261015/task/rollout.json'
+    trajectory = selected.parent / 'physical_01/jobs/job/trial/agent/trajectory.json'
+    result = trajectory.parent.parent / 'result.json'
+    write(trajectory, {'steps': []})
+    write(result, {'verifier_result': {'rewards': {'reward': 1}}})
+    write(selected, {'trajectory_path': str(trajectory), 'raw_result_path': str(result),
+        'reward': 1, 'verifier_evidence': {'status': 'tests_executed'}})
+    write(unit / 'recovery_selection_20261015.json', {
+        'authorization': 'user_approved_plan_20261015', 'selected_rollout': str(selected)})
+    reader = Reader(tmp_path / 'runs')
+    run = next(r for r in reader.runs.values() if r.manifest.get('stage') == 'baseline')
+    assert next(iter(run.slots.values()))['reward'] == 1
+    assert reader.traces(run.key, 'task')[0].accepted
+    assert json.loads((unit / 'rollout.json').read_text()) == original

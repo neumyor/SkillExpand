@@ -5,6 +5,17 @@ from pathlib import Path
 from .data import Card, Run, Trace, mapping, pretty, sequence
 
 
+def evidence_path(value):
+    path = Path(value)
+    try:
+        relative = path.relative_to('/home/xinhaidong')
+    except ValueError:
+        return path
+    if relative.parts and relative.parts[0].startswith('agentbrew'):
+        return Path('/data2/liyishan/SkillExpand-tb21/SkillExpand/runs') / relative
+    return path
+
+
 def note_skill(note, version=None, provenance=None):
     return {"skill_id": note.get("note_key", "?"), "name": note.get("note_key", "?"),
             "version": version, "description": note.get("trigger_pattern", ""),
@@ -44,6 +55,12 @@ def index(reader, root, label=None):
             name = request.get("task") or path.parent.name
             run.tasks[name] = {"name": name, "text": ""}
             adopted = mapping(reader.optional(path.parent / "rollout.json", {}))
+            recovery = mapping(reader.optional(path.parent / 'recovery_selection_20261015.json', {}))
+            if recovery.get('authorization') == 'user_approved_plan_20261015':
+                selected = mapping(reader.optional(evidence_path(recovery['selected_rollout']), {}))
+                if (not selected.get('terminal_failure') and not selected.get('infra')
+                        and selected.get('verifier_evidence', {}).get('status') == 'tests_executed'):
+                    adopted = selected
             # The progress ledger is authoritative when a recovery replaces rollout.json.
             replicate_dir = path.parent.parent.name
             replicate = int(replicate_dir[3:]) if replicate_dir.startswith("rep") and replicate_dir[3:].isdigit() else 0
@@ -55,12 +72,12 @@ def index(reader, root, label=None):
                                "unit": str(path.parent), "record": adopted}
             result = adopted.get("raw_result_path")
             if result:
-                data = mapping(reader.optional(Path(result), {}, "result"))
+                data = mapping(reader.optional(evidence_path(result), {}, "result"))
                 run.slots[slot]["reward"] = mapping(mapping(data.get("verifier_result")).get("rewards")).get("reward")
             if not run.raw_model and adopted.get("trajectory_path"):
                 try:
                     import ijson
-                    with Path(adopted["trajectory_path"]).open("rb") as stream:
+                    with evidence_path(adopted["trajectory_path"]).open("rb") as stream:
                         agent = next(ijson.items(stream, "agent"), {})
                     run.raw_model = agent.get("model_name", "")
                 except (ImportError, OSError, ValueError):
@@ -104,12 +121,12 @@ def traces(reader, run, tid):
                                     "selected_keys": [mapping(n).get("key") for n in sequence(retrieval.get("selected"))]})}
         paths = set(unit.glob("physical*/jobs/*/*/agent/trajectory.json"))
         if adopted.get("trajectory_path"):
-            paths.add(Path(adopted["trajectory_path"]))
+            paths.add(evidence_path(adopted["trajectory_path"]))
         for path in sorted(paths):
             rows.append(Trace(str(path), tid, tid, unit.parent.name,
                               f"{path.parents[4].name}/{path.parents[1].name}", path,
                               path.parent.parent / "result.json", model=run.raw_model,
-                              accepted=str(path) == adopted.get("trajectory_path"),
+                              accepted=bool(adopted.get('trajectory_path')) and path == evidence_path(adopted['trajectory_path']),
                               origin=f"AgentBrew {run.manifest['stage']}", selection=selection,
                               exception=adopted.get("exception"), request_dir=unit))
     return rows
