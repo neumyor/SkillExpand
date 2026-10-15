@@ -12,20 +12,37 @@ EXTRA = launch.SMOKE + '_ssh_noninteractive_02'
 AMENDMENT = launch.REG / 'smoke_budget_amendment_20261014.json'
 
 
-def worker():
+def smoke_plan(python_runtime=False):
+    phase = 'smoke_python_runtime_03' if python_runtime else 'smoke_ssh_noninteractive_02'
+    amendment = (launch.REG / 'smoke_budget_amendment_20261015.json'
+                 if python_runtime else AMENDMENT)
+    return phase, launch.FULL + '_' + phase, amendment
+
+
+def confirmed_http(row):
+    path = Path(row['result']).parent / 'agent/raw_model_responses.jsonl'
+    if not path.exists():
+        return False
+    return any(json.loads(line).get('http_status') == 200
+               for line in path.read_text().splitlines() if line.strip())
+
+
+def worker(python_runtime=False):
     from audit_tb21_e10 import panel, audit
+    phase, extra, amendment = smoke_plan(python_runtime)
     try:
-        launch.run('smoke_ssh_noninteractive_02_config.json', 'smoke_ssh_noninteractive_02')
+        launch.run(phase + '_config.json', phase)
         original = panel(launch.ROOT / launch.SMOKE)
-        replacement = panel(launch.ROOT / EXTRA)
+        replacement = panel(launch.ROOT / extra)
         rows = [row for row in original if row['task'] == 'fix-git'] + replacement
         complete = (len(rows) == 2 and {row['task'] for row in rows}
                     == {'fix-git', 'configure-git-webserver'}
-                    and all(row['reward'] is not None for row in rows))
+                    and all(row['reward'] is not None and confirmed_http(row) for row in rows))
         launch.save(launch.REG / 'smoke_audit.json', {
             'complete': complete, 'rows': rows, 'not_formal_trials': True,
-            'provider_262144_context_proven': False, 'budget_amendment': str(AMENDMENT),
-            'historical_failed_rows': [row for row in original if row['task'] != 'fix-git']})
+            'provider_262144_context_proven': False, 'budget_amendment': str(amendment),
+            'historical_failed_rows': [row for row in original if row['task'] != 'fix-git']
+                + (panel(launch.ROOT / EXTRA) if python_runtime else [])})
         if not complete:
             raise ValueError('Authorized replacement smoke lacks real verifier outcomes')
         if (launch.ROOT / launch.FULL).exists():
@@ -43,17 +60,27 @@ def worker():
         raise
 
 
-def resume():
+def resume(python_runtime=False):
     from tbench_eval.agentbrew.processes import process_identity, process_matches
     from harbor.models.job.config import JobConfig
     from audit_tb21_e10 import panel
     from tencent_task_verifier_cache import load
     from tencent_pipeline_cache import load_bundle
+    phase, extra, amendment = smoke_plan(python_runtime)
 
     with (launch.REPO / 'runs/.tb21-worker-reservations.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if AMENDMENT.exists() or (launch.ROOT / EXTRA).exists() or (launch.ROOT / launch.FULL).exists():
+        if amendment.exists() or (launch.ROOT / extra).exists() or (launch.ROOT / launch.FULL).exists():
             raise SystemExit('Recovery already consumed or formal artifacts exist; inspect instead')
+        if python_runtime:
+            prior = json.loads(AMENDMENT.read_text())
+            assert prior['total_attempts'] == 2
+            previous_rows = panel(launch.ROOT / EXTRA)
+            assert len(previous_rows) == 1 and previous_rows[0]['reward'] is None
+            validation = json.loads((launch.REG / 'model_python_runtime_validation_20261014.json').read_text())
+            assert validation['validated'] is True and validation['model_calls'] == 0
+            assert len(validation['commands']) == 2
+            assert all(command['exit_code'] == 0 for command in validation['commands'])
         previous = {}
         for name in ['supervisor_identity.json', 'child.json']:
             identity = json.loads((launch.REG / name).read_text())
@@ -88,26 +115,32 @@ def resume():
         assert any(r['task'] == 'fix-git' and r['reward'] is not None for r in original)
         assert any(r['task'] == 'configure-git-webserver' and r['reward'] is None for r in original)
         cfg = json.loads((launch.REG / 'smoke_config.json').read_text())
-        cfg['job_name'] = EXTRA
+        cfg['job_name'] = extra
         cfg['datasets'][0]['task_names'] = ['configure-git-webserver']
         assert cfg['n_attempts'] == 1 and cfg['orchestrator']['retry']['max_retries'] == 0
         JobConfig.model_validate(cfg)
         for task, version in launch.CACHES.items():
             load(task, version)
         load_bundle('pipeline-uv095-py3139-v6')
-        launch.save(launch.REG / 'smoke_ssh_noninteractive_02_config.json', cfg)
-        launch.save(launch.REG / 'smoke_audit_before_ssh_noninteractive_02.json',
+        launch.save(launch.REG / (phase + '_config.json'), cfg)
+        launch.save(launch.REG / ('smoke_audit_before_' + phase + '.json'),
                     json.loads((launch.REG / 'smoke_audit.json').read_text()))
-        launch.save(AMENDMENT, {'authorization': 'User: E10启动一下吧; one failed-unit smoke then formal',
-            'task': 'configure-git-webserver', 'original_attempts': 1, 'additional_attempts': 1,
-            'total_attempts': 2, 'trial_retry': 0, 'formal_budget_changed': False,
+        launch.save(amendment, {'authorization': ('User 2026-10-15: 再试一下; third configure smoke then original gated formal'
+                if python_runtime else 'User: E10启动一下吧; one failed-unit smoke then formal'),
+            'task': 'configure-git-webserver', 'original_attempts': 2 if python_runtime else 1,
+            'additional_attempts': 1, 'total_attempts': 3 if python_runtime else 2,
+            'trial_retry': 0, 'formal_budget_changed': False,
             'budget_resets': 0, 'previous_identities': previous,
             'prior_reserved': reserved, 'total_reserved': reserved + 100,
             'other_reservations': active, 'original_results_preserved': True,
-            'execution_adaptation': 'verifier-only GIT_SSH_COMMAND BatchMode/ConnectTimeout and GIT_TERMINAL_PROMPT=0'})
+            'execution_adaptation': 'verifier-only noninteractive Git SSH; explicit Python transport bootstrap',
+            'prior_amendment': str(AMENDMENT) if python_runtime else None})
         manifest = json.loads((launch.REG / 'manifest.json').read_text())
-        manifest['smoke_budget_amendment'] = str(AMENDMENT)
-        manifest['execution_adaptations'].append('verifier-only noninteractive Git SSH')
+        manifest['smoke_budget_amendment'] = str(amendment)
+        adaptation = ('explicit Python model-transport bootstrap' if python_runtime
+                      else 'verifier-only noninteractive Git SSH')
+        if adaptation not in manifest['execution_adaptations']:
+            manifest['execution_adaptations'].append(adaptation)
         launch.save(launch.REG / 'manifest.json', manifest)
         env = dict(os.environ)
         env.update(OPENAI_API_KEY=env['TB21_EXECUTOR_API_KEY'], E2B_DOMAIN='ap-beijing.tencentags.com',
@@ -120,14 +153,16 @@ def resume():
                 launch.ADAPTER, '/data2/liyishan/tbench2-openclaw-min/framework/python',
                 str(launch.REPO / 'src'), '/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012/src']))
         with (launch.REG / 'supervisor.log').open('a') as log:
-            child = subprocess.Popen([launch.PYTHON, __file__, '--worker'], env=env,
+            child = subprocess.Popen([launch.PYTHON, __file__, '--worker']
+                + (['--python-runtime-smoke'] if python_runtime else []), env=env,
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         launch.save(launch.REG / 'supervisor_identity.json', process_identity(child.pid))
         launch.save(launch.REG / 'status.json', {'stage': 'E10', 'status': 'running',
-            'phase': 'smoke_ssh_noninteractive_02_starting', 'pid': child.pid, 'workers': 100})
+            'phase': phase + '_starting', 'pid': child.pid, 'workers': 100})
         print(json.dumps({'supervisor_pid': child.pid, 'reserved_total': reserved + 100,
                           'additional_smoke_attempts': 1, 'formal_started': False}))
 
 
 if __name__ == '__main__':
-    worker() if '--worker' in sys.argv else resume()
+    runtime = '--python-runtime-smoke' in sys.argv
+    worker(runtime) if '--worker' in sys.argv else resume(runtime)
