@@ -18,6 +18,41 @@ def save(path, value):
 
 
 class BoundedRecoveryTest(unittest.TestCase):
+    def test_length_is_teacher_reward_zero_without_changing_raw_or_student_score(self):
+        for field in ({'finish_reason': 'length'}, {'diagnostics': {'finish_reason': 'length'}}):
+            record = {'status': 'teacher_failed', **field}
+            original = json.dumps(record)
+            score = recovery.teacher_request_score(record)
+            self.assertEqual(score['reward'], 0)
+            self.assertEqual(score['reward_basis'], 'finish_reason_length')
+            self.assertEqual(json.dumps(record), original)
+            self.assertIsNone(runner.true_reward({**record, **score}))
+        for record in ({}, {'finish_reason': 'stop'}, {'diagnostics': None},
+                       {'status': 'transport_failed', 'error_type': 'RelayError'}):
+            self.assertIsNone(recovery.teacher_request_score(record)['reward'])
+
+    def test_length_keeps_failed_acp_and_does_not_dispatch_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = {'choices': [{'delta': {'reasoning_content': 'thinking'},
+                                 'finish_reason': 'length'}],
+                     'usage': {'completion_tokens': 65536}}
+            stream = b'data: ' + json.dumps(event).encode() + b'\n\ndata: [DONE]\n\n'
+            calls = []
+            def dispatch(body):
+                calls.append(body)
+                return iter([stream])
+            teacher = runner.ACPTeacher(SimpleNamespace(stream=dispatch), 'model', save)
+            unit = Path(tmp)
+            with self.assertRaises(ValueError):
+                teacher.run(unit, 'prompt')
+            raw = (unit / 'http-00.json').read_bytes()
+            self.assertEqual(recovery.teacher_request_score(json.loads(raw))['reward'], 0)
+            with self.assertRaises(ValueError):
+                teacher.run(unit, 'prompt')
+            self.assertEqual(len(calls), 1)
+            self.assertEqual((unit / 'http-00.json').read_bytes(), raw)
+            self.assertFalse((unit / 'acp.json').exists())
+
     def test_ten_turn_revision_preserves_history_and_never_dispatches_eleventh(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'run'; unit = root / 'brew/query-optimize'

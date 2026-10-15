@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 import sys
 
-from hkuds_e9_recovery import BASE, REPO, relocated, teacher_turn_limit, active_amendment
+from hkuds_e9_recovery import (BASE, REPO, relocated, teacher_turn_limit, active_amendment,
+                               teacher_request_score, LENGTH_REWARD_POLICY)
 
 
 def main():
@@ -34,7 +35,11 @@ def main():
         record = read(path)
         teacher_requests.append({'path': str(path.relative_to(root)),
             'status': record['status'], 'usage': record.get('usage'),
-            'error_type': record.get('error_type'), 'outcome_unknown': record.get('outcome_unknown')})
+            'error_type': record.get('error_type'), 'outcome_unknown': record.get('outcome_unknown'),
+            **teacher_request_score(record)})
+    length_rewards = {'policy': LENGTH_REWARD_POLICY,
+        'requests': [row for row in teacher_requests if row['reward_basis'] == 'finish_reason_length']}
+    save(root / 'teacher_length_rewards_20261015.json', length_rewards)
     processes = {}
     for name in ['supervisor_identity.json', 'child.json']:
         identity = read(out / name)
@@ -48,6 +53,8 @@ def main():
             'original_valid': sum(true_reward(value) is not None for value in original.values())},
         'brew_complete_acps': len(list((root / 'brew').glob('*/acp.json'))),
         'teacher_request_status': dict(Counter(row['status'] for row in teacher_requests)),
+        'teacher_reward_policy': LENGTH_REWARD_POLICY,
+        'teacher_length_reward_zero_count': len(length_rewards['requests']),
         'teacher_requests': teacher_requests, 'teacher_turn_limit': teacher_turn_limit(root), 'budget_resets': 0,
         'amendment': active_amendment(root)[1],
         'report_complete': read(root / 'audit.json').get('complete') if (root / 'audit.json').exists() else False}

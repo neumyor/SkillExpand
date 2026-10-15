@@ -93,3 +93,14 @@ failures remain excluded from recovery markers. Optional null choices/delta/
 tool_calls fields now parse as empty, with a focused regression test, but past
 TypeError records are not automatically reclassified or resampled. Five focused
 tests pass. Curate is still blocked until eligible ACP coverage is complete.
+
+On 2026-10-15 the user specified `finish_reason=length` as reward 0.
+E9 teacher request scores now apply that rule to explicit finish reasons in
+the original response or retained failure diagnostics. The checkpoint and final
+report expose reward 0 with basis `finish_reason_length`; a separate
+`run/teacher_length_rewards_20261015.json` records the policy and matching requests.
+Original HTTP JSON/SSE and token usage remain intact. Other teacher errors retain
+unknown reward. This teacher score is separate from student verifier scoring;
+it does not create an ACP, unblock completeness checks, authorize another
+request, or reset the cumulative ten-request budget. The stopped regex-chess
+http-02 request is covered retrospectively; no restart is implied.

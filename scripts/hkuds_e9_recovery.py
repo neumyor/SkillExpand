@@ -10,6 +10,21 @@ MISSING_BASELINE = ('reshard-c4-data', 'feal-differential-cryptanalysis')
 PATH_FIELDS = {'raw_result_path', 'trajectory_path', 'source_physical_result_path',
                'physical_dir', 'log_path'}
 TEN_TURN_AMENDMENT = 'recovery_ten_turn_amendment_20261015.json'
+LENGTH_REWARD_POLICY = {
+    'authorization': 'user_finish_reason_length_reward_zero_20261015',
+    'scope': 'E9 teacher requests',
+    'finish_reason': 'length', 'reward': 0,
+    'basis': 'finish_reason_length',
+    'student_verifier_reward': False,
+    'grants_acp_completion': False,
+    'grants_retry': False,
+}
+
+
+def teacher_request_score(record):
+    finish = record.get('finish_reason') or (record.get('diagnostics') or {}).get('finish_reason')
+    return {'finish_reason': finish, 'reward': 0 if finish == 'length' else None,
+            'reward_basis': LENGTH_REWARD_POLICY['basis'] if finish == 'length' else None}
 
 
 def active_amendment(root):

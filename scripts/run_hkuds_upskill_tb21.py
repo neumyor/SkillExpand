@@ -12,7 +12,7 @@ import sys
 import tomllib
 from hkuds_e9_recovery import (relocated, frozen_contract, install_adapter_paths,
     mark_task, allow_failed_record, create_amendment, active_amendment,
-    teacher_turn_limit, MISSING_BASELINE)
+    teacher_turn_limit, teacher_request_score, LENGTH_REWARD_POLICY, MISSING_BASELINE)
 
 UPSTREAM_REVISION = 'ed42b147411bde72620a9a61bc956693413b0607'
 FILES = {'/app/CLAUDE.md': 'CLAUDE.md',
@@ -451,6 +451,7 @@ def main():
                 'teacher_calls_during_test': 0,
                 'per_task': {t: {'serve': true_reward(serve[t]), 'vanilla': true_reward(vanilla[t])} for t in tasks}}
             report['usage'] = {'physical_rollouts': [], 'teacher_requests': []}
+            report['teacher_reward_policy'] = LENGTH_REWARD_POLICY
             for path in sorted(args.root.glob('*/*/physical_*/result.json')):
                 value = read(path)
                 report['usage']['physical_rollouts'].append({'path': str(path),
@@ -459,7 +460,8 @@ def main():
             for path in sorted(args.root.glob('**/http-*.json')):
                 value = read(path)
                 report['usage']['teacher_requests'].append({'path': str(path),
-                    'status': value['status'], 'usage': value.get('usage')})
+                    'status': value['status'], 'usage': value.get('usage'),
+                    **teacher_request_score(value)})
             report['ralph_missing'] = [t for t, status in ralph_status.items() if status == 'missing']
             save(args.root / 'report.json', report)
             save(args.root / 'audit.json', {'complete': complete_audit(report),
