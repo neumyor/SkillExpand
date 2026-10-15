@@ -9,6 +9,53 @@ OLD = Path('/home/xinhaidong/agentbrew-tb21-evo89-test89-20261012')
 MISSING_BASELINE = ('reshard-c4-data', 'feal-differential-cryptanalysis')
 PATH_FIELDS = {'raw_result_path', 'trajectory_path', 'source_physical_result_path',
                'physical_dir', 'log_path'}
+TEN_TURN_AMENDMENT = 'recovery_ten_turn_amendment_20261015.json'
+
+
+def active_amendment(root):
+    original_path = root / 'recovery_amendment_20261015.json'
+    original = json.loads(original_path.read_text())
+    path = root / TEN_TURN_AMENDMENT
+    if not path.exists():
+        return original_path, original
+    value = json.loads(path.read_text())
+    if (value.get('authorization') != 'user_approved_ten_turn_resume_20261015'
+            or value.get('teacher_turn_limit') != 10
+            or value.get('previous_teacher_turn_limit') != 8
+            or value.get('budget_resets') != 0
+            or value.get('teacher_tasks') != original['teacher_tasks']
+            or value.get('baseline_extra_dispatches') != original['baseline_extra_dispatches']
+            or value.get('previous_amendment') != original
+            or value.get('stop_on_first_failure') is not True):
+        raise ValueError('Ten-turn recovery amendment differs')
+    return path, value
+
+
+def teacher_turn_limit(root):
+    if (root / TEN_TURN_AMENDMENT).exists():
+        return active_amendment(root)[1]['teacher_turn_limit']
+    return 8
+
+
+def create_ten_turn_amendment(root, save):
+    original = create_amendment(root, save)
+    path = root / TEN_TURN_AMENDMENT
+    if path.exists():
+        return active_amendment(root)[1]
+    failures = {}
+    for task in original['teacher_tasks']:
+        records = sorted((root / 'brew' / task).glob('http-*.json'))
+        if len(records) > 8 or [p.name for p in records] != [f'http-{i:02d}.json' for i in range(len(records))]:
+            raise ValueError('Original teacher history exceeds the prior budget')
+        failures[task] = {p.name: json.loads(p.read_text()) for p in records
+                         if json.loads(p.read_text())['status'] != 'completed'}
+    value = {**original, 'authorization': 'user_approved_ten_turn_resume_20261015',
+        'teacher_turn_limit': 10, 'previous_teacher_turn_limit': 8,
+        'previous_amendment': original, 'teacher_failures': failures,
+        'scope': 'All E9 teacher units; cumulative physical request slots, no hidden retries',
+        'reason': 'User requested ten attempts and rerun after regex-chess provider 500'}
+    save(path, value)
+    return active_amendment(root)[1]
 
 
 def relocated(path):
@@ -98,13 +145,14 @@ def allow_failed_record(unit, path, body, turn):
     saved = json.loads(marker.read_text())
     if saved.get('request') != body or saved.get('spent_tool_turn') != turn:
         return False
-    amendment = unit.parents[1] / 'recovery_amendment_20261015.json'
-    if not amendment.exists():
+    root = unit.parents[1]
+    if not (root / 'recovery_amendment_20261015.json').exists():
         return False
-    value = json.loads(amendment.read_text())
+    amendment, value = active_amendment(root)
     record = value.get('teacher_failures', {}).get(unit.name, {}).get(path.name)
-    return (value.get('authorization') == 'user_approved_plan_20261015'
-            and value.get('teacher_turn_limit') == 8 and 0 <= turn < 8
+    return (value.get('authorization') in {'user_approved_plan_20261015',
+                                          'user_approved_ten_turn_resume_20261015'}
+            and 0 <= turn < value['teacher_turn_limit']
             and saved.get('amendment') == str(amendment)
             and record == json.loads(path.read_text()))
 
@@ -143,8 +191,7 @@ def create_amendment(root, save):
 
 
 def mark_task(root, task, save):
-    amendment_path = root / 'recovery_amendment_20261015.json'
-    amendment = json.loads(amendment_path.read_text())
+    amendment_path, amendment = active_amendment(root)
     if task not in amendment['teacher_tasks']:
         raise ValueError('Task outside authorized teacher recovery')
     for name, original in amendment['teacher_failures'][task].items():
@@ -161,7 +208,7 @@ def mark_task(root, task, save):
             if previous.get('request') != value['request'] or previous.get('spent_tool_turn') != turn:
                 raise ValueError('Existing teacher recovery marker differs')
             if previous.get('amendment') != str(amendment_path):
-                archive = marker.with_name('prior-20261015-' + marker.name)
+                archive = marker.with_name('prior-' + amendment_path.stem + '-' + marker.name)
                 if not archive.exists():
                     save(archive, previous)
                 save(marker, value)

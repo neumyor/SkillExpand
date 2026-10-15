@@ -11,7 +11,8 @@ import signal
 import sys
 import tomllib
 from hkuds_e9_recovery import (relocated, frozen_contract, install_adapter_paths,
-    mark_task, allow_failed_record, create_amendment, MISSING_BASELINE)
+    mark_task, allow_failed_record, create_amendment, active_amendment,
+    teacher_turn_limit, MISSING_BASELINE)
 
 UPSTREAM_REVISION = 'ed42b147411bde72620a9a61bc956693413b0607'
 FILES = {'/app/CLAUDE.md': 'CLAUDE.md',
@@ -94,15 +95,20 @@ class ACPTeacher:
         self.transport, self.model, self.save = transport, model, save
 
     def run(self, root, prompt):
+        limit = teacher_turn_limit(root.parents[1])
         settings = {'model': self.model, 'max_tokens': 65536, 'top_p': 0.95,
                     'top_k': 20, 'enable_thinking': True, 'reasoning_effort': 'max',
                     'chat_template_kwargs': {'preserve_thinking': True},
-                    'context_limit': 1048576, 'tool_turn_limit': 8}
+                    'context_limit': 1048576, 'tool_turn_limit': limit}
         settings_path = root / 'settings.json'
-        if settings_path.exists() and json.loads(settings_path.read_text()) != settings:
-            raise ValueError('Cached ACP model or request settings differ')
+        if settings_path.exists():
+            saved_settings = json.loads(settings_path.read_text())
+            compatible = (limit == 10 and saved_settings == {**settings, 'tool_turn_limit': 8})
+            if saved_settings != settings and not compatible:
+                raise ValueError('Cached ACP model or request settings differ')
         root.mkdir(parents=True, exist_ok=True)
-        self.save(settings_path, settings)
+        if not settings_path.exists():
+            self.save(settings_path, settings)
         final = root / 'acp.json'
         if final.exists():
             if (root / 'prompt.txt').read_text() != prompt:
@@ -114,8 +120,8 @@ class ACPTeacher:
             raise ValueError('Teacher prompt changed')
         prompt_path.write_text(prompt)
         records = sorted(root.glob('http-*.json'))
-        if len(records) > 8 or [p.name for p in records] != [f'http-{i:02d}.json' for i in range(len(records))]:
-            raise ValueError('Teacher request slots exceed or differ from the original eight-turn budget')
+        if len(records) > limit or [p.name for p in records] != [f'http-{i:02d}.json' for i in range(len(records))]:
+            raise ValueError('Teacher request slots exceed or differ from the authorized cumulative budget')
         messages = [{'role': 'user', 'content': prompt}]
         files = {}
         tools = [{'type': 'function', 'function': {'name': 'Write',
@@ -123,7 +129,7 @@ class ACPTeacher:
             'parameters': {'type': 'object', 'properties': {
                 'file_path': {'type': 'string'}, 'content': {'type': 'string'}},
                 'required': ['file_path', 'content']}}}]
-        for turn in range(8):
+        for turn in range(limit):
             path = root / f'http-{turn:02d}.json'
             body = {'model': self.model, 'messages': messages, 'tools': tools,
                     'stream': True, 'max_tokens': 65536, 'top_p': 0.95, 'top_k': 20,
@@ -312,7 +318,8 @@ def main():
                 return teacher.run(args.root / 'brew' / task, prompt)
             phase('brew')
             if args.bounded_recovery:
-                amendment = create_amendment(args.root, save)
+                create_amendment(args.root, save)
+                amendment = active_amendment(args.root)[1]
                 selected = amendment['teacher_tasks']
                 if args.recovery_task:
                     if args.recovery_task not in selected:

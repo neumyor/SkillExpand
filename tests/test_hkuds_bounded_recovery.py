@@ -18,6 +18,51 @@ def save(path, value):
 
 
 class BoundedRecoveryTest(unittest.TestCase):
+    def test_ten_turn_revision_preserves_history_and_never_dispatches_eleventh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'run'; unit = root / 'brew/query-optimize'
+            teacher = runner.ACPTeacher(None, 'model', save)
+            with patch.object(runner, 'complete_stream', side_effect=RuntimeError('old failure')):
+                with self.assertRaises(RuntimeError):
+                    teacher.run(unit, 'prompt')
+            body = json.loads((unit / 'http-00.json').read_text())['request']
+            for turn in range(8):
+                save(unit / f'http-{turn:02d}.json', {'status': 'teacher_failed',
+                     'error_type': 'ValueError', 'request': body})
+            tasks = ['query-optimize', *[f'task-{i}' for i in range(19)]]
+            old = {'authorization': 'user_approved_plan_20261015', 'teacher_turn_limit': 8,
+                   'budget_resets': 0, 'teacher_tasks': tasks, 'teacher_failures': {},
+                   'baseline_extra_dispatches': {t: 1 for t in recovery.MISSING_BASELINE},
+                   'stop_on_first_failure': True}
+            save(root / 'recovery_amendment_20261015.json', old)
+            history = {p: p.read_bytes() for p in unit.glob('http-*.json')}
+            settings = (unit / 'settings.json').read_bytes()
+            recovery.create_ten_turn_amendment(root, save)
+            recovery.mark_task(root, 'query-optimize', save)
+            calls = []
+            def completed(transport, request, diagnostics):
+                calls.append(request)
+                return {'role': 'assistant', 'content': '', 'tool_calls': [
+                    {'id': str(i), 'function': {'name': 'Write', 'arguments': json.dumps({
+                        'file_path': p, 'content': 'x' * 150})}}
+                    for i, p in enumerate(runner.FILES)]}, {}, 'tool_calls'
+            with patch.object(runner, 'complete_stream', side_effect=completed):
+                self.assertEqual(len(teacher.run(unit, 'prompt')), 3)
+            self.assertEqual(len(calls), 2)
+            self.assertTrue((unit / 'http-09.json').exists())
+            self.assertFalse((unit / 'http-10.json').exists())
+            self.assertEqual((unit / 'settings.json').read_bytes(), settings)
+            self.assertEqual(json.loads((root / 'recovery_amendment_20261015.json').read_text()), old)
+            for path, value in history.items():
+                self.assertEqual(path.read_bytes(), value)
+            with patch.object(runner, 'complete_stream', side_effect=AssertionError('cached')):
+                teacher.run(unit, 'prompt')
+            with self.assertRaises(ValueError):
+                recovery.mark_task(root, 'outside', save)
+            record = unit / 'http-08.json'
+            save(record, {'status': 'teacher_failed', 'error_type': 'ValueError', 'request': body})
+            self.assertFalse(recovery.allow_failed_record(unit, record, body, 8))
+
     def test_only_known_source_path_difference_is_accepted(self):
         saved = {'eval_config': {'source_path': str(recovery.OLD / 'config.yaml'), 'limit': 8}}
         current = {'eval_config': {'source_path': str(recovery.BASE / 'config.yaml'), 'limit': 8}}

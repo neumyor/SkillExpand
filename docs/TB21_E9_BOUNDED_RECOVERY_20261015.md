@@ -1,5 +1,21 @@
 # E9 bounded recovery, 2026-10-15
 
+## Ten-Turn Continuation
+
+The user subsequently authorized ten cumulative teacher requests per E9 unit
+and a rerun after the regex-chess provider 500. The independent
+`recovery_ten_turn_amendment_20261015.json` snapshots the existing twenty-task
+scope and all failed records at this authorization, including regex-chess/http-01.
+All E9 teacher units now have a cumulative limit of ten; old requests still count.
+Frozen contracts, old settings, original amendments and launch records remain
+unchanged. Model parameters and prompts remain frozen. There are no hidden
+transport retries. Baseline dispatch authorization remains one per missing task.
+
+Use Desktop action `hkuds-e9-ten-turn`, which runs the same locked launcher with
+`--ten-turn-recovery`. Its independent `ten_turn_recovery_launch_20261015.json`
+permits one continuation and rejects duplicate launch. New failures still stop
+the run; a heartbeat must never delete this launch record or mark new failures.
+
 The user approved recovery of the twenty pending Brew units within their original
 eight request slots, and one independent physical dispatch for each missing
 baseline: `reshard-c4-data` and `feal-differential-cryptanalysis`.

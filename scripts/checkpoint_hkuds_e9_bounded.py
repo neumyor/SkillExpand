@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sys
 
-from hkuds_e9_recovery import BASE, REPO, relocated
+from hkuds_e9_recovery import BASE, REPO, relocated, teacher_turn_limit, active_amendment
 
 
 def main():
@@ -48,8 +48,8 @@ def main():
             'original_valid': sum(true_reward(value) is not None for value in original.values())},
         'brew_complete_acps': len(list((root / 'brew').glob('*/acp.json'))),
         'teacher_request_status': dict(Counter(row['status'] for row in teacher_requests)),
-        'teacher_requests': teacher_requests, 'teacher_turn_limit': 8, 'budget_resets': 0,
-        'amendment': read(root / 'recovery_amendment_20261015.json'),
+        'teacher_requests': teacher_requests, 'teacher_turn_limit': teacher_turn_limit(root), 'budget_resets': 0,
+        'amendment': active_amendment(root)[1],
         'report_complete': read(root / 'audit.json').get('complete') if (root / 'audit.json').exists() else False}
     save(REPO / 'runs/tb21-e9-agentbrew-evo89-test89-20261012/checkpoint_bounded_recovery_20261015.json', checkpoint)
     print(json.dumps({key: value for key, value in checkpoint.items()

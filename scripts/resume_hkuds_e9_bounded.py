@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from hkuds_e9_recovery import REPO, BASE, create_amendment
+from hkuds_e9_recovery import REPO, BASE, create_amendment, create_ten_turn_amendment
 
 OUT = BASE / 'outputs/E9_hkuds_upskill_acp_evo89_test89_20261013'
 REG = REPO / 'runs/tb21-e9-agentbrew-evo89-test89-20261012'
@@ -29,15 +29,17 @@ def registration(status, phase, **extra):
 
 
 def main():
+    ten_turn = '--ten-turn-recovery' in sys.argv
+    revision = 'ten_turn_recovery_20261015' if ten_turn else 'bounded_recovery_20261015'
     if '--worker' in sys.argv:
         try:
-            with (OUT / 'bounded_recovery_20261015.log').open('a') as log:
+            with (OUT / (revision + '.log')).open('a') as log:
                 child = subprocess.Popen(command('--bounded-recovery'), cwd=BASE,
                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                     start_new_session=True)
             save(OUT / 'child.json', {**process_identity(child.pid),
-                'phase': 'bounded_recovery_20261015', 'command': command('--bounded-recovery')})
-            registration('running', 'bounded_recovery_20261015', driver_pid=child.pid)
+                'phase': revision, 'command': command('--bounded-recovery')})
+            registration('running', revision, driver_pid=child.pid)
             code = child.wait()
             registration('needs_audit' if code == 0 else 'needs_attention',
                          'bounded_recovery_finished', exit_code=code)
@@ -82,21 +84,30 @@ def main():
         # No marker or amendment is created until the zero-model preflight succeeds.
         subprocess.run(command('--recovery-preflight'), cwd=BASE, env=env, check=True)
         create_amendment(OUT / 'run', save)
-        if (OUT / 'bounded_recovery_launch_20261015.json').exists():
+        launch_path = OUT / ('ten_turn_recovery_launch_20261015.json' if ten_turn
+                             else 'bounded_recovery_launch_20261015.json')
+        if launch_path.exists():
             raise SystemExit('Bounded recovery already dispatched; inspect failure before any restart')
-        save(OUT / 'bounded_recovery_launch_20261015.json', {
-            'authorization': 'user_approved_plan_20261015', 'reserved': reserved + 64,
+        if ten_turn:
+            if not (OUT / 'bounded_recovery_launch_20261015.json').exists():
+                raise SystemExit('Ten-turn continuation requires the original recovery launch')
+            create_ten_turn_amendment(OUT / 'run', save)
+        save(launch_path, {
+            'authorization': ('user_approved_ten_turn_resume_20261015' if ten_turn
+                              else 'user_approved_plan_20261015'), 'reserved': reserved + 64,
+            'teacher_turn_limit': 10 if ten_turn else 8,
             'active_reservations': active, 'budget_resets': 0})
         for name in ['child.json', 'supervisor_identity.json']:
             if (OUT / name).exists():
-                save(OUT / ('before-bounded-20261015-' + name), read(OUT / name))
+                save(OUT / ('before-' + revision + '-' + name), read(OUT / name))
         with (OUT / 'supervisor.log').open('a') as log:
-            child = subprocess.Popen([sys.executable, __file__, '--worker'], cwd=BASE,
+            child = subprocess.Popen([sys.executable, __file__, '--worker',
+                *(['--ten-turn-recovery'] if ten_turn else [])], cwd=BASE,
                 env=env, stdin=subprocess.DEVNULL, stdout=log,
                 stderr=subprocess.STDOUT, start_new_session=True)
         save(OUT / 'supervisor_identity.json', process_identity(child.pid))
         save(REG / 'status.json', {'stage': 'E9', 'status': 'running', 'phase': 'bounded_recovery_starting',
-            'pid': child.pid, 'workers': 64, 'output_root': str(OUT)})
+            'pid': child.pid, 'workers': 64, 'output_root': str(OUT), 'recovery_revision': revision})
         print(json.dumps({'supervisor_pid': child.pid, 'total_reserved': reserved + 64}))
 
 
