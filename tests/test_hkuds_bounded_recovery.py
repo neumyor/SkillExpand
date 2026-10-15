@@ -80,6 +80,34 @@ class BoundedRecoveryTest(unittest.TestCase):
                 teacher.run(Path(tmp), 'prompt')
             self.assertFalse((Path(tmp) / 'http-01.json').exists())
 
+    def test_truncated_stream_retains_partial_response_and_usage(self):
+        from skillexpand.runtime.llm_relay import RelayError
+        with tempfile.TemporaryDirectory() as tmp:
+            event = {'choices': [{'delta': {'content': 'partial'}, 'finish_reason': None}],
+                     'usage': {'completion_tokens': 7}}
+            stream = b'data: ' + json.dumps(event).encode() + b'\n\n'
+            teacher = runner.ACPTeacher(SimpleNamespace(stream=lambda body: iter([stream])), 'model', save)
+            with self.assertRaises(RelayError):
+                teacher.run(Path(tmp), 'prompt')
+            record = json.loads((Path(tmp) / 'http-00.json').read_text())
+            self.assertEqual(record['diagnostics']['content'], 'partial')
+            self.assertEqual(record['usage']['completion_tokens'], 7)
+            self.assertFalse((Path(tmp) / 'acp.json').exists())
+
+    def test_malformed_tool_arguments_are_recorded_as_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = {'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'a',
+                'function': {'name': 'Write', 'arguments': '{broken'}}]},
+                'finish_reason': 'tool_calls'}]}
+            stream = b'data: ' + json.dumps(event).encode() + b'\n\ndata: [DONE]\n\n'
+            teacher = runner.ACPTeacher(SimpleNamespace(stream=lambda body: iter([stream])), 'model', save)
+            with self.assertRaises(ValueError):
+                teacher.run(Path(tmp), 'prompt')
+            record = json.loads((Path(tmp) / 'http-00.json').read_text())
+            self.assertEqual(record['status'], 'teacher_failed')
+            self.assertEqual(record['diagnostics']['finish_reason'], 'tool_calls')
+            self.assertFalse((Path(tmp) / 'acp.json').exists())
+
     def test_recovered_baseline_keeps_original_and_single_dispatch_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); task = recovery.MISSING_BASELINE[0]

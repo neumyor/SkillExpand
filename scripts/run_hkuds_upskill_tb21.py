@@ -79,6 +79,13 @@ def complete_stream(transport, payload, diagnostics=None):
         raise ValueError('Teacher stream did not complete within its output budget')
     if reasoning:
         message['reasoning_content'] = reasoning
+    for call in message['tool_calls']:
+        if call['function']['name'] != 'Write' or not call['id']:
+            raise ValueError('Unsupported or incomplete teacher tool')
+        arguments = json.loads(call['function']['arguments'])
+        if (not isinstance(arguments.get('file_path'), str)
+                or not isinstance(arguments.get('content'), str)):
+            raise ValueError('Teacher Write arguments must contain string path and content')
     return message, usage, finish
 
 
