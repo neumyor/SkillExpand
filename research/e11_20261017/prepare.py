@@ -129,6 +129,7 @@ def prepare(root, repository):
         'E2B_VALIDATE_API_KEY': 'false', 'TBENCH_TENCENT_ENV_FILE': '/dev/null',
         'TBENCH_PERSIST_SANDBOXES': '0', 'TBENCH_E2B_RELAY_TEMPLATE': 'sdt-28lb4d9k',
         'TBENCH_E2B_RELAY_USE_TEMPLATE_DEFAULT': '1',
+        'TBENCH_E2B_RELAY_METADATA_JSON': '{"x-mounts":"[]"}',
         'TBENCH_RELAY_PROVIDER_BASE': 'https://llm-center.modelbest.co/v1',
         'EXPE_LLM_TIMEOUT_SECONDS': '1800', 'EXPE_LLM_RETRIES': '0',
         'TBENCH_TOTAL_WORKER_LIMIT': '250', 'TBENCH_E2B_START_CONCURRENCY': '4',
