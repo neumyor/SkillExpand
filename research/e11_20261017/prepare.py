@@ -61,7 +61,9 @@ def prepare(root, repository):
     shutil.copyfile(remote / 'runs/skill-read-prompt-r2-20261015/frozen/library.json', frozen / 'seed_library.json')
     write(frozen / 'e10_config.json', config)
     tasks = []
-    for task_path in sorted((frozen / 'tasks').iterdir()):
+    task_paths = sorted(path for path in (frozen / 'tasks').iterdir()
+                        if path.is_dir() and (path / 'instruction.md').is_file())
+    for task_path in task_paths:
         instruction = (task_path / 'instruction.md').read_text()
         tasks.append({'task_name': task_path.name, 'instruction': instruction, 'source': 'E10 frozen task snapshot'})
     if len(tasks) != 89:
