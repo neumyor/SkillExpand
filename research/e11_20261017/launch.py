@@ -27,7 +27,7 @@ def main():
         'os.environ.update(TMPDIR=str(root/"tmp"),PYTHONPYCACHEPREFIX=str(root/"cache")); '
         '(root/"tmp").mkdir(exist_ok=True); '
         'log=(root/"supervisor.log").open("a"); '
-        'p=subprocess.Popen([sys.executable,str(root/"driver.py"),"--root",str(root)],'
+        'p=subprocess.Popen([sys.executable,str(root/"driver.py"),"evolve","--root",str(root)],'
         'stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,env=os.environ,start_new_session=True); '
         'stat=Path("/proc",str(p.pid),"stat").read_text(); fields=stat[stat.rfind(")")+2:].split(); '
         'record={"pid":p.pid,"start_time_ticks":fields[19],"boot_id":Path("/proc/sys/kernel/random/boot_id").read_text().strip(),"root":str(root),"no_restart":True}; '
