@@ -49,7 +49,7 @@ def prepare(root, repository):
                     runtime / 'framework/harbor', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     shutil.copyfile(remote / 'scripts/e10_bare_environment.py', runtime / 'tencent/e10_bare_environment.py')
     shutil.copyfile(remote / 'scripts/e10_bare_environment.py', root / 'e10_bare_environment.py')
-    for name in ('runner.py', 'study.py', 'watch_files.py', 'evidence.py'):
+    for name in ('runner.py', 'study.py', 'watch_files.py'):
         shutil.copyfile(repository / 'research/loading_factorial_20261015' / name, root / name)
     config = read(revision / 'config.json')
     shutil.copytree(config['datasets'][0]['path'], frozen / 'tasks',
@@ -109,8 +109,8 @@ def prepare(root, repository):
         'enable_thinking': True, 'preserve_thinking': True, 'interleaved_thinking': True,
         'enable_summarize': True, 'proactive_summarization_threshold': 8000,
         'concurrency': 100, 'agent_timeout_seconds': 7200, 'harbor_max_retries': 1,
-        'initial_package_source': 'frozen/seed_library.json',
-        'initial_synthesis_calls': 0, 'generation_passes': 0,
+        'initial_package_source': 'deepseek_from_public_contract_and_observations',
+        'initial_synthesis_calls': 'frozen_after_routing', 'generation_passes': 1,
         'evolution_passes': 1, 'qwen_development_slots': 0,
         'skill_count': 11, 'user_query_tail': '你可以读取 /opt/openclaw-skills 下的 skill。',
         'external_selector': False, 'automatic_reader': False, 'body_injection': False,

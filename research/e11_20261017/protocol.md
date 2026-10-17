@@ -16,26 +16,27 @@ successful evidence. There is no character truncation. Large inputs are split
 only at tool-step boundaries, preserving trial and step ordering.
 
 The eleven routing scopes are frozen from the accepted complete catalog. Only
-their IDs, names and descriptions are used for generic routing; the frozen
-seed packages provide the initial package state and are not treated as new
-task-specific evidence. DeepSeek assigns each
+their IDs, names and descriptions are used for generic routing. DeepSeek
+assigns each
 public task contract to one or more scopes using routing metadata only. This
 generation-only assignment is never supplied to the executor. All assigned
-observations are processed in deterministic task/trial/step order. The frozen
-seed package for each scope is then passed through one sequential native
+observations are processed in deterministic task/trial/step order. DeepSeek
+first generates a complete package for each scope from those public inputs;
+the frozen seed package is retained only as historical provenance. Each
+generated package is then passed through one sequential native
 SkillEditor.propose_package evolution pass.
 Model-generated packages are never manually edited. No-change retains the
 current package. Invalid generation stops the pipeline and retains evidence.
 Routing and editor requests have one call. No transport retries or budget
 resets.
 
-Development has zero Qwen slots, zero reward-based candidate selection, and
-one generic evolution pass from the frozen seed packages. For N frozen
-evidence chunks, routing has 89 calls and evolution has at most N calls, so the
-maximum is 89+N DeepSeek calls, frozen after mechanical chunking and before the
-first model call. The actual smaller assignment schedule is frozen after
-routing and before editing. Every scope must receive evidence or the run
-stops. Evolution uses full packages, optional resources and native package
+Development has zero Qwen slots, zero reward-based candidate selection, one
+DeepSeek initial package pass, and one generic evolution pass. For N frozen
+evidence chunks, routing has 89 calls and each pass has at most N calls, so the
+maximum is 89+2N DeepSeek calls, frozen after mechanical chunking and before
+the first model call. The actual smaller assignment schedule is frozen after
+routing and before synthesis. Every scope must receive evidence or the run
+stops. Both passes use full packages, optional resources and native package
 validation. Pattern claims are proposals, not empirical acceptance. There is
 no fresh development feedback. E10 remains historical input; no E11 final
 outcome is returned to generation, and there is no post-final optimization.
