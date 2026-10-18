@@ -4,7 +4,11 @@ import json
 from dataclasses import dataclass
 from langchain.schema import HumanMessage, SystemMessage
 from skillexpand import schema as S
-from skillexpand.l1.family_discovery import _extract_json
+from skillexpand.l1.family_discovery import (
+    _extract_json,
+    _json_candidates,
+    _load_json_candidate,
+)
 from skillexpand.l1.protocol import projection
 from skillexpand.l2 import structured_skill as SS
 
@@ -53,6 +57,35 @@ def validate_package_output(value):
                    for path, content in value["resources"].items())):
         raise ValueError("Package resources must map relative paths to text")
     return value
+
+
+def _extract_package_output(raw):
+    """Extract exactly one complete package response from model output.
+
+    Package responses have two mutually exclusive top-level shapes.  Looking
+    only at the first balanced object can silently drop a rationale that a
+    model emitted as an adjacent second object, so inspect every candidate and
+    accept only one object that already has a valid shape.
+    """
+    valid = []
+    seen = set()
+    for candidate in _json_candidates(raw):
+        value = _load_json_candidate(candidate)
+        if not isinstance(value, dict):
+            continue
+        keys = frozenset(value)
+        if keys not in (frozenset({"body", "resources", "rationale"}),
+                        frozenset({"no_change", "reason"})):
+            continue
+        marker = json.dumps(value, sort_keys=True, ensure_ascii=False)
+        if marker not in seen:
+            seen.add(marker)
+            valid.append(value)
+    if len(valid) != 1:
+        if not valid:
+            raise ValueError("Package response must be one complete JSON object with rationale")
+        raise ValueError("Package response contains multiple complete JSON objects")
+    return valid[0]
 
 EXISTING_RULE_CHECK = """CHECK EXISTING RULES BEFORE PROPOSING A CHANGE:
 For each suspected gap, locate all relevant CURRENT rules, including earlier steps,
@@ -189,11 +222,13 @@ class SkillEditor:
             "must not substitute for observed behavior. Resource paths are relative to SKILL.md; "
             "include commands needed to use any resource. Do not assume a resource exists unless "
             "it is supplied in the package. No resource language or checking template is required. "
-            'Return JSON only: {"body":"complete revised Skill", "resources":'
+            'Return exactly ONE top-level JSON object: {"body":"complete revised Skill", "resources":'
             '{"relative/path":"UTF-8 text"}, "rationale":"evidence-supported difference"}. '
             'Resources may be empty. Or return {"no_change":true,"reason":"..."}. '
             "These are mutually exclusive response shapes. A revision has exactly body, resources "
-            "and rationale; do not add no_change:false. A no-change response has exactly "
+            "and rationale in this same object; rationale is a required nonempty string. Do not "
+            "emit body/resources and rationale as separate adjacent JSON objects. Do not add "
+            "no_change:false. A no-change response has exactly "
             "no_change:true and a nonempty reason. Never omit resources (use {} when no files "
             "are needed) or invent a rationale merely to fill a required field. Preserve literal "
             "resource contents as JSON strings; escape newlines, quotes and backslashes with "
@@ -218,7 +253,7 @@ class SkillEditor:
         raw = self.editor_host.llm(prompt, replace_newline=False)
         size = sum(len(message.content) for message in prompt)
         try:
-            value = validate_package_output(_extract_json(raw))
+            value = validate_package_output(_extract_package_output(raw))
             if value.get("no_change") is True:
                 return EditOutcome(None, base_skill.body, REASON_NO_CHANGE, raw, prompt_chars=size)
             skill = S.Skill(base_skill.skill_id, base_skill.family_id, base_skill.version + 1,

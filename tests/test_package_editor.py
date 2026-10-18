@@ -78,6 +78,19 @@ def test_valid_output_preserves_exact_resource_and_rationale_strings():
     assert result.candidate.skill.provenance.rationale == value['rationale']
 
 
+def test_adjacent_package_objects_are_rejected_instead_of_merging_fields():
+    raw = json.dumps({'body': 'Revised', 'resources': {}}) + '\n' + json.dumps({
+        'rationale': 'Evidence'})
+    result = SkillEditor(SimpleNamespace(llm=lambda *a, **kw: raw),
+                         SimpleNamespace(version=0)).propose_package(base(), {})
+    assert not result.proposed
+    assert result.reason == 'invalid_proposal'
+
+    from skillexpand.l2.editor import _extract_package_output
+    with pytest.raises(ValueError, match='one complete JSON object'):
+        _extract_package_output(raw)
+
+
 def test_no_change_requires_its_own_complete_shape():
     result = editor({'no_change': True, 'reason': 'Current rules already cover the evidence'}).propose_package(base(), {})
     assert not result.proposed and result.reason == 'no_effective_change'

@@ -205,6 +205,13 @@ def evolve(root):
                 elif outcome.reason == 'no_effective_change':
                     status = 'no_change'
                 else:
+                    write(root / 'evolution_failure.json', {
+                        'scope_id': scope_id,
+                        'batch': index,
+                        'tasks': [r['task_name'] for r in batch],
+                        'reason': outcome.reason,
+                        'raw_llm_output': outcome.raw_llm_output,
+                    })
                     raise ValueError(f'Invalid package proposal for {scope_id}: {outcome.reason}')
                 ledger.append({'scope_id': scope_id, 'batch': index, 'tasks': [r['task_name'] for r in batch],
                                'status': status, 'body_chars': len(current.body),
