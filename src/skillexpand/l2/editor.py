@@ -236,7 +236,14 @@ class SkillEditor:
             "the output matches exactly one shape and every required field is present. "
             "Do not return routing, model or evaluation settings.\n"
             "OUTPUT JSON SCHEMA:\n" + json.dumps(PACKAGE_OUTPUT_SCHEMA, sort_keys=True)
-            + "\n" + EXISTING_RULE_CHECK
+            + "\n" + EXISTING_RULE_CHECK + "\n"
+            "FINAL OUTPUT GATE: After reasoning, emit the response object only. The first "
+            "non-whitespace character must be { and the last non-whitespace character must be }. "
+            "Do not emit Markdown fences, headings, shell commands, explanations, or a revised "
+            "Skill as free text outside JSON string values. Emit exactly one object matching one "
+            "of the two schemas above. For a revision, body, resources, and rationale must all be "
+            "keys of that same object; for no_change, only no_change and reason are allowed. "
+            "Escape newlines, quotes, and backslashes inside string values using JSON syntax."
         )
         payload = {
             "current_skill": {"key": base_skill.key, "description": base_skill.description,
