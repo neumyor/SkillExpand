@@ -34,11 +34,13 @@ class DeepSeekHost:
     def __init__(self, relay, root, label):
         self.relay, self.root, self.label = relay, Path(root), label
 
-    def llm(self, messages, **kwargs):
+    def llm(self, messages, json_output=False, **kwargs):
         payload = {'model': 'DEEPSEEK_up5zdj', 'stream': True,
                    'max_tokens': 65536, 'enable_thinking': True,
                    'messages': [{'role': 'system' if getattr(m, 'type', '') == 'system' else 'user',
                                  'content': m.content} for m in messages]}
+        if json_output:
+            payload['response_format'] = {'type': 'json_object'}
         number = len(list((self.root / 'generation_requests').glob('*.json')))
         request = self.root / 'generation_requests' / f'{number:04d}-{self.label}.json'
         write(request, payload)

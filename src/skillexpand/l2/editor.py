@@ -257,7 +257,7 @@ class SkillEditor:
     def propose_package(self, base_skill, evidence, feedback=()):
         """Native L2 package proposal; preserves routing and resource provenance."""
         prompt = self.build_package_prompt(base_skill, evidence, feedback)
-        raw = self.editor_host.llm(prompt, replace_newline=False)
+        raw = self.editor_host.llm(prompt, replace_newline=False, json_output=True)
         size = sum(len(message.content) for message in prompt)
         try:
             value = validate_package_output(_extract_package_output(raw))
