@@ -1,0 +1,72 @@
+{
+  "code_commit": "435ead5b30418318b87ff85e38af134114aba7d0",
+  "remote_branch": "origin/liyishan",
+  "diagnostic_directory": "/data2/liyishan/SkillExpand-tb21/SkillExpand/diagnostics/e11-package-tail-20261019",
+  "provider_response_model": "deepseek-v4-flash",
+  "total_real_calls": 3,
+  "retries": 0,
+  "schema_passed": 3,
+  "semantic_review_passed": 3,
+  "revision_proposals": 3,
+  "legal_no_change": 0,
+  "failures": 0,
+  "request_invariants": {
+    "non_message_request_parameters_unchanged": true,
+    "complete_json_data_message_unchanged": true,
+    "prompt_wrapper_replaced_only": true
+  },
+  "cases": [
+    {
+      "case": "case-01",
+      "source_request": "tb21-e11-qwen-bare-262144-20261018-rationale-retry/generation_requests/0020-router.json",
+      "schema_passed": true,
+      "no_change": false,
+      "semantic_review": {
+        "passed": true,
+        "skill_revision": true,
+        "direct_historical_task_answer": false,
+        "copied_complete_historical_solution": false,
+        "notes": "Adds reusable Python/Cython build, wheel payload, NumPy API compatibility and neutral-directory installed-extension checks. Does not deliver the historical package implementation."
+      }
+    },
+    {
+      "case": "case-02",
+      "source_request": "tb21-e11-qwen-bare-262144-20261018-json-gate-retry/generation_requests/0016-router.json",
+      "schema_passed": true,
+      "no_change": false,
+      "semantic_review": {
+        "passed": true,
+        "skill_revision": true,
+        "direct_historical_task_answer": false,
+        "copied_complete_historical_solution": false,
+        "notes": "Adds reusable interpreter/build-backend checks, targeted compatibility edits, syntax checks, extension payload inspection and installed import checks. Keeps the output as a Skill package rather than a historical task solution."
+      }
+    },
+    {
+      "case": "case-03",
+      "source_request": "generic-skill-evolution-20261014/development/candidate-001/generation_attempts/001/request.json",
+      "schema_passed": true,
+      "no_change": false,
+      "semantic_review": {
+        "passed": true,
+        "skill_revision": true,
+        "direct_historical_task_answer": false,
+        "copied_complete_historical_solution": false,
+        "notes": "Revises async API, concurrency, cancellation and signal-testing guidance and supplies check_run_tasks.py. The resource references the public run_tasks contract and /app/run.py path, but tests an imported implementation instead of providing that implementation. The generated checker was inspected, not executed or accepted as a benchmark verifier."
+      }
+    }
+  ],
+  "validation": {
+    "local_focused_tests": "42 passed, 2 skipped",
+    "diagnostic_checkout_focused_tests": "24 passed",
+    "local_worktree_clean": true,
+    "remote_branch_verified": true
+  },
+  "limits": [
+    "Three successful diagnostic calls do not establish long-term stability.",
+    "Revision proposals are not measured evolution improvements.",
+    "Generated resources were not run against task implementations.",
+    "Original E11 and failed runs were preserved; routing and initial generation were not rerun.",
+    "Formal Qwen 267-slot evaluation was not started."
+  ]
+}
