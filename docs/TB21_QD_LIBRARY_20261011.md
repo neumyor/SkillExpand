@@ -160,3 +160,13 @@ and final frozen panel remain pending. E3_FINAL/E4/E6_FINAL retain complete
 - Credentials are process-only. The manifest records role names and provenance paths, never key values.
 
 The initial run is started only after the prepare audit confirms exactly 178 cards and 89 source cards per model. Scores are accepted only from the earliest valid identity, trajectory, Skill activation/body, and real verifier reward; timeout, empty, corrupt, and incomplete requests remain unresolved.
+
+## Final Closure 2026-10-14
+
+Corrected source: `runs/tb21-qwen-deepseek-library-qwen-selector-20261011/revisions/178-cards-v1`. Independent final panel: `runs/tb21-qwen-deepseek-library-qwen-selector-20261011/revisions/178-cards-v1-final-empirical-20261013`.
+
+Generation-source, initial267 execution, and 178-card/534-attempt L2 integration audits pass. Round1 reviewed23 batches and approved8 updates. Final frozen23 heads exactly match skills.jsonl, including15 v0 retained heads. Final audit is complete with267 unique real results and no rejected slots.
+
+Initial pass@1/pass@3:43.82%/58.43%; final:44.57%/62.92%. Descriptive differences:+0.75pp/+4.49pp, with changed infrastructure and no causal or independent-generalization claim. See final initial_final_task_changes.md for all89 task changes and final_checkpoint_20261014.json for cache/recovery evidence.
+
+C4 request004 executes real verifier tests with repaired offline data cache and reward0; historical setup failures are preserved. Final reservation is0; do not rerun accepted slots. E3_FINAL/E4/E6_FINAL stay complete; E5_FINAL stays user-stopped. E9 remains separately unfinished.

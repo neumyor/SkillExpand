@@ -55,6 +55,10 @@ elif sys.argv[1] in ('recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-ca
 elif sys.argv[1] == 'resume-e9':
     sys.argv = [repo + '/scripts/resume_tb21_e9.py']
     runpy.run_path(sys.argv[0], run_name='__main__')
+elif sys.argv[1] in ('hkuds-e9-scoped', 'hkuds-e9-resume'):
+    resume_existing = sys.argv[1] == 'hkuds-e9-resume'
+    sys.argv = [repo + '/scripts/resume_hkuds_e9_scoped.py'] + (['--resume-existing'] if resume_existing else [])
+    runpy.run_path(sys.argv[0], run_name='__main__')
 elif sys.argv[1] in ('hkuds-e9-bounded', 'hkuds-e9-ten-turn', 'hkuds-e9-after-length'):
     extra = (['--continue-after-length'] if sys.argv[1] == 'hkuds-e9-after-length' else
              ['--ten-turn-recovery'] if sys.argv[1] == 'hkuds-e9-ten-turn' else [])
@@ -63,6 +67,49 @@ elif sys.argv[1] in ('hkuds-e9-bounded', 'hkuds-e9-ten-turn', 'hkuds-e9-after-le
 elif sys.argv[1] == 'hkuds-e9':
     sys.argv = [repo + '/scripts/launch_hkuds_upskill_tb21.py']
     runpy.run_path(sys.argv[0], run_name='__main__')
+elif sys.argv[1] == 'final-e7':
+    import fcntl, subprocess, time
+    from pathlib import Path
+    from run_tb21_empirical import active_worker_reservation
+    root = Path(repo) / 'runs/tb21-qwen-deepseek-library-qwen-selector-20261011/revisions/178-cards-v1'
+    out = Path(repo) / 'runs/tb21-qwen-deepseek-library-qwen-selector-20261011/revisions/178-cards-v1-final-empirical-20261013'
+    os.environ.update(PYTHONPATH=repo + '/src', TB21_TOTAL_WORKER_LIMIT='250', TBENCH_RELAY_MAX_CONCURRENCY='50',
+                      TB21_EXECUTOR_API_KEY=env['TB21_EXECUTOR_API_KEY'],
+                      TB21_TASK_VERIFIER_CACHES=json.dumps({'reshard-c4-data': 'repair-20261013-v4'}))
+    sys.path.insert(0, '/data2/liyishan/tb21-tencent-skill/python')
+    from tencent_task_verifier_cache import load as load_verifier_cache
+    load_verifier_cache('reshard-c4-data', 'repair-20261013-v4')
+    command = [sys.executable, repo + '/scripts/run_tb21_empirical.py', '--source', str(root), '--run-dir', str(out),
+               '--workers', '64', '--stage', 'QD_FINAL', '--executor-model', 'qwen3.6-flash-distill',
+               '--selector-model', 'qwen3.6-flash-distill']
+    with (Path(repo) / 'runs/.tb21-worker-reservations.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for proc in Path('/proc').iterdir():
+            if not proc.name.isdigit() or int(proc.name) == os.getpid():
+                continue
+            try:
+                argv = proc.joinpath('cmdline').read_bytes().decode().split('\0')
+            except (OSError, UnicodeError):
+                continue
+            if '-c' not in argv and str(out) in ' '.join(argv) and any(
+                    'python' in a or 'harbor' in a for a in argv[:1]):
+                raise SystemExit('Existing E7 final execution process blocks resume')
+        reserved, _ = active_worker_reservation(Path(repo) / 'runs', out)
+        if reserved + 64 > 250: raise SystemExit(f'Capacity unavailable: {reserved}+64')
+        with (out.parent / 'final-driver.log').open('a') as log:
+            child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        from summarize_tb21_empirical import read, write
+        write(out / f'cache_resume-{time.time_ns()}.json', {
+            'previous_status': read(out / 'status.json'), 'pid': child.pid,
+            'previous_requests': {slot: len(list((out / 'slots' / slot / 'requests').iterdir()))
+                                  for slot in ('73-1', '73-3')},
+            'max_new_requests_per_missing_slot': 3, 'budget_resets': 0,
+            'cache_versions': json.loads(os.environ['TB21_TASK_VERIFIER_CACHES']),
+            'reason': 'Enable existing validated C4 fixture only at verifier start',
+            'total_reserved': reserved + 64})
+        write(out / 'status.json', {'stage': 'QD_FINAL_empirical', 'status': 'running',
+            'phase': 'c4_cache_resume_starting', 'workers': 64, 'pid': child.pid})
+        print(json.dumps({'pid': child.pid, 'reserved': reserved + 64, 'run_dir': str(out)}))
 elif sys.argv[1] in ('resume-e7', 'l2-e7'):
     import fcntl, subprocess, time
     from pathlib import Path
@@ -133,7 +180,7 @@ else:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7', 'l2-e7', 'hkuds-e9', 'hkuds-e9-bounded', 'hkuds-e9-ten-turn', 'hkuds-e9-after-length',
+    parser.add_argument('action', choices=['probe', 'resume-e9', 'resume-e7', 'l2-e7', 'final-e7', 'hkuds-e9', 'hkuds-e9-scoped', 'hkuds-e9-resume', 'hkuds-e9-bounded', 'hkuds-e9-ten-turn', 'hkuds-e9-after-length',
                                          'recover-e7-verifiers', 'prepare-c4-cache', 'validate-c4-cache', 'reset-e8'])
     args = parser.parse_args()
     desktop = Path.home() / 'Desktop'
@@ -163,7 +210,8 @@ if __name__ == '__main__':
         if os.getenv('TB21_RECOVERY_SLOTS'):
             env['TB21_RECOVERY_SLOTS'] = os.environ['TB21_RECOVERY_SLOTS']
     command = '/data2/liyishan/SkillExpand-tb21/SkillExpand/.venv2/bin/python -c ' + shlex.quote(REMOTE) + ' ' + args.action
-    result = subprocess.run(['ssh', 'jinan40', command], input=json.dumps(env),
+    result = subprocess.run(['ssh', '-o', 'ConnectTimeout=12', '-o', 'ServerAliveInterval=5',
+                             '-o', 'ServerAliveCountMax=2', 'jinan40', command], input=json.dumps(env),
                             text=True, capture_output=True)
     output = result.stdout + result.stderr
     for value in (env['TB21_EXECUTOR_API_KEY'], env['TB21_METHOD_API_KEY'], env['E2B_API_KEY']):

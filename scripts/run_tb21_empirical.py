@@ -113,7 +113,8 @@ def prepare_final(source, root, workers, stage, executor, selector):
     tasks = read(source / 'tasks.json')
     if len(tasks) != 89 or len({t['task_name'] for t in tasks}) != 89:
         raise ValueError('Expected 89 unique tasks')
-    roles = {'E3_FINAL': ('DEEPSEEK_up5zdj', 'DEEPSEEK_up5zdj'),
+    roles = {'QD_FINAL': ('qwen3.6-flash-distill', 'qwen3.6-flash-distill'),
+             'E3_FINAL': ('DEEPSEEK_up5zdj', 'DEEPSEEK_up5zdj'),
              'E4': ('qwen3.6-flash-distill', 'DEEPSEEK_up5zdj'),
              'E5_FINAL': ('qwen3.6-flash-distill', 'qwen3.6-flash-distill'),
              'E6_FINAL': ('qwen3.6-flash-distill', 'qwen3.6-flash-distill')}
@@ -377,7 +378,7 @@ def main():
     parser.add_argument('--source', required=True, type=Path)
     parser.add_argument('--run-dir', required=True, type=Path)
     parser.add_argument('--workers', type=int, default=16)
-    parser.add_argument('--stage', choices=('E1', 'E4', 'E3_FINAL', 'E5_FINAL', 'E6_FINAL'), default='E1')
+    parser.add_argument('--stage', choices=('E1', 'E4', 'E3_FINAL', 'E5_FINAL', 'E6_FINAL', 'QD_FINAL'), default='E1')
     parser.add_argument('--executor-model')
     parser.add_argument('--selector-model')
     parser.add_argument('--baseline-source', type=Path)
