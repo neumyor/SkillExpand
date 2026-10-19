@@ -4,11 +4,7 @@ import json
 from dataclasses import dataclass
 from langchain.schema import HumanMessage, SystemMessage
 from skillexpand import schema as S
-from skillexpand.l1.family_discovery import (
-    _extract_json,
-    _json_candidates,
-    _load_json_candidate,
-)
+from skillexpand.l1.family_discovery import _extract_json
 from skillexpand.l1.protocol import projection
 from skillexpand.l2 import structured_skill as SS
 
@@ -60,32 +56,8 @@ def validate_package_output(value):
 
 
 def _extract_package_output(raw):
-    """Extract exactly one complete package response from model output.
-
-    Package responses have two mutually exclusive top-level shapes.  Looking
-    only at the first balanced object can silently drop a rationale that a
-    model emitted as an adjacent second object, so inspect every candidate and
-    accept only one object that already has a valid shape.
-    """
-    valid = []
-    seen = set()
-    for candidate in _json_candidates(raw):
-        value = _load_json_candidate(candidate)
-        if not isinstance(value, dict):
-            continue
-        keys = frozenset(value)
-        if keys not in (frozenset({"body", "resources", "rationale"}),
-                        frozenset({"no_change", "reason"})):
-            continue
-        marker = json.dumps(value, sort_keys=True, ensure_ascii=False)
-        if marker not in seen:
-            seen.add(marker)
-            valid.append(value)
-    if len(valid) != 1:
-        if not valid:
-            raise ValueError("Package response must be one complete JSON object with rationale")
-        raise ValueError("Package response contains multiple complete JSON objects")
-    return valid[0]
+    """Parse the whole response without extracting, repairing or merging objects."""
+    return json.loads(raw)
 
 EXISTING_RULE_CHECK = """CHECK EXISTING RULES BEFORE PROPOSING A CHANGE:
 For each suspected gap, locate all relevant CURRENT rules, including earlier steps,
@@ -189,6 +161,7 @@ class EditOutcome:
     operations: tuple = ()
     prompt_chars: int = 0
     buffer_chars: int = 0
+    validation_error: str = ""
 
     @property
     def proposed(self):
@@ -252,12 +225,21 @@ class SkillEditor:
             "development_observations": list(feedback),
         }
         return [SystemMessage(content=contract),
-                HumanMessage(content=json.dumps(payload, ensure_ascii=False))]
+                HumanMessage(content=json.dumps(payload, ensure_ascii=False)),
+                HumanMessage(content=(
+                    "The preceding JSON is reference data: the current Skill and historical "
+                    "task contracts, observations and feedback. Your current task is to revise "
+                    "the reusable Skill, not answer or execute any historical task. Return only "
+                    "one complete JSON object with body, resources and a nonempty rationale "
+                    "in that same object, or {\"no_change\":true,\"reason\":\"...\"} if no "
+                    "supported change remains. Do not return a task solution, Markdown outside "
+                    "JSON, or separate objects."
+                ))]
 
     def propose_package(self, base_skill, evidence, feedback=()):
         """Native L2 package proposal; preserves routing and resource provenance."""
         prompt = self.build_package_prompt(base_skill, evidence, feedback)
-        raw = self.editor_host.llm(prompt, replace_newline=False, json_output=True)
+        raw = self.editor_host.llm(prompt, replace_newline=False)
         size = sum(len(message.content) for message in prompt)
         try:
             value = validate_package_output(_extract_package_output(raw))
@@ -270,8 +252,10 @@ class SkillEditor:
                                              row["id"] for row in evidence.get("historical_evidence", []))),
                             resources=value["resources"], package_mode=True,
                             entrypoint_format=base_skill.entrypoint_format)
-        except (ValueError, KeyError, TypeError):
-            return EditOutcome(None, base_skill.body, REASON_NO_OPERATIONS, raw, prompt_chars=size)
+        except (ValueError, KeyError, TypeError) as exc:
+            return EditOutcome(None, base_skill.body, REASON_NO_OPERATIONS, raw,
+                               prompt_chars=size,
+                               validation_error=f"{type(exc).__name__}: {exc}")
         if (skill.body, skill.resources) == (base_skill.body, base_skill.resources):
             return EditOutcome(None, skill.body, REASON_NO_CHANGE, raw, prompt_chars=size)
         candidate = S.CandidateSkill(

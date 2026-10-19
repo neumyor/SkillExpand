@@ -42,6 +42,7 @@ def test_public_contract_is_data_and_language_is_not_prescribed():
     a = ed.build_package_prompt(base(), {'public_contract': 'Transform CSV records'})
     b = ed.build_package_prompt(base(), {'public_contract': 'Serve an HTTP endpoint'})
     assert a[0].content == b[0].content
+    assert a[2].content == b[2].content
     assert 'Transform CSV records' not in a[0].content
     assert json.loads(a[1].content)['frozen_evidence']['public_contract'] == 'Transform CSV records'
 
@@ -64,6 +65,7 @@ def test_strict_output_validator_diagnoses_missing_or_ambiguous_semantics(value,
     result = editor(value).propose_package(base(), {})
     assert not result.proposed and result.reason == 'invalid_proposal'
     assert result.raw_llm_output == before
+    assert message in result.validation_error
 
 
 def test_valid_output_preserves_exact_resource_and_rationale_strings():
@@ -87,8 +89,62 @@ def test_adjacent_package_objects_are_rejected_instead_of_merging_fields():
     assert result.reason == 'invalid_proposal'
 
     from skillexpand.l2.editor import _extract_package_output
-    with pytest.raises(ValueError, match='one complete JSON object'):
+    assert 'JSONDecodeError: Extra data' in result.validation_error
+    with pytest.raises(json.JSONDecodeError, match='Extra data'):
         _extract_package_output(raw)
+
+
+@pytest.mark.parametrize('wrap', [
+    lambda text: '```json\n' + text + '\n```',
+    lambda text: 'Here is the result:\n' + text,
+    lambda text: text + '\nDone.',
+    lambda text: text + '\n' + text,
+    lambda text: 'The working sequence is:\n```bash\necho solution\n```',
+    lambda text: text[:-1] + ',}',
+])
+def test_package_rejects_non_json_or_extra_content_without_retry(wrap):
+    raw = wrap(json.dumps({'body': 'Revised', 'resources': {}, 'rationale': 'Evidence'}))
+    calls = []
+
+    def llm(messages, replace_newline=True):
+        calls.append(messages)
+        assert replace_newline is False
+        return raw
+
+    result = SkillEditor(SimpleNamespace(llm=llm), SimpleNamespace(version=0)).propose_package(base(), {})
+    assert len(calls) == 1
+    assert result.reason == 'invalid_proposal' and result.candidate is None
+    assert result.raw_llm_output == raw
+    assert result.validation_error.startswith('JSONDecodeError:')
+
+
+def test_prompt_preserves_full_data_order_and_ends_with_generic_instruction():
+    evidence = {'historical_evidence': [{'id': 'trace', 'observation': 'X' * 20000}],
+                'public_contract': 'UNIQUE_TASK_INSTRUCTION'}
+    feedback = [{'observation': 'Y' * 10000}]
+    prompt = editor({}).build_package_prompt(base(), evidence, feedback)
+    assert [message.type for message in prompt] == ['system', 'human', 'human']
+    payload = json.loads(prompt[1].content)
+    assert payload['frozen_evidence'] == evidence
+    assert list(payload['frozen_evidence']) == list(evidence)
+    assert payload['development_observations'] == feedback
+    assert payload['current_skill']['body'] == base().body
+    assert payload['current_skill']['resources'] == base().resources
+    assert 'not answer or execute any historical task' in prompt[-1].content
+    assert 'rationale' in prompt[-1].content and 'same object' in prompt[-1].content
+    assert 'UNIQUE_TASK_INSTRUCTION' not in prompt[0].content + prompt[-1].content
+
+
+def test_package_supports_original_host_signature_and_whitespace():
+    value = {'body': 'Revised', 'resources': {}, 'rationale': 'Evidence'}
+
+    def llm(messages, replace_newline=True):
+        assert replace_newline is False
+        return '\n  ' + json.dumps(value) + '\n'
+
+    result = SkillEditor(SimpleNamespace(llm=llm), SimpleNamespace(version=0)).propose_package(base(), {})
+    assert result.proposed
+    assert result.validation_error == ''
 
 
 def test_no_change_requires_its_own_complete_shape():
@@ -99,7 +155,7 @@ def test_no_change_requires_its_own_complete_shape():
 def test_prompt_carries_the_same_exact_schema_as_the_offline_validator():
     contract = editor({}).build_package_prompt(base(), {})[0].content
     assert json.dumps(PACKAGE_OUTPUT_SCHEMA, sort_keys=True) in contract
-    assert 'do not add no_change:false' in contract
+    assert 'do not add no_change:false' in contract.lower()
     assert 'Never omit resources' in contract
     assert 'invent a rationale' in contract
 

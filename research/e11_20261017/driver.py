@@ -212,6 +212,7 @@ def evolve(root):
                         'batch': index,
                         'tasks': [r['task_name'] for r in batch],
                         'reason': outcome.reason,
+                        'validation_error': outcome.validation_error,
                         'raw_llm_output': outcome.raw_llm_output,
                     })
                     raise ValueError(f'Invalid package proposal for {scope_id}: {outcome.reason}')
